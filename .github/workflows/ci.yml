@@ -216,6 +216,22 @@ jobs:
       signpath_api_token: ${{ secrets.SIGNPATH_API_TOKEN }}
       truehdr_runtime_token: ${{ secrets.TRUEHDR_RUNTIME_TOKEN }}
 
+  build-archlinux:
+    name: Arch Linux
+    needs:
+      - release-candidate
+    # Validate the Linux/Arch build on PRs and on release pushes. This job is
+    # intentionally NOT a dependency of the `release` job, so a Linux build
+    # failure surfaces bitrot without blocking the Windows release artifact.
+    if: github.event_name != 'push' || needs.release-candidate.outputs.should_release == 'true'
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/ci-archlinux.yml
+    with:
+      release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
+      release_version: ${{ needs.release-candidate.outputs.release_version || '0.0.0' }}
+
   release:
     name: Release
     if: needs.release-candidate.outputs.should_release == 'true'

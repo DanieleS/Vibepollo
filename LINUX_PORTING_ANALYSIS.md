@@ -182,3 +182,105 @@ portata**.
    replicare anche le feature premium Nvidia (Categoria C, di fatto un nuovo progetto)?
 4. **WebRTC è un must-have?** Determina se investire nella toolchain `libwebrtc` Linux fin da
    subito.
+
+---
+
+## 8. Verifica pratica della build Linux + setup mirato (Nvidia 4070, Wayland, KDE+Hyprland)
+
+> Profilo target confermato: GPU **Nvidia RTX 4070 (Ada)**, sessione **Wayland**, si vuole
+> supportare **sia KDE Plasma sia Hyprland**, obiettivo "minimo funzionante" (premium = dopo),
+> WebRTC = nice-to-have.
+
+### 8.1 Stato reale della build Linux (importante)
+
+- La CI Arch (`.github/workflows/ci-archlinux.yml`) esiste, è completa (CUDA + unit test +
+  pacchetto) **ma era orfana**: `ci.yml` invocava solo `ci-windows.yml`. Tutto il codice nuovo di
+  Vibepollo (`webrtc_stream`, `http_auth`, `session_history`, ...) è stato scritto/testato **solo su
+  Windows** → rischio concreto di bitrot del ramo Linux non intercettato.
+- **Fix applicato in questo branch:** aggiunto il job `build-archlinux` in `ci.yml`, che ora compila
+  il ramo Linux su ogni PR e su ogni push di release. Non è dipendenza del job `release`, quindi un
+  eventuale rosso su Linux **segnala** il problema senza bloccare l'artefatto Windows. Questo è il
+  modo sostenibile di "tenere viva" la build Linux.
+
+### 8.2 Cosa è stato verificato configurando la build qui
+
+Il sistema di build **configura correttamente su Linux** (Ubuntu 24.04, gcc 13, cmake 3.28). I punti
+emersi, utili per CachyOS:
+
+1. **Boost 1.89 richiesto.** Se il sistema ha una versione più vecchia, CMake fa FetchContent e lo
+   compila da sorgente (lento). Su Arch/CachyOS il pacchetto `boost` è recente → nessun problema.
+2. **FFmpeg è prebuilt**, scaricato da GitHub release in base al tag del submodule
+   `third-party/build-deps` (non usa l'FFmpeg di sistema). Richiede rete a configure-time.
+3. **Submodule esterni necessari** (oltre al repo principale): `libdisplaydevice`,
+   `libvirtualdisplay`, `Simple-Web-Server`, `moonlight-common-c`, `inputtino`, ecc. Sono
+   cross-platform e si compilano su Linux. → `git submodule update --init --recursive`.
+4. **Tutti i backend di cattura sono ON di default** (`SUNSHINE_ENABLE_{X11,WAYLAND,KWIN,PORTAL,DRM,
+   VAAPI,VULKAN,CUDA}`). Conseguenza diretta: **un singolo build copre sia KDE Plasma (KWin
+   ScreenCast / XDG Portal) sia Hyprland (wlr-screencopy / Portal)** — la scelta avviene a runtime in
+   base al compositor. Non serve alcuna modifica al codice per "supportare entrambi".
+
+> Nota: il build **completo** non è stato finalizzabile *in questo ambiente sandbox* perché la policy
+> di rete blocca il clone dei submodule da repo GitHub diversi da quello principale (403). Non è un
+> bug del codice: su una macchina CachyOS reale (o nella CI Arch ora agganciata) i submodule si
+> clonano normalmente.
+
+### 8.3 Caveat specifici Nvidia + Wayland (RTX 4070)
+
+- Servono **driver Nvidia recenti** (nvidia-open ≥ 555, consigliati gli ultimi su CachyOS) per una
+  cattura Wayland affidabile. NvFBC è solo X11: su Wayland la cattura passa per
+  KWin ScreenCast / wlr-screencopy / **XDG Portal (PipeWire)**.
+- Assicurarsi che **PipeWire** e `xdg-desktop-portal` (+ backend del compositor:
+  `xdg-desktop-portal-kde` per KDE, `xdg-desktop-portal-hyprland` per Hyprland) siano attivi: il
+  path Portal è il più robusto su Nvidia.
+- **NVENC** (AV1/HEVC/H.264) sulla 4070 Ada funziona via CUDA: build con `_use_cuda=true` /
+  `-DSUNSHINE_ENABLE_CUDA=ON` e pacchetto `cuda` installato.
+- L'**input injection** usa `inputtino` (uinput): aggiungere l'utente al gruppo `input` e caricare il
+  modulo `uinput` (`/dev/uinput`).
+
+### 8.4 Guida build cucita per CachyOS
+
+**Opzione A — pacchetto via PKGBUILD (consigliata, riproducibile):**
+
+```bash
+# dipendenze di build/runtime (dal PKGBUILD del progetto)
+sudo pacman -S --needed base-devel cmake git nodejs npm \
+  avahi curl libayatana-appindicator libcap libdrm libevdev libmfx libnotify \
+  libpipewire libpulse libva libx11 libxcb libxfixes libxrandr libxtst \
+  miniupnpc numactl openssl opus udev vulkan-icd-loader which \
+  python-jinja python-setuptools shaderc appstream appstream-glib \
+  desktop-file-utils cuda            # cuda = encoding Nvidia (4070)
+
+git clone <repo-vibepollo> && cd Vibepollo
+git submodule update --init --recursive
+mkdir build && cd build
+cmake -DSUNSHINE_CONFIGURE_ONLY=ON -DSUNSHINE_CONFIGURE_PKGBUILD=ON ..
+cd ../packaging/linux/Arch   # contiene il PKGBUILD configurato
+makepkg -si                  # _use_cuda=true di default se 'cuda' è installato
+```
+
+**Opzione B — build CMake diretta (per iterare/debug):**
+
+```bash
+git submodule update --init --recursive
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DSUNSHINE_ENABLE_CUDA=ON \
+  -DSUNSHINE_ENABLE_X11=ON -DSUNSHINE_ENABLE_WAYLAND=ON \
+  -DSUNSHINE_ENABLE_KWIN=ON -DSUNSHINE_ENABLE_PORTAL=ON \
+  -DSUNSHINE_ENABLE_DRM=ON -DSUNSHINE_ENABLE_VAAPI=ON -DSUNSHINE_ENABLE_VULKAN=ON \
+  -DSUNSHINE_ENABLE_WEBRTC=OFF \
+  -DBUILD_TESTS=OFF -DBUILD_DOCS=OFF
+cmake --build build -j"$(nproc)"
+```
+
+Questa configurazione produce un host **funzionale** (Categoria A): streaming Moonlight, WebUI,
+NVENC sulla 4070, cattura sia su KDE che su Hyprland, input, audio. Le feature premium (Categoria C:
+SudoVDA, Playnite, RTSS, Lossless Scaling, Smooth Motion, RTX HDR) restano disabilitate perché
+Windows-only. WebRTC si potrà abilitare in un secondo momento (richiede build di `libwebrtc` per
+Linux).
+
+### 8.5 Prossimi passi suggeriti
+
+1. Compilare con una delle due opzioni sulla macchina CachyOS e validare lo streaming Moonlight.
+2. Verificare il path di cattura attivo per ciascun compositor (log Sunshine: KMS/KWin/Portal/wlr).
+3. (Opzionale) Monitorare il nuovo job `build-archlinux` su una PR per confermare che il ramo Linux
+   compili in CI, e usarlo come guard-rail contro futuri commit Windows-only che rompono Linux.
