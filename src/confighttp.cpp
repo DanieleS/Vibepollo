@@ -5552,8 +5552,11 @@ namespace confighttp {
     session_token_manager.load_session_tokens();
     std::thread tcp {accept_and_run, &server};
 
-    // Start a background task to clean up expired session tokens every hour
-    std::jthread cleanup_thread([shutdown_event]() {
+    // Start a background task to clean up expired session tokens every hour.
+    // Use std::thread (not std::jthread): the loop already exits when shutdown_event
+    // is raised, and std::jthread's stop_token machinery pulls std::atomic::notify
+    // (__notify_impl@GLIBCXX_3.4.35), which fails to link under GCC's LTO on Linux.
+    std::thread cleanup_thread([shutdown_event]() {
       while (!shutdown_event->view(std::chrono::hours(1))) {
         if (session_token_manager.cleanup_expired_session_tokens()) {
           session_token_manager.save_session_tokens();
@@ -5569,7 +5572,8 @@ namespace confighttp {
     tcp.join();
     blocking_route_pool.stop();
     blocking_route_pool.join();
-    // std::jthread (cleanup_thread) auto-joins on destruction, no need for joinable/join
+    // cleanup_thread exits once shutdown_event is raised (same signal awaited above)
+    cleanup_thread.join();
   }
 
   /**
