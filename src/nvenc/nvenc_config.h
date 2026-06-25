@@ -52,8 +52,11 @@ namespace nvenc {
     // Use CAVLC entropy coding in H.264 instead of CABAC, not relevant and here for historical reasons
     bool h264_cavlc = false;
 
-    // Control split-frame encoding for supported HEVC/AV1 sessions
-    split_encode_mode split_encode_mode = split_encode_mode::auto_mode;
+    // Control split-frame encoding for supported HEVC/AV1 sessions.
+    // The type is fully qualified so this member (same name as the enum) does not
+    // "change meaning" of the unqualified name in class scope, which is ill-formed
+    // under GCC (C++ [basic.scope]) even though MSVC accepts it.
+    nvenc::split_encode_mode split_encode_mode = nvenc::split_encode_mode::auto_mode;
 
     // Add filler data to encoded frames to stay at target bitrate, mainly for testing
     bool insert_filler_data = false;
