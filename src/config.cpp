@@ -2554,12 +2554,17 @@ namespace config {
       const auto prev_dd_snapshot_exclude_devices = video.dd.snapshot_exclude_devices;
       const auto prev_dd_dummy_plug = video.dd.wa.dummy_plug_hdr10;
       const auto prev_dd_virtual_double_refresh = video.dd.wa.virtual_double_refresh;
+#ifdef _WIN32
+      // RTX HDR is a Windows-only (NVAPI) feature; these snapshots are only read inside
+      // the _WIN32 block below. Guard them so non-Windows builds don't trip
+      // -Werror=unused-variable.
       const auto prev_rtx_hdr_enabled = video.rtx_hdr.enabled;
       const auto prev_rtx_hdr_sdr_brightness = video.rtx_hdr.sdr_brightness;
       const auto prev_rtx_hdr_contrast = video.rtx_hdr.contrast;
       const auto prev_rtx_hdr_saturation = video.rtx_hdr.saturation;
       const auto prev_rtx_hdr_middle_gray = video.rtx_hdr.middle_gray;
       const auto prev_rtx_hdr_peak_brightness = video.rtx_hdr.peak_brightness;
+#endif
       const auto prev_session_history_enabled = sunshine.session_history_enabled;
 
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
