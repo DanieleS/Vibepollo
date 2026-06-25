@@ -343,6 +343,7 @@ namespace {
     void *_handle = nullptr;
     void *_dev = nullptr;
     bool _inited = false;
+    nvmlShutdown_t _shutdown = nullptr;  ///< Cached shutdown fn, nulled on reset()
     nvmlInit_v2_t nvmlInit_v2 = nullptr;
     nvmlShutdown_t nvmlShutdown = nullptr;
     nvmlDeviceGetCount_v2_t nvmlDeviceGetCount_v2 = nullptr;

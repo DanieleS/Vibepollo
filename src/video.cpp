@@ -75,6 +75,13 @@ namespace video {
   }
 
   namespace {
+    // Serializes destruction of encode sessions (and, on Windows, the async release of shared
+    // D3D capture surfaces). encode_run() takes this on every platform during encoder teardown,
+    // so it must live outside the _WIN32 block below. When two clients share one capture target,
+    // a capture reinit makes both video threads tear down their NVENC session at the same instant;
+    // funnel all encoder teardown through this mutex so only one device is ever mid-destruction.
+    std::mutex encode_session_teardown_mutex;
+
 #ifdef _WIN32
     bool should_prefer_virtual_display() {
       if (platf::is_lock_screen_active() && VDISPLAY::has_active_physical_display()) {
@@ -132,15 +139,6 @@ namespace video {
       return dynamic_cast<platf::dxgi::img_d3d_t *>(img.get()) != nullptr;
     }
 #endif
-
-    // Serializes destruction of encode sessions (and, on Windows, the async release of shared
-    // D3D capture surfaces). When two clients share one capture target, a capture reinit makes
-    // both video threads tear down their NVENC session + D3D11 device at the same instant. Both
-    // devices have the same shared capture textures open, and the NVIDIA UMD's cross-device
-    // shared-resource dependency cleanup (DestroyDriverInstance) is not safe against a concurrent
-    // teardown of the other device: it faults walking freed dependency entries. Funnel all
-    // encoder teardown through this mutex so only one device is ever mid-destruction.
-    std::mutex encode_session_teardown_mutex;
 
 #ifdef _WIN32
     void release_d3d_capture_images_async(std::vector<std::shared_ptr<platf::img_t>> images) {

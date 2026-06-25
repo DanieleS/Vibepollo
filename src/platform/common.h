@@ -211,6 +211,7 @@ namespace platf {
     dxgi,  ///< DXGI
     cuda,  ///< CUDA
     videotoolbox,  ///< VideoToolbox
+    vulkan,  ///< Vulkan video encode (Linux)
     unknown  ///< Unknown
   };
 
