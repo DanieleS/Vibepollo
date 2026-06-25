@@ -363,13 +363,12 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/misc.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/misc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/host_stats.cpp"
-        "${CMAKE_SOURCE_DIR}/src/platform/linux/audio.cpp"
-        "${CMAKE_SOURCE_DIR}/third-party/glad/src/egl.c"
-        "${CMAKE_SOURCE_DIR}/third-party/glad/src/gl.c"
-        "${CMAKE_SOURCE_DIR}/third-party/glad/include/EGL/eglplatform.h"
-        "${CMAKE_SOURCE_DIR}/third-party/glad/include/KHR/khrplatform.h"
-        "${CMAKE_SOURCE_DIR}/third-party/glad/include/glad/gl.h"
-        "${CMAKE_SOURCE_DIR}/third-party/glad/include/glad/egl.h")
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/audio.cpp")
+# NOTE: The glad EGL/GL loader is provided by the generated `glad` INTERFACE
+# target (see cmake/dependencies/glad.cmake, linked via SUNSHINE_EXTERNAL_LIBRARIES
+# below). glad2 generates its sources/headers into the build tree at configure
+# time, so the old pre-generated third-party/glad/src/*.c and include/** files no
+# longer exist and must NOT be listed as target sources.
 
 list(APPEND PLATFORM_LIBRARIES
         dl
