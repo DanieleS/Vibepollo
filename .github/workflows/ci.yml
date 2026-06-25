@@ -220,10 +220,14 @@ jobs:
     name: Arch Linux
     needs:
       - release-candidate
-    # Validate the Linux/Arch build on PRs and on release pushes. This job is
-    # intentionally NOT a dependency of the `release` job, so a Linux build
-    # failure surfaces bitrot without blocking the Windows release artifact.
-    if: github.event_name != 'push' || needs.release-candidate.outputs.should_release == 'true'
+    # Validate the Linux/Arch build on every push, PR, and manual run so that
+    # Windows-only changes that break the Linux branch surface immediately.
+    # This job is intentionally NOT a dependency of the `release` job, so a
+    # Linux build failure never blocks the Windows release artifact.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch'
     permissions:
       actions: read
       contents: read
