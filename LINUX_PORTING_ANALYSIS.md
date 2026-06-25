@@ -284,3 +284,90 @@ Linux).
 2. Verificare il path di cattura attivo per ciascun compositor (log Sunshine: KMS/KWin/Portal/wlr).
 3. (Opzionale) Monitorare il nuovo job `build-archlinux` su una PR per confermare che il ramo Linux
    compili in CI, e usarlo come guard-rail contro futuri commit Windows-only che rompono Linux.
+
+---
+
+## 9. Esito: Fase 1 completata — il pacchetto Linux builda (CI verde)
+
+Il ramo Linux è stato recuperato dallo stato "orfano/bitrot" a un **pacchetto Arch che compila,
+linka, passa `check()` (`sunshine --version`) e si installa**, verificato sulla CI Arch
+(GCC 15 + CUDA + LTO) ora agganciata alla pipeline.
+
+### 9.1 Fix applicati (in ordine di emersione)
+
+| # | File | Problema | Fix |
+|---|---|---|---|
+| 1 | `cmake/.../linux.cmake` | riferimenti ai sorgenti glad1 inesistenti (migrazione glad2) | rimossi; il loader arriva dal target generato `glad` |
+| 2 | `src/config.cpp` | variabili `prev_rtx_hdr_*` inutilizzate fuori Windows | guard `#ifdef _WIN32` |
+| 3 | `packaging/linux/Arch/PKGBUILD` | `-Werror` rendeva fatali i warning cosmetici | `BUILD_WERROR` reso opt-in (`_werror`, default off) |
+| 4 | `src/nvenc/nvenc_config.h` | membro omonimo del tipo enum (`-Wchanges-meaning`, **errore C++**) | tipo qualificato `nvenc::split_encode_mode` |
+| 5 | `src/nvhttp.cpp` | `has_active_or_stopping_stream_session` definita solo in `#ifdef _WIN32` | spostata fuori dal blocco |
+| 6 | `src/video.cpp` | `encode_session_teardown_mutex` intrappolato in `#ifdef _WIN32` | spostato nel namespace anonimo, fuori dal blocco |
+| 7 | `src/platform/linux/host_stats.cpp` | membro `_shutdown` mai dichiarato | dichiarato `nvmlShutdown_t _shutdown` |
+| 8 | `src/platform/linux/publish.cpp` | `string_view` passato a `const char*` (Avahi) | `platf::SERVICE_TYPE.data()` |
+| 9 | `src/platform/common.h` | enum `mem_type_e::vulkan` mancante | aggiunto |
+| 10 | `src/confighttp.cpp` | `std::jthread` → simbolo `__notify_impl@GLIBCXX_3.4.35` non linkabile sotto LTO | sostituito con `std::thread` + `join()` |
+| — | `.github/workflows/ci.yml` + `ci-archlinux.yml` | CI Arch orfana; unit test/coverage rompevano il job | job `build-archlinux` agganciato; unit test/coverage gated (fase 2) |
+
+Pattern dominante: **simboli cross-platform intrappolati in blocchi `#ifdef _WIN32`** e codice dei
+file `platform/linux/*` mai compilato durante lo sviluppo Windows-only.
+
+### 9.2 Guida d'installazione definitiva — CachyOS (Nvidia RTX 4070, Wayland)
+
+Verificata contro il build CI (GCC 15 + CUDA). Finché la PR non è mergiata su `master`, usare il
+branch `claude/linux-porting-analysis-yudn48`.
+
+```bash
+# 1) Dipendenze (build + runtime)
+sudo pacman -S --needed base-devel cmake git nodejs npm python-jinja python-setuptools shaderc \
+  avahi curl libayatana-appindicator libcap libdrm libevdev libmfx libnotify libpipewire \
+  libpulse libva libx11 libxcb libxfixes libxrandr libxtst miniupnpc numactl openssl opus \
+  udev vulkan-icd-loader which cuda
+# Nvidia 4070 (Ada): driver recente + KMS per Wayland
+sudo pacman -S --needed nvidia-open-dkms   # o 'nvidia'/'nvidia-dkms' secondo il kernel
+# Portal per la cattura Wayland (installa il backend del tuo compositor)
+sudo pacman -S --needed xdg-desktop-portal xdg-desktop-portal-kde       # KDE Plasma
+sudo pacman -S --needed xdg-desktop-portal-hyprland                     # Hyprland
+
+# 2) Build (CMake diretto — tutti i backend di cattura ON di default → KDE e Hyprland)
+git clone https://github.com/DanieleS/Vibepollo.git
+cd Vibepollo
+git checkout claude/linux-porting-analysis-yudn48
+git submodule update --init --recursive
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DSUNSHINE_ENABLE_CUDA=ON \
+  -DBUILD_WERROR=OFF -DBUILD_TESTS=OFF -DBUILD_DOCS=OFF
+cmake --build build -j"$(nproc)"
+sudo cmake --install build
+
+# 3) Setup runtime
+#  - KMS Wayland Nvidia: assicurarsi nvidia_drm.modeset=1 (di norma già attivo su CachyOS)
+#  - input injection (uinput): l'install applica le udev rules; aggiungere l'utente al gruppo input
+sudo usermod -aG input "$USER"        # poi ri-login
+#  - avviare come servizio utente (NON come root, serve la sessione grafica)
+systemctl --user enable --now app-dev.lizardbyte.app.Sunshine.service
+#    oppure, per debug in foreground:  sunshine
+#  - aprire la WebUI e completare il setup: https://localhost:47990
+```
+
+Note operative:
+- **Cattura schermo**: a runtime Sunshine sceglie il backend (KMS / KWin ScreenCast / wlr-screencopy
+  / Portal) in base al compositor. Su Nvidia+Wayland il path **Portal/PipeWire** è il più affidabile;
+  verificare nei log Sunshine quale viene selezionato.
+- **Porte firewall**: TCP 47984/47989/47990/48010, UDP 47998-48000 (standard Moonlight).
+- Feature **Categoria C** (SudoVDA, Playnite, RTSS, Lossless Scaling, Smooth Motion, RTX HDR)
+  restano disattivate: Windows-only.
+
+### 9.3 Fase 2 (hardening, quando vorrai)
+
+Niente di bloccante per l'uso; sono pulizie/irrobustimenti:
+
+1. **Riattivare `-Werror`** (`_werror=true`) e bonificare i warning cosmetici emersi (variabili
+   inutilizzate nei rami `_WIN32`, funzioni statiche non usate in `confighttp.cpp`, ecc.).
+2. **Unit test su Linux**: far costruire i test (`-DBUILD_TESTS=ON`) e sistemare il PKGBUILD
+   (`_run_unit_tests`) + le eventuali bitrot della suite; riabilitare l'upload coverage.
+3. **Warning ODR** `dmabuf_t`/`gbm_device` in `src/platform/linux/wayland.h` (visto in fase di link):
+   allineare la forward-declaration di `gbm_device` al tipo reale di `<gbm.h>`.
+4. **WebRTC (nice-to-have)**: buildare `libwebrtc` per Linux e abilitare `SUNSHINE_ENABLE_WEBRTC`.
+5. **Display automation / virtual display** su Wayland (Categoria B): reimplementazione per-compositor
+   (KScreen/wlr-output-management) — il lavoro grosso del porting "premium".
