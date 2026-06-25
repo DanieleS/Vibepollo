@@ -374,10 +374,10 @@ Niente di bloccante per l'uso; sono pulizie/irrobustimenti:
 
 ### 9.4 Installare il binario pubblicato (GitHub Release, Arch/CachyOS)
 
-La pipeline di release ora allega anche il **pacchetto Arch** (`Vibepollo-Linux-x86_64-vX.Y.Z.pkg.tar.zst`)
-agli asset della GitHub Release, accanto all'installer Windows. È costruito dal job `build-archlinux`
-ed è **non bloccante**: se il build Linux fallisse, la release Windows esce comunque (il pacchetto
-Linux viene semplicemente omesso).
+Questo fork è **solo Linux** (per Windows c'è l'upstream Sunshine/Apollo): la pipeline non builda più
+Windows. La GitHub Release pubblica come unico asset il **pacchetto Arch**
+(`Vibepollo-Linux-x86_64-vX.Y.Z.pkg.tar.zst`), costruito dal job `build-archlinux`. Il build Linux è
+**bloccante**: la release esce solo se la CI Arch è verde.
 
 Per installarlo ed eseguirlo su CachyOS/Arch:
 

@@ -192,38 +192,13 @@ jobs:
           )
           PY
 
-  build-windows:
-    name: Windows
-    needs:
-      - release-candidate
-    if: github.event_name != 'push' || needs.release-candidate.outputs.should_release == 'true'
-    permissions:
-      actions: read
-      contents: read
-    uses: ./.github/workflows/ci-windows.yml
-    with:
-      release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
-      release_version: ${{ needs.release-candidate.outputs.release_version || '0.0.0' }}
-      release_tag: ${{ needs.release-candidate.outputs.tag_name }}
-      symbol_product_name: Vibepollo
-      publish_symbols: ${{ needs.release-candidate.outputs.should_release == 'true' }}
-      symbol_release_draft: true
-      symbol_release_prefix: polo
-      require_signpath_signing: ${{ needs.release-candidate.outputs.should_release == 'true' }}
-      require_truehdr_runtime: ${{ needs.release-candidate.outputs.should_release == 'true' }}
-    secrets:
-      symbol_token: ${{ secrets.SYMBOL_TOKEN }}
-      signpath_api_token: ${{ secrets.SIGNPATH_API_TOKEN }}
-      truehdr_runtime_token: ${{ secrets.TRUEHDR_RUNTIME_TOKEN }}
-
   build-archlinux:
     name: Arch Linux
     needs:
       - release-candidate
-    # Validate the Linux/Arch build on every push, PR, and manual run so that
-    # Windows-only changes that break the Linux branch surface immediately.
-    # This job is intentionally NOT a dependency of the `release` job, so a
-    # Linux build failure never blocks the Windows release artifact.
+    # This fork is Linux-only (Windows lives in upstream Sunshine/Apollo). Build
+    # and validate the Arch package on every push, PR, and manual run. It is a
+    # required dependency of `release`, so a Linux build failure blocks the release.
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
@@ -240,15 +215,10 @@ jobs:
     name: Release
     needs:
       - release-candidate
-      - build-windows
       - build-archlinux
-    # Run when a release is due and the Windows build succeeded. always() + the
-    # explicit gates mean a failed/skipped Linux build does NOT block the release
-    # (the Linux asset is just omitted); see the continue-on-error download below.
-    if: >-
-      always() &&
-      needs.release-candidate.outputs.should_release == 'true' &&
-      needs.build-windows.result == 'success'
+    # Release only when due AND the Linux build succeeded (build-archlinux is a
+    # required dependency, so its failure skips the release — Linux is blocking).
+    if: needs.release-candidate.outputs.should_release == 'true'
     permissions:
       actions: read
       contents: write
@@ -324,23 +294,14 @@ jobs:
           echo "product_name=${product_name}" >> "${GITHUB_OUTPUT}"
           echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
-        with:
-          name: build-Windows
-          path: artifacts
-
-      # Non-blocking: if the Arch build failed/was skipped, the artifact is absent
-      # and the release proceeds with Windows assets only.
       - name: Download Arch Linux artifacts
-        continue-on-error: true
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
         with:
           name: build-Archlinux
           path: linux-artifacts
 
       - name: Debug artifacts
-        run: ls -l artifacts || true; ls -l linux-artifacts || true
+        run: ls -l linux-artifacts || true
 
       - name: Create or update GitHub release
         id: create-release
@@ -358,35 +319,21 @@ jobs:
         run: |
           set -euo pipefail
           release_title="v${RELEASE_VERSION}"
-          # Keep the installer release asset aligned with the full tag version.
-          # This preserves prerelease/patch-channel suffixes such as
-          # -alpha.1, -beta.2, or -stable.3, while plain stable tags fall back
-          # to just the numeric version (for example, v1.2.3).
-          versioned_setup="artifacts/${PRODUCT_NAME}Setup-v${RELEASE_VERSION}.exe"
 
-          mapfile -t setup_assets < <(find artifacts -maxdepth 1 -type f -name "${PRODUCT_NAME}Setup*.exe" | sort)
-          if (( ${#setup_assets[@]} != 1 )); then
-            echo "::error::Expected exactly one ${PRODUCT_NAME} setup artifact, found ${#setup_assets[@]}."
-            find artifacts -maxdepth 2 -type f -print >&2 || true
-            exit 1
-          fi
-
-          if [[ "${setup_assets[0]}" != "${versioned_setup}" ]]; then
-            mv -f "${setup_assets[0]}" "${versioned_setup}"
-          fi
-
-          # Attach the Arch Linux package (CachyOS/Arch: install with 'pacman -U').
-          # Optional: omitted if the Linux build did not produce an artifact.
+          # This fork is Linux-only: the release asset is the Arch package
+          # (CachyOS/Arch: install with 'pacman -U'). Require exactly one.
+          mkdir -p artifacts
           shopt -s nullglob
           linux_pkgs=(linux-artifacts/sunshine*.pkg.tar.zst)
-          if (( ${#linux_pkgs[@]} >= 1 )); then
-            linux_asset="artifacts/${PRODUCT_NAME}-Linux-x86_64-v${RELEASE_VERSION}.pkg.tar.zst"
-            cp -f "${linux_pkgs[0]}" "${linux_asset}"
-            echo "Attaching Linux package: $(basename "${linux_asset}")"
-          else
-            echo "::notice::No Arch Linux package artifact found; releasing Windows assets only."
-          fi
           shopt -u nullglob
+          if (( ${#linux_pkgs[@]} != 1 )); then
+            echo "::error::Expected exactly one Arch package artifact, found ${#linux_pkgs[@]}."
+            find linux-artifacts -maxdepth 2 -type f -print >&2 || true
+            exit 1
+          fi
+          linux_asset="artifacts/${PRODUCT_NAME}-Linux-x86_64-v${RELEASE_VERSION}.pkg.tar.zst"
+          cp -f "${linux_pkgs[0]}" "${linux_asset}"
+          echo "Release asset: $(basename "${linux_asset}")"
 
           release_payload="$(
             jq -n \
