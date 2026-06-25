@@ -191,6 +191,19 @@ namespace nvhttp {
     std::string pkey;
   } conf_intern;
 
+  namespace {
+    // Cross-platform: true while an RTSP/WebRTC session is active or still tearing
+    // down. Defined outside the _WIN32 block below because the platform-agnostic
+    // launch/resume paths use it too (it only touches cross-platform session state).
+    bool has_active_or_stopping_stream_session() {
+      // RTSP removes STOPPING sessions from session_count() before stream::session::join()
+      // returns; the worker count keeps display-helper work away from teardown-owned displays.
+      return rtsp_stream::session_count() > 0 ||
+             stream::session::running_sessions.load(std::memory_order_acquire) != 0 ||
+             webrtc_stream::has_active_sessions();
+    }
+  }  // namespace
+
 #ifdef _WIN32
   namespace {
     bool display_helper_session_available() {
@@ -266,14 +279,6 @@ namespace nvhttp {
         display_helper_integration::stop_watchdog();
       }
 
-    }
-
-    bool has_active_or_stopping_stream_session() {
-      // RTSP removes STOPPING sessions from session_count() before stream::session::join()
-      // returns; the worker count keeps display-helper work away from teardown-owned displays.
-      return rtsp_stream::session_count() > 0 ||
-             stream::session::running_sessions.load(std::memory_order_acquire) != 0 ||
-             webrtc_stream::has_active_sessions();
     }
 
     void cleanup_virtual_display_if_idle() {
