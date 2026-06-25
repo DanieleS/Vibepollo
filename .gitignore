@@ -72,4 +72,5 @@ AGENTS.md
 # Local runtime/test artifacts
 test_sunshine.log
 vibeshine_state.json
-.claude/
+.claude/*
+!.claude/skills/
