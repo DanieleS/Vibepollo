@@ -371,3 +371,28 @@ Niente di bloccante per l'uso; sono pulizie/irrobustimenti:
 4. **WebRTC (nice-to-have)**: buildare `libwebrtc` per Linux e abilitare `SUNSHINE_ENABLE_WEBRTC`.
 5. **Display automation / virtual display** su Wayland (Categoria B): reimplementazione per-compositor
    (KScreen/wlr-output-management) — il lavoro grosso del porting "premium".
+
+### 9.4 Installare il binario pubblicato (GitHub Release, Arch/CachyOS)
+
+La pipeline di release ora allega anche il **pacchetto Arch** (`Vibepollo-Linux-x86_64-vX.Y.Z.pkg.tar.zst`)
+agli asset della GitHub Release, accanto all'installer Windows. È costruito dal job `build-archlinux`
+ed è **non bloccante**: se il build Linux fallisse, la release Windows esce comunque (il pacchetto
+Linux viene semplicemente omesso).
+
+Per installarlo ed eseguirlo su CachyOS/Arch:
+
+```bash
+# 1) scarica l'asset .pkg.tar.zst dalla Release, poi:
+sudo pacman -U ./Vibepollo-Linux-x86_64-v*.pkg.tar.zst
+#    pacman risolve da solo le dipendenze (avahi, libva, libpipewire, ...).
+#    Per l'encoding Nvidia sulla 4070 assicurati di avere i pacchetti 'cuda' e il driver nvidia.
+
+# 2) input injection (uinput) e avvio come servizio utente
+sudo usermod -aG input "$USER"        # poi ri-login
+systemctl --user enable --now app-dev.lizardbyte.app.Sunshine.service
+#    debug in foreground:  sunshine
+#    WebUI di setup:       https://localhost:47990
+```
+
+Nota: il `.pkg.tar.zst` è un pacchetto **Arch-native** (ideale per CachyOS). Per distro non-Arch
+servirebbe un AppImage portabile — non ancora costruito dalla CI (vedi fase 2 / nice-to-have).

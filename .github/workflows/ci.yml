@@ -238,10 +238,17 @@ jobs:
 
   release:
     name: Release
-    if: needs.release-candidate.outputs.should_release == 'true'
     needs:
       - release-candidate
       - build-windows
+      - build-archlinux
+    # Run when a release is due and the Windows build succeeded. always() + the
+    # explicit gates mean a failed/skipped Linux build does NOT block the release
+    # (the Linux asset is just omitted); see the continue-on-error download below.
+    if: >-
+      always() &&
+      needs.release-candidate.outputs.should_release == 'true' &&
+      needs.build-windows.result == 'success'
     permissions:
       actions: read
       contents: write
@@ -323,8 +330,17 @@ jobs:
           name: build-Windows
           path: artifacts
 
+      # Non-blocking: if the Arch build failed/was skipped, the artifact is absent
+      # and the release proceeds with Windows assets only.
+      - name: Download Arch Linux artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: build-Archlinux
+          path: linux-artifacts
+
       - name: Debug artifacts
-        run: ls -l artifacts
+        run: ls -l artifacts || true; ls -l linux-artifacts || true
 
       - name: Create or update GitHub release
         id: create-release
@@ -358,6 +374,19 @@ jobs:
           if [[ "${setup_assets[0]}" != "${versioned_setup}" ]]; then
             mv -f "${setup_assets[0]}" "${versioned_setup}"
           fi
+
+          # Attach the Arch Linux package (CachyOS/Arch: install with 'pacman -U').
+          # Optional: omitted if the Linux build did not produce an artifact.
+          shopt -s nullglob
+          linux_pkgs=(linux-artifacts/sunshine*.pkg.tar.zst)
+          if (( ${#linux_pkgs[@]} >= 1 )); then
+            linux_asset="artifacts/${PRODUCT_NAME}-Linux-x86_64-v${RELEASE_VERSION}.pkg.tar.zst"
+            cp -f "${linux_pkgs[0]}" "${linux_asset}"
+            echo "Attaching Linux package: $(basename "${linux_asset}")"
+          else
+            echo "::notice::No Arch Linux package artifact found; releasing Windows assets only."
+          fi
+          shopt -u nullglob
 
           release_payload="$(
             jq -n \
