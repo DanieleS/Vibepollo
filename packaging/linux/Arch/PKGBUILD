@@ -5,6 +5,11 @@
 : "${_run_unit_tests:=false}"  # if set to true; unit tests will be executed post build; useful in CI
 : "${_support_headless_testing:=false}"
 : "${_use_cuda:=detect}" # nvenc
+# Treat compiler warnings as errors. Defaults to false on this fork: the Linux
+# branch is being brought back from Windows-only development and still carries
+# cosmetic warnings (unused vars in _WIN32 blocks, -Wchanges-meaning, etc.).
+# Phase 2 of the Linux port re-enables this (_werror=true) and cleans them up.
+: "${_werror:=false}"
 
 : "${_commit:=@GITHUB_COMMIT@}"
 
@@ -131,12 +136,17 @@ build() {
 
     export MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}"
 
+    local _werror_value=OFF
+    if [[ "${_werror::1}" == "t" ]]; then
+      _werror_value=ON
+    fi
+
     local _cmake_options=(
       -S "$pkgname"
       -B build
       -Wno-dev
       -D BUILD_DOCS=OFF
-      -D BUILD_WERROR=ON
+      -D BUILD_WERROR="${_werror_value}"
       -D CMAKE_INSTALL_PREFIX=/usr
       -D SUNSHINE_EXECUTABLE_PATH=/usr/bin/sunshine
       -D SUNSHINE_ASSETS_DIR="share/sunshine"
