@@ -74,3 +74,4 @@ test_sunshine.log
 vibeshine_state.json
 .claude/*
 !.claude/skills/
+!.claude/skills/**

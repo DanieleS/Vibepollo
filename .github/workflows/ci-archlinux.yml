@@ -17,11 +17,7 @@ jobs:
     name: Archlinux
     env:
       _use_cuda: true
-      # Phase 1 of the Linux port targets a building/linking package. Unit tests
-      # are not built here yet (BUILD_TESTS defaults OFF), so keep _run_unit_tests
-      # false — otherwise PKGBUILD check() fails trying to cd into build/tests.
-      # Phase 2 re-enables this together with -Werror and fixes the test suite.
-      _run_unit_tests: false
+      _run_unit_tests: true
       _support_headless_testing: true
       BRANCH: ${{ github.head_ref || github.ref_name }}
       BUILD_VERSION: ${{ inputs.release_version }}
@@ -157,7 +153,6 @@ jobs:
       - name: Upload coverage artifact
         if: >-
           always() &&
-          env._run_unit_tests == 'true' &&
           (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:

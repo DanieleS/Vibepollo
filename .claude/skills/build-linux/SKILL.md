@@ -95,11 +95,18 @@ fix are seconds — always prefer the local loop over pushing and waiting ~6 min
 6. **Missing `platf::` enum value / member**: add it to the cross-platform header
    (`src/platform/common.h`) or the linux struct.
 
-## CI wiring
+## CI wiring (overlay model — keep upstream files pristine)
 
-`ci.yml` has a `build-archlinux` job (runs on push/PR/dispatch) calling `ci-archlinux.yml`. Phase-1
-keeps unit tests + coverage **off** (gated on `_run_unit_tests`). To get failure logs use the GitHub
-MCP `get_job_logs` (tail ~200 lines and grep for `error:` — the tail alone is just cleanup noise).
+This is a **Linux-only fork** of an upstream that is Windows-focused, so to avoid merge
+conflicts on every upstream sync, all Linux CI lives in **one self-contained file we own**:
+`.github/workflows/linux.yml` (build the Arch package on push/PR/tag + publish a GitHub release
+on tags). Do **NOT** edit upstream's `ci.yml` / `ci-windows.yml` / `ci-archlinux.yml` — they are
+left byte-identical to upstream. Upstream's Windows `ci.yml` is silenced by **disabling that
+workflow in the repo's Actions settings** (a repo setting, not a commit → no conflicts).
+
+`linux.yml` builds with `_run_unit_tests=false` and `_werror=false` (phase 1). To get failure logs
+use the GitHub MCP `get_job_logs` (tail ~200 lines and grep for `error:` — the tail alone is just
+cleanup noise). The local build (above) is the fast loop; CI is the gcc15+CUDA+LTO truth.
 
 ## Phase-2 hardening (when asked)
 

@@ -307,7 +307,7 @@ linka, passa `check()` (`sunshine --version`) e si installa**, verificato sulla 
 | 8 | `src/platform/linux/publish.cpp` | `string_view` passato a `const char*` (Avahi) | `platf::SERVICE_TYPE.data()` |
 | 9 | `src/platform/common.h` | enum `mem_type_e::vulkan` mancante | aggiunto |
 | 10 | `src/confighttp.cpp` | `std::jthread` → simbolo `__notify_impl@GLIBCXX_3.4.35` non linkabile sotto LTO | sostituito con `std::thread` + `join()` |
-| — | `.github/workflows/ci.yml` + `ci-archlinux.yml` | CI Arch orfana; unit test/coverage rompevano il job | job `build-archlinux` agganciato; unit test/coverage gated (fase 2) |
+| — | `.github/workflows/linux.yml` (nuovo) | nessuna CI Linux attiva | workflow **overlay** self-contained: build Arch (test/Werror off) + release su tag. I file CI upstream restano intatti (sync senza conflitti) |
 
 Pattern dominante: **simboli cross-platform intrappolati in blocchi `#ifdef _WIN32`** e codice dei
 file `platform/linux/*` mai compilato durante lo sviluppo Windows-only.
@@ -374,10 +374,13 @@ Niente di bloccante per l'uso; sono pulizie/irrobustimenti:
 
 ### 9.4 Installare il binario pubblicato (GitHub Release, Arch/CachyOS)
 
-Questo fork è **solo Linux** (per Windows c'è l'upstream Sunshine/Apollo): la pipeline non builda più
-Windows. La GitHub Release pubblica come unico asset il **pacchetto Arch**
-(`Vibepollo-Linux-x86_64-vX.Y.Z.pkg.tar.zst`), costruito dal job `build-archlinux`. Il build Linux è
-**bloccante**: la release esce solo se la CI Arch è verde.
+Questo fork è **solo Linux** (per Windows c'è l'upstream Sunshine/Apollo). La CI Linux vive in un
+**workflow overlay tutto nostro** — `.github/workflows/linux.yml` — che builda il pacchetto Arch e,
+**al push di un tag di versione**, pubblica la GitHub Release con l'unico asset
+`Vibepollo-Linux-x86_64-vX.Y.Z.pkg.tar.zst`. Il build Linux è **bloccante** (il job `release` dipende
+dal `build`). I file CI dell'upstream (`ci.yml`, `ci-windows.yml`, `ci-archlinux.yml`) restano
+**intatti** per non avere conflitti ai sync; la pipeline Windows dell'upstream va silenziata
+**disabilitando il workflow "CI"** dalle impostazioni Actions del repo (è un setting, non un commit).
 
 Per installarlo ed eseguirlo su CachyOS/Arch:
 

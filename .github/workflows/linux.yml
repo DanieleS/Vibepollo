@@ -1,0 +1,167 @@
+---
+# Linux-only CI/release for this fork (overlay workflow).
+#
+# This file is intentionally SELF-CONTAINED and OWNED BY THIS FORK: it does not
+# touch upstream's ci.yml / ci-windows.yml / ci-archlinux.yml, so syncing changes
+# from upstream (Nonary/Vibepollo) never conflicts here. To stop upstream's
+# Windows pipeline from running on this fork, disable the "CI" workflow in the
+# repo's Actions settings (no file change → no merge conflicts).
+name: Linux
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+    tags:
+      - '*'
+  pull_request:
+
+concurrency:
+  group: "linux-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build:
+    name: Arch Linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: archlinux/archlinux:base-devel
+      options: --cpus 4 --memory 8g
+    env:
+      _use_cuda: true
+      _run_unit_tests: false   # phase 1: building package only (see LINUX_PORTING_ANALYSIS.md)
+      _werror: false           # phase 1: cosmetic warnings are non-fatal
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+      BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0' }}
+      CLONE_URL: ${{ github.event.repository.clone_url }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - name: Update keyring
+        run: |
+          pacman -Syy --disable-download-timeout --needed --noconfirm archlinux-keyring
+          pacman -Syu --disable-download-timeout --noconfirm
+          pacman -Scc --noconfirm
+
+      - name: Setup builder user
+        run: |
+          # makepkg refuses to run as root
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+
+      - name: Patch build flags
+        run: |
+          # shellcheck disable=SC2016
+          sed -i 's,#MAKEFLAGS="-j2",MAKEFLAGS="-j$(nproc)",g' /etc/makepkg.conf
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --disable-download-timeout --needed --noconfirm \
+            base-devel cmake cuda git namcap
+          pacman -Scc --noconfirm
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Fix workspace permissions
+        run: chown -R builder:builder "${GITHUB_WORKSPACE}"
+
+      - name: Configure PKGBUILD
+        run: |
+          sub_version=""
+          if [[ "${BRANCH}" != "master" ]]; then
+            sub_version=".r${COMMIT}"
+          fi
+          mkdir -p build && cd build
+          cmake -DSUNSHINE_CONFIGURE_ONLY=ON -DSUNSHINE_CONFIGURE_PKGBUILD=ON \
+                -DSUNSHINE_SUB_VERSION="${sub_version}" ..
+          chmod -R a+rX "${GITHUB_WORKSPACE}/build"
+
+      - name: Prepare PKGBUILD package
+        run: |
+          mkdir -p pkg
+          mv build/PKGBUILD pkg/
+          mv build/sunshine.install pkg/
+          chown -R builder:builder pkg
+          cd pkg
+          sudo -u builder makepkg --printsrcinfo | tee .SRCINFO
+
+      - name: Build package
+        id: build
+        working-directory: pkg
+        run: |
+          echo "::add-matcher::.github/matchers/gcc.json"
+          source /etc/profile  # ensure cuda is on PATH
+          sudo -u builder namcap -i PKGBUILD || true
+          sudo -u builder env \
+            _use_cuda="${_use_cuda}" \
+            _run_unit_tests="${_run_unit_tests}" \
+            _werror="${_werror}" \
+            makepkg -si --noconfirm
+          rm -f sunshine-debug*.pkg.tar.zst
+          echo "::remove-matcher owner=gcc::"
+
+      - name: Collect package
+        run: |
+          mkdir -p artifacts
+          cp pkg/sunshine*.pkg.tar.zst artifacts/
+          ls -la artifacts/
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: Vibepollo-Linux-x86_64
+          path: artifacts/
+          if-no-files-found: error
+
+  release:
+    name: Release (Linux)
+    needs: build           # Linux build is blocking: no green build, no release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Download package artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: Vibepollo-Linux-x86_64
+          path: linux-artifacts
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          shopt -s nullglob
+          pkgs=(linux-artifacts/sunshine*.pkg.tar.zst)
+          shopt -u nullglob
+          if (( ${#pkgs[@]} != 1 )); then
+            echo "::error::Expected exactly one .pkg.tar.zst, found ${#pkgs[@]}."; exit 1
+          fi
+          asset="Vibepollo-Linux-x86_64-${TAG}.pkg.tar.zst"
+          cp "${pkgs[0]}" "${asset}"
+
+          notes_args=(--generate-notes)
+          for f in "release_notes/${version}.md" "release_notes/${TAG}.md"; do
+            [[ -f "$f" ]] && { notes_args=(--notes-file "$f"); break; }
+          done
+
+          prerelease=()
+          case "${version,,}" in *alpha*|*beta*|*rc*) prerelease=(--prerelease) ;; esac
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${asset}" --clobber
+          else
+            gh release create "${TAG}" "${asset}" \
+              --title "v${version}" "${notes_args[@]}" "${prerelease[@]}"
+          fi
