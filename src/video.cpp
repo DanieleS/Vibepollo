@@ -1910,6 +1910,7 @@ namespace video {
           trim_imgs();
           img_out->frame_timestamp.reset();
           img_out->capture_pacing_timestamp.reset();
+          img_out->repeated_frame = false;
           return true;
         } else {
           if (!wait_start) {
@@ -2191,6 +2192,7 @@ namespace video {
       if (webrtc_stream::has_active_sessions()) {
         webrtc_stream::submit_video_packet(*packet);
       }
+      packet->packet_enqueue_timestamp = std::chrono::steady_clock::now();
       packets->raise(std::move(packet));
     }
 
@@ -2225,6 +2227,7 @@ namespace video {
     if (webrtc_stream::has_active_sessions()) {
       webrtc_stream::submit_video_packet(*packet);
     }
+    packet->packet_enqueue_timestamp = std::chrono::steady_clock::now();
     packets->raise(std::move(packet));
 
     return 0;
@@ -2239,13 +2242,17 @@ namespace video {
     std::optional<std::chrono::steady_clock::time_point> capture_timestamp,
     std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp
   ) {
+    thread_local logging::min_max_avg_periodic_logger<double> encode_duration_logger(debug, "Video encode call duration", "ms");
+    const auto encode_start = std::chrono::steady_clock::now();
+    int result = -1;
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
-      return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp, capture_timestamp, host_processing_timestamp);
+      result = encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp, capture_timestamp, host_processing_timestamp);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
-      return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp, capture_timestamp, host_processing_timestamp);
+      result = encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp, capture_timestamp, host_processing_timestamp);
     }
 
-    return -1;
+    encode_duration_logger.collect_and_log(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - encode_start).count());
+    return result;
   }
 
 #ifdef SUNSHINE_ENABLE_NV_TRUEHDR
@@ -3312,6 +3319,7 @@ namespace video {
         img_out = img;
         img_out->frame_timestamp.reset();
         img_out->capture_pacing_timestamp.reset();
+        img_out->repeated_frame = false;
         return true;
       };
 
