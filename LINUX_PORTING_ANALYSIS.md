@@ -378,9 +378,10 @@ Questo fork è **solo Linux** (per Windows c'è l'upstream Sunshine/Apollo). La 
 **workflow overlay tutto nostro** — `.github/workflows/linux.yml` — che builda il pacchetto Arch e,
 **al push di un tag di versione**, pubblica la GitHub Release con l'unico asset
 `Vibepollo-Linux-x86_64-vX.Y.Z.pkg.tar.zst`. Il build Linux è **bloccante** (il job `release` dipende
-dal `build`). I file CI dell'upstream (`ci.yml`, `ci-windows.yml`, `ci-archlinux.yml`) restano
-**intatti** per non avere conflitti ai sync; la pipeline Windows dell'upstream va silenziata
-**disabilitando il workflow "CI"** dalle impostazioni Actions del repo (è un setting, non un commit).
+dal `build`). I file CI dell'upstream (`ci-windows.yml`, `ci-archlinux.yml`) restano **intatti** per
+non avere conflitti ai sync; l'unica modifica upstream è **minima** in `ci.yml` (il suo `on:` è
+ridotto a `workflow_dispatch`), così non si auto-attiva sul fork: parte **un solo workflow**
+(`linux.yml`) per push/PR e Windows non builda mai. Superficie di conflitto = solo il blocco `on:`.
 
 Per installarlo ed eseguirlo su CachyOS/Arch:
 

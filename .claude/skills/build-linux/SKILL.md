@@ -100,9 +100,10 @@ fix are seconds — always prefer the local loop over pushing and waiting ~6 min
 This is a **Linux-only fork** of an upstream that is Windows-focused, so to avoid merge
 conflicts on every upstream sync, all Linux CI lives in **one self-contained file we own**:
 `.github/workflows/linux.yml` (build the Arch package on push/PR/tag + publish a GitHub release
-on tags). Do **NOT** edit upstream's `ci.yml` / `ci-windows.yml` / `ci-archlinux.yml` — they are
-left byte-identical to upstream. Upstream's Windows `ci.yml` is silenced by **disabling that
-workflow in the repo's Actions settings** (a repo setting, not a commit → no conflicts).
+on tags). Do **NOT** edit upstream's `ci-windows.yml` / `ci-archlinux.yml` — they are byte-identical
+to upstream. The only upstream edit is a **minimal one** in `ci.yml`: its `on:` is reduced to
+`workflow_dispatch` so it does not auto-run on the fork (→ exactly ONE workflow, `linux.yml`, runs
+per push/PR, and Windows never builds). That keeps the conflict surface to just the `on:` block.
 
 `linux.yml` builds with `_run_unit_tests=false` and `_werror=false` (phase 1). To get failure logs
 use the GitHub MCP `get_job_logs` (tail ~200 lines and grep for `error:` — the tail alone is just

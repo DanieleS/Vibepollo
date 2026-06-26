@@ -2,6 +2,10 @@
 name: CI
 permissions: {}
 
+# This fork is Linux-only — CI lives in linux.yml. Upstream's Windows pipeline
+# below is kept intact for conflict-free syncs but is NOT auto-triggered here
+# (manual dispatch only), so a single workflow (linux.yml) runs per push/PR.
+# To restore upstream behavior, re-add the push/pull_request triggers.
 on:
   workflow_dispatch:
     inputs:
@@ -9,14 +13,6 @@ on:
         description: Tag to publish, for example v1.16.0-alpha.4
         required: false
         type: string
-  push:
-    branches:
-      - '**'
-  pull_request:
-    branches:
-      - vibe
-      - main
-      - master
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
