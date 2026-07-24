@@ -38,6 +38,7 @@
   #include "src/platform/windows/ipc/misc_utils.h"
   #include "src/platform/windows/playnite_integration.h"
   #include "state_storage.h"
+  #include "version_compare.h"
 
   // Windows headers
   #include <KnownFolders.h>
@@ -143,54 +144,6 @@ namespace confighttp {
     }
     out["extensions_dir"] = dest.string();
     // Version info and update flag
-    auto normalize_ver = [](std::string s) {
-      // strip leading 'v' and whitespace
-      while (!s.empty() && (s[0] == ' ' || s[0] == '\t')) {
-        s.erase(s.begin());
-      }
-      if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) {
-        s.erase(s.begin());
-      }
-      return s;
-    };
-    auto semver_cmp = [&](const std::string &a, const std::string &b) {
-      auto to_parts = [](const std::string &s) {
-        std::vector<int> parts;
-        int cur = 0;
-        bool have = false;
-        for (size_t i = 0; i <= s.size(); ++i) {
-          if (i == s.size() || s[i] == '.') {
-            parts.push_back(have ? cur : 0);
-            cur = 0;
-            have = false;
-          } else if (s[i] >= '0' && s[i] <= '9') {
-            have = true;
-            cur = cur * 10 + (s[i] - '0');
-          } else {
-            // stop at first non-digit/non-dot
-            break;
-          }
-        }
-        while (!parts.empty() && parts.back() == 0) {
-          parts.pop_back();
-        }
-        return parts;
-      };
-      auto pa = to_parts(normalize_ver(a));
-      auto pb = to_parts(normalize_ver(b));
-      size_t n = std::max(pa.size(), pb.size());
-      pa.resize(n, 0);
-      pb.resize(n, 0);
-      for (size_t i = 0; i < n; ++i) {
-        if (pa[i] < pb[i]) {
-          return -1;
-        }
-        if (pa[i] > pb[i]) {
-          return 1;
-        }
-      }
-      return 0;
-    };
     std::string installed_ver, packaged_ver;
     bool have_installed = platf::playnite::get_installed_plugin_version(installed_ver);
     bool have_packaged = platf::playnite::get_packaged_plugin_version(packaged_ver);
@@ -202,7 +155,7 @@ namespace confighttp {
     }
     bool update_available = false;
     if (out["installed"].is_boolean() && out["installed"].get<bool>() && have_installed && have_packaged) {
-      update_available = semver_cmp(installed_ver, packaged_ver) < 0;
+      update_available = version_compare::compare_semver(installed_ver, packaged_ver) < 0;
     }
     out["update_available"] = update_available;
     // No session readiness flag; IPC works through RDP/lock. Frontend derives readiness from installed/active.

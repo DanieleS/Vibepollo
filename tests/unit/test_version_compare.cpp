@@ -24,6 +24,15 @@ TEST(VersionCompareTest, StableRespinsStillCompareWithinTheirChannel) {
   EXPECT_EQ(version_compare::compare_semver("1.14.14+build.1", "1.14.14+build.2"), 0);
 }
 
+TEST(VersionCompareTest, MultiDigitComponentsCompareNumerically) {
+  // The Playnite plugin version check used to compare the raw strings, which puts
+  // "0.4.8" above "0.4.13" and silently skips the update.
+  EXPECT_LT(version_compare::compare_semver("0.4.8", "0.4.13"), 0);
+  EXPECT_GT(version_compare::compare_semver("0.4.13", "0.4.8"), 0);
+  EXPECT_LT(version_compare::compare_semver("v0.4.9", "0.4.10"), 0);
+  EXPECT_EQ(version_compare::compare_semver("0.4.13", "0.4.13"), 0);
+}
+
 TEST(VersionCompareTest, StableRespinsAreNotPrereleaseChannel) {
   EXPECT_FALSE(version_compare::is_prerelease_channel("1.15.4"));
   EXPECT_FALSE(version_compare::is_prerelease_channel("1.15.4-stable.3"));

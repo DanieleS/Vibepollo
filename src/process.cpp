@@ -75,6 +75,7 @@
 #include "system_tray.h"
 #include "utility.h"
 #include "uuid.h"
+#include "version_compare.h"
 #include "video.h"
 #include "webrtc_stream.h"
 
@@ -1898,21 +1899,9 @@ namespace proc {
         bool have_packaged = platf::playnite::get_packaged_plugin_version(packaged_ver);
 
         if (have_installed && have_packaged) {
-          // Simple version comparison: compare as strings (works for semantic versioning)
-          auto normalize_ver = [](std::string s) -> std::string {
-            // Strip leading 'v' if present
-            if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) {
-              s = s.substr(1);
-            }
-            // Remove whitespace
-            s.erase(std::remove_if(s.begin(), s.end(), ::isspace), s.end());
-            return s;
-          };
-
-          std::string installed_normalized = normalize_ver(installed_ver);
-          std::string packaged_normalized = normalize_ver(packaged_ver);
-
-          if (installed_normalized < packaged_normalized) {
+          // Comparing the raw strings is wrong once a component reaches two digits:
+          // "0.4.8" sorts after "0.4.13" lexicographically, so the update never fires.
+          if (version_compare::compare_semver(installed_ver, packaged_ver) < 0) {
             BOOST_LOG(info) << "Playnite plugin update available (" << installed_ver
                             << " -> " << packaged_ver << "), auto-updating before launch";
             std::string install_error;
