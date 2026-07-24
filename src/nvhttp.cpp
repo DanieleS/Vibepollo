@@ -350,7 +350,8 @@ namespace nvhttp {
           .uses_virtual_display = uses_virtual_display,
           .capture_mode = config::video.capture,
           .auto_capture_uses_wgc = platf::dxgi::should_use_wgc_default(),
-          .auto_virtual_framegen_limiter = config::frame_limiter.auto_virtual_framegen,
+          .auto_virtual_framegen_limiter = config::frame_limiter.virtual_display_limiter_enabled(),
+          .virtual_display_refresh_multiplier = config::frame_limiter.fixed_virtual_display_refresh_multiplier(),
         });
       };
       const auto requested_display_framegen_policy = make_framegen_policy(request_virtual_display);
@@ -568,12 +569,23 @@ namespace nvhttp {
 
           uint32_t vd_width = launch_session->width > 0 ? static_cast<uint32_t>(launch_session->width) : 1920u;
           uint32_t vd_height = launch_session->height > 0 ? static_cast<uint32_t>(launch_session->height) : 1080u;
-          display_helper_integration::helpers::SessionDisplayConfigurationHelper initial_display_helper(config::video, *launch_session);
-          if (auto initial_resolution = initial_display_helper.initial_virtual_display_resolution()) {
-            vd_width = initial_resolution->m_width;
-            vd_height = initial_resolution->m_height;
-            BOOST_LOG(info) << "Virtual display initial resolution resolved from display configuration: "
-                            << vd_width << 'x' << vd_height;
+          // Virtual-display creation may eagerly enable HDR. Default to no state change so
+          // "Do not change HDR" preserves the retained Windows setting.
+          bool virtual_display_hdr_requested = false;
+          display_helper_integration::helpers::SessionDisplayConfigurationHelper initial_display_helper(config::video, *launch_session, true);
+          if (auto initial_configuration = initial_display_helper.initial_virtual_display_configuration()) {
+            if (initial_configuration->m_resolution &&
+                initial_configuration->m_resolution->m_width > 0 &&
+                initial_configuration->m_resolution->m_height > 0) {
+              vd_width = initial_configuration->m_resolution->m_width;
+              vd_height = initial_configuration->m_resolution->m_height;
+              BOOST_LOG(info) << "Virtual display initial resolution resolved from display configuration: "
+                              << vd_width << 'x' << vd_height;
+            }
+            if (initial_configuration->m_hdr_state) {
+              virtual_display_hdr_requested =
+                *initial_configuration->m_hdr_state == display_device::HdrState::Enabled;
+            }
           }
           uint32_t base_vd_fps = launch_session->fps > 0 ? static_cast<uint32_t>(launch_session->fps) : 0u;
           uint32_t base_vd_fps_millihz = base_vd_fps;
@@ -592,12 +604,8 @@ namespace nvhttp {
             vd_fps *= 1000u;
           }
           const bool framegen_refresh_active = launch_session->framegen_refresh_rate && *launch_session->framegen_refresh_rate > 0;
-          // Virtual displays always run at 4x the requested refresh (or the highest the driver
-          // can provide) so frame pacing stays smooth; frame generation reuses the same target.
-          const int refresh_multiplier = std::max(
-            4,
-            framegen_refresh_active ? rtsp_stream::framegen_refresh_multiplier(*launch_session) : 1
-          );
+          const int refresh_multiplier =
+            framegen_refresh_active ? rtsp_stream::framegen_refresh_multiplier(*launch_session) : 1;
           if (base_vd_fps_millihz > 0 && refresh_multiplier > 1) {
             const uint64_t minimum = static_cast<uint64_t>(base_vd_fps_millihz) * static_cast<uint64_t>(refresh_multiplier);
             vd_fps = std::max(vd_fps, static_cast<uint32_t>(std::min<uint64_t>(minimum, std::numeric_limits<uint32_t>::max())));
@@ -665,7 +673,7 @@ namespace nvhttp {
             base_vd_fps_millihz,
             framegen_refresh_active,
             refresh_multiplier,
-            rtsp_stream::effective_hdr_requested(*launch_session),
+            virtual_display_hdr_requested,
             false,
             !shared_mode
           );
@@ -694,7 +702,7 @@ namespace nvhttp {
             recovery_params.base_fps_millihz = base_vd_fps_millihz;
             recovery_params.framegen_refresh_active = framegen_refresh_active;
             recovery_params.framegen_refresh_multiplier = refresh_multiplier;
-            recovery_params.hdr_requested = rtsp_stream::effective_hdr_requested(*launch_session);
+            recovery_params.hdr_requested = virtual_display_hdr_requested;
             recovery_params.client_uid = display_uuid_source;
             recovery_params.client_name = client_label;
             recovery_params.hdr_profile = launch_session->hdr_profile;
@@ -2711,6 +2719,25 @@ namespace nvhttp {
             }
           }
 
+#ifdef _WIN32
+          // "Auto" client peak brightness follows the selected Windows HDR calibration
+          // profile's MHC2 peak. An explicit app/client override remains authoritative.
+          if (client_settings &&
+              !client_settings->hdr_profile.empty() &&
+              !overrides.contains("rtx_hdr_peak_brightness")) {
+            if (const auto profile_peak = VDISPLAY::hdr_profile_peak_luminance_nits(client_settings->hdr_profile)) {
+              const auto effective_peak = std::clamp<std::uint32_t>(*profile_peak, 400, 2000);
+              overrides.insert_or_assign("rtx_hdr_peak_brightness", std::to_string(effective_peak));
+              BOOST_LOG(info) << "HDR peak: using " << effective_peak << " nits from MHC2 profile '"
+                              << client_settings->hdr_profile << "'"
+                              << (*profile_peak == effective_peak ? "." : " (clamped to supported range).");
+            } else {
+              BOOST_LOG(warning) << "HDR peak: profile '" << client_settings->hdr_profile
+                                 << "' has no readable MHC2 peak; using the configured default.";
+            }
+          }
+#endif
+
           config::set_runtime_config_overrides(std::move(overrides));
           runtime_overrides_applied = true;
 
@@ -2786,7 +2813,8 @@ namespace nvhttp {
 
 
       if (request) {
-        const bool applied = display_helper_integration::apply(*request);
+        display_helper_integration::ApplyVerificationTicket verification_ticket;
+        const bool applied = display_helper_integration::apply(*request, &verification_ticket);
         launch_session->display_config_preapplied = applied;
         if (!applied) {
           if (helper_session_available) {
@@ -2796,9 +2824,10 @@ namespace nvhttp {
           auto gate_promise = std::make_shared<std::promise<rtsp_stream::launch_session_t::display_helper_gate_status_e>>();
           launch_session->display_helper_gate = gate_promise->get_future().share();
           BOOST_LOG(debug) << "Display helper: gating capture start on helper verification (non-blocking session start).";
-          std::thread([gate_promise]() {
-            constexpr auto kVerificationTimeout = std::chrono::seconds(6);
-            const auto status = display_helper_integration::wait_for_apply_verification(kVerificationTimeout);
+          std::thread([gate_promise, verification_ticket]() {
+            const auto status = display_helper_integration::wait_for_apply_verification(
+              verification_ticket,
+              display_helper_integration::kApplyVerificationTimeout);
             rtsp_stream::launch_session_t::display_helper_gate_status_e gate_status =
               rtsp_stream::launch_session_t::display_helper_gate_status_e::proceed_gaveup;
             if (status == display_helper_integration::ApplyVerificationStatus::Verified) {
@@ -3064,9 +3093,64 @@ namespace nvhttp {
     // so we should use it if it's present in the args and there are
     // no active sessions we could be interfering with.
     const bool no_active_sessions = !has_active_or_stopping_stream_session();
+    bool runtime_overrides_reapplied = false;
+    auto previous_runtime_overrides = config::runtime_config_overrides_snapshot();
+    auto runtime_overrides_guard = util::fail_guard([&]() {
+      if (!runtime_overrides_reapplied) {
+        return;
+      }
+      config::set_runtime_config_overrides(std::move(previous_runtime_overrides));
+      if (!has_active_or_stopping_stream_session()) {
+        config::apply_config_now();
+      } else {
+        config::mark_deferred_reload();
+      }
+    });
+
+    if (no_active_sessions) {
+      std::unordered_map<std::string, std::string> overrides;
+      if (auto running_app = proc::proc.resolve_app(current_appid)) {
+        overrides = running_app->config_overrides;
+      }
+
+      auto client_settings = named_cert_p;
+      std::string client_uuid = request_client_identity.uuid;
+      const auto resume_client_uuid = resolve_known_client_uuid_from_launch_id(get_arg(args, "uniqueid", ""));
+      if (client_uuid.empty()) {
+        client_uuid = resume_client_uuid;
+      } else if (!resume_client_uuid.empty() && is_placeholder_client_name(request_client_identity.name)) {
+        BOOST_LOG(warning) << "Ignoring placeholder TLS client identity '" << request_client_identity.name
+                           << "' for runtime overrides; using resume uniqueid " << resume_client_uuid << ".";
+        client_uuid = resume_client_uuid;
+        client_settings = nullptr;
+      }
+      if (!client_settings && !client_uuid.empty()) {
+        client_settings = get_named_cert_by_uuid(client_uuid);
+      }
+      if (client_settings) {
+        for (const auto &[key, value] : client_settings->config_overrides) {
+          overrides.insert_or_assign(key, value);
+        }
+      }
+
+#ifdef _WIN32
+      if (client_settings &&
+          !client_settings->hdr_profile.empty() &&
+          !overrides.contains("rtx_hdr_peak_brightness")) {
+        if (const auto profile_peak = VDISPLAY::hdr_profile_peak_luminance_nits(client_settings->hdr_profile)) {
+          const auto effective_peak = std::clamp<std::uint32_t>(*profile_peak, 400, 2000);
+          overrides.insert_or_assign("rtx_hdr_peak_brightness", std::to_string(effective_peak));
+        }
+      }
+#endif
+
+      config::set_runtime_config_overrides(std::move(overrides));
+      config::apply_config_now();
+      runtime_overrides_reapplied = true;
+    }
+
     const bool is_input_only = config::input.enable_input_only_mode && current_appid == proc::input_only_app_id;
     const bool allow_display_changes = config::video.dd.config_revert_on_disconnect && !is_input_only;
-
     if (no_active_sessions && allow_display_changes) {
       config::set_runtime_output_name_override(std::nullopt);
     }
@@ -3147,7 +3231,8 @@ namespace nvhttp {
         }
 
         if (request) {
-          const bool applied = display_helper_integration::apply(*request);
+          display_helper_integration::ApplyVerificationTicket verification_ticket;
+          const bool applied = display_helper_integration::apply(*request, &verification_ticket);
           if (!applied) {
             if (helper_session_available) {
               BOOST_LOG(warning) << "Display helper: failed to apply display configuration; continuing with existing display.";
@@ -3156,9 +3241,10 @@ namespace nvhttp {
             auto gate_promise = std::make_shared<std::promise<rtsp_stream::launch_session_t::display_helper_gate_status_e>>();
             launch_session->display_helper_gate = gate_promise->get_future().share();
             BOOST_LOG(debug) << "Display helper: gating capture start on helper verification (non-blocking session resume).";
-            std::thread([gate_promise]() {
-              constexpr auto kVerificationTimeout = std::chrono::seconds(6);
-              const auto status = display_helper_integration::wait_for_apply_verification(kVerificationTimeout);
+            std::thread([gate_promise, verification_ticket]() {
+              const auto status = display_helper_integration::wait_for_apply_verification(
+                verification_ticket,
+                display_helper_integration::kApplyVerificationTimeout);
               rtsp_stream::launch_session_t::display_helper_gate_status_e gate_status =
                 rtsp_stream::launch_session_t::display_helper_gate_status_e::proceed_gaveup;
               if (status == display_helper_integration::ApplyVerificationStatus::Verified) {
@@ -3279,6 +3365,7 @@ namespace nvhttp {
     virtual_display_teardown_guard.disable();
 #endif
     output_override_guard.disable();
+    runtime_overrides_guard.disable();
     revert_display_configuration = false;
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
@@ -3943,6 +4030,35 @@ namespace nvhttp {
 
   bool disconnect_client(const std::string &uuid) {
     return rtsp_stream::disconnect_client_sessions(uuid);
+  }
+
+  bool has_client_uuid(std::string_view uuid) {
+    std::lock_guard<std::mutex> lock(client_mutex);
+    for (const auto &named_cert : client_root.named_devices) {
+      if (named_cert->uuid == uuid) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  std::unordered_map<std::string, std::string> get_client_config_overrides(const std::string &uuid) {
+    std::lock_guard<std::mutex> lock(client_mutex);
+    for (const auto &named_cert : client_root.named_devices) {
+      if (named_cert->uuid == uuid) {
+        auto overrides = named_cert->config_overrides;
+#ifdef _WIN32
+        if (!named_cert->hdr_profile.empty() && !overrides.contains("rtx_hdr_peak_brightness")) {
+          if (const auto profile_peak = VDISPLAY::hdr_profile_peak_luminance_nits(named_cert->hdr_profile)) {
+            const auto effective_peak = std::clamp<std::uint32_t>(*profile_peak, 400, 2000);
+            overrides.insert_or_assign("rtx_hdr_peak_brightness", std::to_string(effective_peak));
+          }
+        }
+#endif
+        return overrides;
+      }
+    }
+    return {};
   }
 
   void update_session_info(stream::session_t &session, const std::string &name, const crypto::PERM newPerm) {

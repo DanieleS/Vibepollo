@@ -231,7 +231,7 @@ namespace nvhttp {
    * @return The client's override value, or std::nullopt to inherit the global value.
    */
   std::optional<bool> get_client_prefer_10bit_sdr_override(const std::string &uuid);
-
+  bool has_client_uuid(std::string_view uuid);
 
   /**
    * @brief Get all paired clients.
@@ -274,6 +274,11 @@ namespace nvhttp {
    * @brief Get a client's prefer_10bit_sdr override.
    */
   std::optional<bool> get_client_prefer_10bit_sdr_override(const std::string &uuid);
+
+  /**
+   * @brief Get a copy of a client's runtime config overrides.
+   */
+  std::unordered_map<std::string, std::string> get_client_config_overrides(const std::string &uuid);
 
   /**
    * @brief Persist a per-client HDR color profile selection (Windows only).

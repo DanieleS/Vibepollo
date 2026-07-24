@@ -124,9 +124,10 @@ namespace platf::playnite {
 
   /**
    * @brief Force an immediate Playnite sync (applies auto-sync logic immediately).
+   * @param[in] wait_for_snapshot Wait for a delivered snapshot request before reconciling.
    * @return `true` if the sync was triggered, `false` otherwise.
    */
-  bool force_sync();
+  bool force_sync(bool wait_for_snapshot = true);
 
   /**
    * @brief Retrieve or generate a cover PNG for a Playnite game and return its path.
@@ -168,6 +169,14 @@ namespace platf::playnite {
    * @brief Snapshot the latest gameStarted/gameStopped status reported by the Playnite plugin.
    */
   active_game_status_t get_active_game_status();
+
+  /**
+   * @brief Snapshot every game currently reported as running by the Playnite plugin.
+   * @details Entries are ordered from oldest to most recently started. Consumers can use
+   *          these identities to recognize foreground games without treating a background
+   *          Playnite session as active gameplay.
+   */
+  std::vector<active_game_status_t> get_active_game_statuses();
 
   // no-op: persistence helper moved to confighttp as refresh_client_apps_cache
 

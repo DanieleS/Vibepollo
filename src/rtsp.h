@@ -76,7 +76,7 @@ namespace rtsp_stream {
     std::string surround_params;
     bool continuous_audio;
     bool enable_hdr;
-    // Resolved global/per-client policy, independent of the client's HDR marker.
+    // Resolved global/per-client preference for Main10 SDR when the client requests SDR.
     bool prefer_sdr_10bit = false;
     // Explicit HDR-off override. Unlike prefer_sdr_10bit, this does not request Main10.
     bool force_sdr = false;
@@ -150,8 +150,24 @@ namespace rtsp_stream {
     [[nodiscard]] std::shared_ptr<launch_session_t> clone_for_startup() const;
   };
 
+  inline bool effective_hdr_requested(const bool client_hdr_requested, const bool force_sdr) {
+    return client_hdr_requested && !force_sdr;
+  }
+
   inline bool effective_hdr_requested(const launch_session_t &session) {
-    return session.enable_hdr && !session.prefer_sdr_10bit && !session.force_sdr;
+    return effective_hdr_requested(session.enable_hdr, session.force_sdr);
+  }
+
+  inline bool effective_10bit_sdr_requested(
+    const bool prefer_sdr_10bit,
+    const bool client_hdr_requested,
+    const bool force_sdr
+  ) {
+    return prefer_sdr_10bit && !effective_hdr_requested(client_hdr_requested, force_sdr);
+  }
+
+  inline bool effective_10bit_sdr_requested(const launch_session_t &session) {
+    return effective_10bit_sdr_requested(session.prefer_sdr_10bit, session.enable_hdr, session.force_sdr);
   }
 
   inline bool framegen_capture_fix_enabled(const launch_session_t &session) {
@@ -174,7 +190,8 @@ namespace rtsp_stream {
     std::optional<int> lossless_rtss_limit,
     std::string_view capture_mode,
     bool auto_capture_uses_wgc,
-    bool auto_virtual_framegen_limiter
+    bool auto_virtual_framegen_limiter,
+    int virtual_display_refresh_multiplier
   ) {
     return framegen::make_stream_start_policy({
       .fps = session.fps,
@@ -188,6 +205,7 @@ namespace rtsp_stream {
       .capture_mode = std::string(capture_mode),
       .auto_capture_uses_wgc = auto_capture_uses_wgc,
       .auto_virtual_framegen_limiter = auto_virtual_framegen_limiter,
+      .virtual_display_refresh_multiplier = virtual_display_refresh_multiplier,
     });
   }
 

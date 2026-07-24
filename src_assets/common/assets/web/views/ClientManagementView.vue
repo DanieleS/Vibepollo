@@ -209,6 +209,10 @@
           $t('troubleshooting.unpair_all_error')
         }}</n-alert>
 
+        <n-alert v-if="clientsLoadError" type="error">
+          {{ clientsLoadError }}
+        </n-alert>
+
         <div v-if="clientsLoading && !clientsReady" class="client-empty client-empty--loading">
           <i class="fas fa-spinner fa-spin" />
           {{ $t('clients.loading') }}
@@ -398,9 +402,9 @@
                   <n-form-item>
                     <n-checkbox v-model:checked="client.editAllowClientCommands" size="small">
                       <div class="flex flex-col">
-                        <span>Allow Client Commands</span>
+                        <span>{{ $t('pin.allow_client_commands') }}</span>
                         <span class="text-[11px] opacity-60">
-                          Allow this client to run connect and disconnect commands.
+                          {{ $t('pin.allow_client_commands_desc') }}
                         </span>
                       </div>
                     </n-checkbox>
@@ -412,7 +416,7 @@
                     >
                       <div class="flex items-center justify-between gap-3">
                         <div class="text-xs font-semibold uppercase tracking-wide opacity-70">
-                          Connect Commands
+                          {{ $t('pin.client_do_cmd') }}
                         </div>
                         <n-button
                           size="tiny"
@@ -423,7 +427,7 @@
                         </n-button>
                       </div>
                       <div v-if="client.editDoCommands.length === 0" class="text-xs opacity-70">
-                        No commands configured.
+                        {{ $t('apps.framegen.mode_none') }}
                       </div>
                       <div v-else class="space-y-2">
                         <div
@@ -462,7 +466,7 @@
                     >
                       <div class="flex items-center justify-between gap-3">
                         <div class="text-xs font-semibold uppercase tracking-wide opacity-70">
-                          Disconnect Commands
+                          {{ $t('pin.client_undo_cmd') }}
                         </div>
                         <n-button
                           size="tiny"
@@ -473,7 +477,7 @@
                         </n-button>
                       </div>
                       <div v-if="client.editUndoCommands.length === 0" class="text-xs opacity-70">
-                        No commands configured.
+                        {{ $t('apps.framegen.mode_none') }}
                       </div>
                       <div v-else class="space-y-2">
                         <div
@@ -700,6 +704,20 @@
                     </div>
                   </div>
 
+                  <div
+                    v-if="isWindows && clientUsesSharedVirtualDisplay(client)"
+                    class="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950/30 lg:col-span-2"
+                  >
+                    <p class="text-[11px] leading-snug text-amber-900 dark:text-amber-100">
+                      <span class="flex items-start gap-2">
+                        <i
+                          class="fas fa-exclamation-triangle mt-0.5 flex-shrink-0 text-amber-600 dark:text-amber-400"
+                        />
+                        <span class="block">{{ t('clients.shared_display_hdr_warning') }}</span>
+                      </span>
+                    </p>
+                  </div>
+
                   <n-form-item v-if="isWindows" :label="t('clients.hdr_profile_label')">
                     <n-select
                       v-model:value="client.editHdrProfile"
@@ -714,6 +732,65 @@
                       <span class="text-xs opacity-70">{{ t('clients.hdr_profile_desc') }}</span>
                       <span v-if="hdrProfilesError" class="text-xs text-red-500 block">{{
                         hdrProfilesError
+                      }}</span>
+                    </template>
+                  </n-form-item>
+
+                  <n-form-item v-if="isWindows" :label="t('clients.hdr_peak_nits_label')">
+                    <n-input-number
+                      :value="clientNumericOverride(client, 'rtx_hdr_peak_brightness', 400, 2000)"
+                      :min="400"
+                      :max="2000"
+                      :step="50"
+                      clearable
+                      :placeholder="t('clients.hdr_peak_nits_placeholder')"
+                      @update:value="
+                        (value) =>
+                          setClientNumericOverride(
+                            client,
+                            'rtx_hdr_peak_brightness',
+                            value,
+                            400,
+                            2000,
+                          )
+                      "
+                    >
+                      <template #suffix>nits</template>
+                    </n-input-number>
+                    <template #feedback>
+                      <span class="text-xs opacity-70">{{ t('clients.hdr_peak_nits_desc') }}</span>
+                    </template>
+                  </n-form-item>
+
+                  <n-form-item
+                    v-if="isWindows && clientUsesVirtualDisplay(client)"
+                    :label="t('clients.virtual_display_scale_label')"
+                  >
+                    <n-select
+                      :value="clientNumericOverride(client, 'dd_virtual_display_scale', 0, 500)"
+                      :options="clientVirtualDisplayScaleOptions"
+                      clearable
+                      :placeholder="
+                        globalVirtualDisplayScale > 0
+                          ? t('clients.virtual_display_scale_placeholder', {
+                              scale: globalVirtualDisplayScale,
+                            })
+                          : t('config.virtual_display_scale_auto')
+                      "
+                      @update:value="
+                        (value) =>
+                          setClientNumericOverride(
+                            client,
+                            'dd_virtual_display_scale',
+                            value,
+                            0,
+                            500,
+                          )
+                      "
+                    />
+                    <template #feedback>
+                      <span class="text-xs opacity-70">{{
+                        t('clients.virtual_display_scale_desc')
                       }}</span>
                     </template>
                   </n-form-item>
@@ -749,7 +826,7 @@
             </article>
           </div>
         </template>
-        <div v-else class="client-empty">
+        <div v-else-if="!clientsLoadError" class="client-empty">
           <i class="fas fa-users-slash" />
           <span>
             {{
@@ -862,6 +939,7 @@ import {
   NForm,
   NFormItem,
   NInput,
+  NInputNumber,
   NModal,
   NRadio,
   NRadioGroup,
@@ -1086,6 +1164,7 @@ const clients = ref<ClientViewModel[]>([]);
 const clientsLoading = ref<boolean>(true);
 const clientsReady = ref<boolean>(false);
 const clientsRefreshing = ref<boolean>(false);
+const clientsLoadError = ref<string>('');
 const lastRefreshedAt = ref<number | null>(null);
 const platform = ref<string>('');
 const clientSearchQuery = ref<string>('');
@@ -1359,6 +1438,69 @@ const virtualDisplayModeOptions = computed(() => [
   { label: t('config.virtual_display_mode_shared'), value: 'shared' },
 ]);
 
+const globalVirtualDisplayMode = computed<'disabled' | 'per_client' | 'shared'>(() => {
+  const mode = parseClientVirtualDisplayMode(configValue('virtual_display_mode'));
+  return mode === 'disabled' || mode === 'shared' ? mode : 'per_client';
+});
+
+const globalVirtualDisplayScale = computed<number>(() => {
+  const value = Number(configValue('dd_virtual_display_scale'));
+  return Number.isFinite(value) ? value : 250;
+});
+
+const clientVirtualDisplayScaleOptions = computed(() => [
+  { label: t('config.virtual_display_scale_auto'), value: 0 },
+  ...[100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500].map((value) => ({
+    label: `${value}%`,
+    value,
+  })),
+]);
+
+function clientUsesVirtualDisplay(client: ClientViewModel): boolean {
+  if (!client.editDisplayOverrideEnabled) {
+    return globalVirtualDisplayMode.value !== 'disabled';
+  }
+  return client.editDisplaySelection === 'virtual';
+}
+
+function clientUsesSharedVirtualDisplay(client: ClientViewModel): boolean {
+  if (!clientUsesVirtualDisplay(client)) return false;
+  if (!client.editDisplayOverrideEnabled) {
+    return globalVirtualDisplayMode.value === 'shared';
+  }
+  return (
+    client.editVirtualDisplayMode === 'shared' ||
+    ((client.editVirtualDisplayMode === 'global' || client.editVirtualDisplayMode === null) &&
+      globalVirtualDisplayMode.value === 'shared')
+  );
+}
+
+function clientNumericOverride(
+  client: ClientViewModel,
+  key: string,
+  min: number,
+  max: number,
+): number | null {
+  const rawValue = client.editConfigOverrides?.[key];
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+  const value = Number(rawValue);
+  return Number.isFinite(value) && value >= min && value <= max ? value : null;
+}
+
+function setClientNumericOverride(
+  client: ClientViewModel,
+  key: string,
+  value: number | null,
+  min: number,
+  max: number,
+): void {
+  if (value === null || !Number.isFinite(value)) {
+    delete client.editConfigOverrides[key];
+    return;
+  }
+  client.editConfigOverrides[key] = Math.min(max, Math.max(min, Number(value)));
+}
+
 const globalVirtualDisplayLayout = computed<ClientVirtualDisplayLayout>(() =>
   parseClientVirtualDisplayLayout(configValue('virtual_display_layout')),
 );
@@ -1473,9 +1615,23 @@ const isClientDisplayOverrideValid = computed(() => {
   return true;
 });
 
+function showClientsLoadError(error: unknown, notify: boolean): void {
+  const serverError = (
+    error as { response?: { data?: { error?: unknown } } } | null | undefined
+  )?.response?.data?.error;
+  clientsLoadError.value =
+    typeof serverError === 'string' && serverError.trim()
+      ? serverError
+      : t('auth.request_failed');
+  if (notify) {
+    message.error(clientsLoadError.value);
+  }
+}
+
 async function refreshClients(options: { manual?: boolean } = {}): Promise<void> {
   const auth = useAuthStore();
   if (!auth.isAuthenticated) {
+    auth.requireLogin();
     clientsReady.value = true;
     clientsLoading.value = false;
     clientsRefreshing.value = false;
@@ -1489,9 +1645,7 @@ async function refreshClients(options: { manual?: boolean } = {}): Promise<void>
     clientsLoading.value = true;
   }
   try {
-    const r = await http.get<ClientsListResponse>('./api/clients/list', {
-      validateStatus: () => true,
-    });
+    const r = await http.get<ClientsListResponse>('/api/clients/list');
     const response = r.data || ({} as ClientsListResponse);
     if (typeof response.platform === 'string') {
       platform.value = response.platform;
@@ -1509,14 +1663,14 @@ async function refreshClients(options: { manual?: boolean } = {}): Promise<void>
         return createClientViewModel(entry);
       });
       clients.value = mapped;
+      clientsLoadError.value = '';
       lastRefreshedAt.value = Date.now();
       ensureDisplayDevicesLoaded();
     } else {
-      clients.value = [];
-      lastRefreshedAt.value = Date.now();
+      showClientsLoadError(null, !!options.manual);
     }
-  } catch {
-    clients.value = [];
+  } catch (error: unknown) {
+    showClientsLoadError(error, !!options.manual);
   } finally {
     clientsReady.value = true;
     clientsLoading.value = false;

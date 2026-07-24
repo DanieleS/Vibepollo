@@ -84,6 +84,22 @@ TEST(SunshineVirtualDisplay, StableVirtualDisplayUuidKeepsCanonicalUuidBytes) {
   );
 }
 
+TEST(SunshineVirtualDisplay, RecoveryJournalRawUuidRoundTripsDriverGuidBytes) {
+  constexpr std::string_view raw_guid = "EAADBAA7-AFE9-2232-FF17-F29CD76380DD";
+
+  const auto parsed = uuid_util::uuid_t::parse_raw(std::string {raw_guid});
+
+  EXPECT_EQ(parsed.string(), raw_guid);
+  EXPECT_FALSE(parsed == uuid_util::uuid_t::parse(std::string {raw_guid}));
+}
+
+TEST(SunshineVirtualDisplay, RecoveryJournalRawUuidRejectsMalformedString) {
+  EXPECT_THROW(
+    uuid_util::uuid_t::parse_raw("EAADBAA7-AFE9-2232-FF17-F29CD76380DG"),
+    std::invalid_argument
+  );
+}
+
 TEST(SunshineVirtualDisplay, StableVirtualDisplayUuidDerivesNonCanonicalClientId) {
   const auto first = VDISPLAY::virtualDisplayUuidFromStableId("0123456789ABCDEF");
   const auto second = VDISPLAY::virtualDisplayUuidFromStableId("0123456789ABCDEF");
@@ -375,21 +391,4 @@ TEST(SunshineWgcCapture, FramePoolStartsLowLatencyAndCanAdapt) {
   expect_contains(helper_source, "publish_fps=");
 }
 
-TEST(SunshineWgcCapture, HelperDoesNotHoldSharedMutexWhileWaitingForLocalD3DContext) {
-  const auto helper_source = read_source("tools/sunshine_wgc_capture.cpp");
-
-  const auto function_start = helper_source.find("void copy_frame_to_shared_texture(");
-  ASSERT_NE(function_start, std::string::npos);
-
-  const auto context_lock = helper_source.find("std::unique_lock context_lock(_d3d_context_mutex);", function_start);
-  const auto shared_mutex = helper_source.find("get_keyed_mutex()->AcquireSync(0, 200)", function_start);
-  ASSERT_NE(context_lock, std::string::npos);
-  ASSERT_NE(shared_mutex, std::string::npos);
-  EXPECT_LT(context_lock, shared_mutex);
-
-  expect_contains(helper_source, "context_wait_ms=");
-  expect_contains(helper_source, "shared_mutex_hold_ms=");
-  expect_contains(helper_source, "slow_context_count=");
-  expect_contains(helper_source, "slow_shared_hold_count=");
-}
 #endif

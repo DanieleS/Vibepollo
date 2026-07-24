@@ -20,6 +20,7 @@
 #include <optional>
 #include <ShlObj.h>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 #include <windows.h>
@@ -115,6 +116,44 @@ namespace playnite_launcher {
       return s;
     }
 
+    nlohmann::json snapshot_process_environment() {
+      nlohmann::json environment = nlohmann::json::object();
+      LPWCH block = GetEnvironmentStringsW();
+      if (!block) {
+        BOOST_LOG(warning) << "Unable to capture environment for Playnite launch, error=" << GetLastError();
+        return environment;
+      }
+
+      auto free_block = util::fail_guard([block]() {
+        FreeEnvironmentStringsW(block);
+      });
+
+      for (const wchar_t *entry = block; *entry != L'\0'; entry += wcslen(entry) + 1) {
+        std::wstring_view pair(entry);
+        auto separator = pair.find(L'=');
+        // Windows environment blocks can contain drive-current-directory entries
+        // (for example, "=C:=C:\\working"). They are not regular variables and
+        // cannot be set through the .NET process-environment API used by Playnite.
+        if (separator == 0) {
+          separator = pair.find(L'=', 1);
+        }
+        if (separator == std::wstring_view::npos || separator == 0) {
+          continue;
+        }
+
+        try {
+          std::wstring_view name = pair.substr(0, separator);
+          std::wstring_view value = pair.substr(separator + 1);
+          environment[platf::dxgi::wide_to_utf8(std::wstring(name))] =
+            platf::dxgi::wide_to_utf8(std::wstring(value));
+        } catch (...) {
+          BOOST_LOG(warning) << "Unable to serialize an environment variable for Playnite launch";
+        }
+      }
+
+      return environment;
+    }
+
     int run_cleanup_mode(const LauncherConfig &config, const lossless::lossless_scaling_options &lossless_options) {
       BOOST_LOG(info) << "Cleanup mode: starting (installDir='" << config.install_dir << "' fullscreen=" << (config.fullscreen ? 1 : 0) << ")";
       if (!config.wait_for_pid.empty()) {
@@ -159,6 +198,7 @@ namespace playnite_launcher {
       BOOST_LOG(info) << "Fullscreen mode: preparing IPC connection to Playnite plugin";
 
       platf::playnite::IpcClient client;
+      const auto fullscreen_launch_environment = snapshot_process_environment();
       std::atomic<bool> pipe_connected {false};
 
       std::atomic<bool> game_start_signal {false};
@@ -332,6 +372,17 @@ namespace playnite_launcher {
           hello["pid"] = static_cast<uint32_t>(GetCurrentProcessId());
           hello["mode"] = "fullscreen";
           client.send_json_line(hello.dump());
+
+          // Keep the session environment active while this fullscreen helper is
+          // connected. This covers games and other child processes started from
+          // Playnite's fullscreen UI, including manually selected games.
+          nlohmann::json environment_command;
+          environment_command["type"] = "command";
+          environment_command["command"] = "set-environment";
+          environment_command["env"] = fullscreen_launch_environment;
+          if (!client.send_json_line(environment_command.dump())) {
+            BOOST_LOG(warning) << "Fullscreen mode: failed to send persistent environment to Playnite";
+          }
         } catch (...) {}
       });
 
@@ -542,7 +593,8 @@ namespace playnite_launcher {
             auto grace = long_session ? game_missing_grace_short : game_missing_grace_long;
             game_alive = (now - *game_missing_since) < grace;
           }
-        } else {
+        }
+        else {
           // gameStarted signaled but the process has not been observed yet; trust IPC + grace.
           game_alive = active_game_now;
         }
@@ -609,8 +661,7 @@ namespace playnite_launcher {
 
         if (fs_running || game_alive || in_grace || waiting_for_pipe) {
           consecutive_missing = 0;
-        }
-        else {
+        } else {
           consecutive_missing++;
         }
 
@@ -772,6 +823,7 @@ namespace playnite_launcher {
       BOOST_LOG(info) << "Launcher mode: preparing IPC connection to Playnite plugin";
 
       platf::playnite::IpcClient client;
+      const auto launch_environment = snapshot_process_environment();
 
       std::atomic<bool> should_exit {false};
       std::atomic<bool> got_started {false};
@@ -800,6 +852,10 @@ namespace playnite_launcher {
         j["type"] = "command";
         j["command"] = "launch";
         j["id"] = config.game_id;
+        // Playnite is usually already running, so its children would otherwise
+        // inherit Playnite's stale environment instead of the per-session
+        // environment Sunshine gave this helper.
+        j["env"] = launch_environment;
         launch_command_sent.store(true, std::memory_order_release);
         if (!client.send_json_line(j.dump())) {
           BOOST_LOG(error) << "Failed to send launch command for id=" << config.game_id << " reason=" << reason;
@@ -852,9 +908,16 @@ namespace playnite_launcher {
           return normalize_game_id(std::move(s));
         };
         if (!msg.status_game_id.empty() && norm(msg.status_game_id) == norm(config.game_id)) {
-          if (!launch_command_sent.load(std::memory_order_acquire)) {
+          const bool launch_was_sent = launch_command_sent.load(std::memory_order_acquire);
+          if (!launch_was_sent && msg.status_name != "gameStarted") {
             BOOST_LOG(debug) << "Ignoring pre-launch status '" << msg.status_name << "' for id=" << msg.status_game_id;
             return;
+          }
+          if (!launch_was_sent) {
+            // The plugin synchronizes an already-running game as soon as the launcher
+            // connects. That status can arrive before the launcher has sent its launch
+            // command, which is the normal resume path rather than stale state.
+            BOOST_LOG(info) << "Accepting active game sync before launch for id=" << msg.status_game_id;
           }
           if (!msg.status_install_dir.empty()) {
             bool changed = last_install_dir != msg.status_install_dir;
@@ -1247,10 +1310,11 @@ namespace playnite_launcher {
       };
 
       auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(config.timeout_sec);
-      // After gameStarted, monitor the launched game's processes (not Playnite itself).
-      // Playnite can be configured to close when launching a game, and that must not
-      // tear down the stream. We exit when either gameStopped arrives over IPC (sets
-      // should_exit), or the game's processes have all disappeared for a grace window.
+      // While the plugin connection is active, gameStarted/gameStopped is authoritative.
+      // Process paths reported by launchers and mod managers can point somewhere other
+      // than the actual game, so treating a local scan miss as game exit would tear down
+      // a healthy stream. If Playnite or its IPC goes away, fall back to the process scan
+      // so quit-on-launch configurations can still clean themselves up.
       std::optional<std::chrono::steady_clock::time_point> game_missing_since;
       const auto game_missing_grace = std::chrono::seconds(15);
       while (!should_exit.load()) {
@@ -1259,6 +1323,11 @@ namespace playnite_launcher {
           break;
         }
         if (got_started.load()) {
+          if (client.is_active()) {
+            game_missing_since.reset();
+            std::this_thread::sleep_for(250ms);
+            continue;
+          }
           bool any_game_proc = false;
           if (!last_install_dir.empty()) {
             try {

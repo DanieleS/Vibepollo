@@ -174,7 +174,7 @@ namespace stream {
           return;
         }
 
-        if (session::running_sessions.load(std::memory_order_acquire) != 0 || webrtc_stream::has_active_sessions()) {
+        if (session::running_sessions.load(std::memory_order_acquire) != 0 || webrtc_stream::has_active_or_pending_sessions()) {
           return;
         }
 
@@ -792,7 +792,7 @@ namespace stream {
   }
 
   bool stream_start_actions_still_needed() {
-    return session::running_sessions.load(std::memory_order_acquire) != 0 || webrtc_stream::has_active_sessions();
+    return session::running_sessions.load(std::memory_order_acquire) != 0 || webrtc_stream::has_active_or_pending_sessions();
   }
 
   void defer_stream_start_actions(deferred_stream_start_t deferred) {
@@ -2553,7 +2553,7 @@ namespace stream {
       BOOST_LOG(debug) << "Display helper: waiting for apply/validation gate before starting capture.";
       rtsp_stream::launch_session_t::display_helper_gate_status_e gate_status {};
       try {
-        constexpr auto kGateTimeout = std::chrono::seconds(7);
+        constexpr auto kGateTimeout = display_helper_integration::kApplyVerificationGateWaitTimeout;
         if (session->display_helper_gate.wait_for(kGateTimeout) == std::future_status::ready) {
           gate_status = session->display_helper_gate.get();
         } else {
@@ -2748,7 +2748,7 @@ namespace stream {
         display_helper_integration::clear_pending_apply();
         clear_deferred_stream_start_actions();
 #endif
-        const bool webrtc_active = webrtc_stream::has_active_sessions();
+        const bool webrtc_active = webrtc_stream::has_active_or_pending_sessions();
         if (!webrtc_active) {
           proc::proc.pause();
         }
@@ -2908,7 +2908,7 @@ namespace stream {
 
       // If this is the first session, invoke the platform callbacks
       if (++running_sessions == 1) {
-        if (!webrtc_stream::has_active_sessions()) {
+        if (!webrtc_stream::has_active_or_pending_sessions()) {
           webrtc_stream::set_rtsp_capture_config(session.config.monitor, session.config.audio);
         }
         webrtc_stream::set_rtsp_sessions_active(true);
@@ -2942,7 +2942,8 @@ namespace stream {
             .uses_virtual_display = session.virtual_display.active,
             .capture_mode = config::video.capture,
             .auto_capture_uses_wgc = platf::dxgi::should_use_wgc_default(),
-            .auto_virtual_framegen_limiter = config::frame_limiter.auto_virtual_framegen,
+            .auto_virtual_framegen_limiter = config::frame_limiter.virtual_display_limiter_enabled(),
+            .virtual_display_refresh_multiplier = config::frame_limiter.fixed_virtual_display_refresh_multiplier(),
           });
           const bool defer_stream_start = platf::is_running_as_system() && !user_session_ready();
           if (defer_stream_start) {

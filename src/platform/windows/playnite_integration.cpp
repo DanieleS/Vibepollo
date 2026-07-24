@@ -63,6 +63,7 @@ namespace platf::playnite {
     std::unordered_map<std::string, std::string> g_install_dirs;  // lower(playnite id) -> install dir
     std::mutex g_active_game_mutex;
     active_game_status_t g_active_game;
+    std::vector<active_game_status_t> g_active_games;
 
     std::string lower_copy(std::string s) {
       std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
@@ -84,18 +85,30 @@ namespace platf::playnite {
         return;
       }
       std::scoped_lock lk(g_active_game_mutex);
-      g_active_game.active = true;
-      g_active_game.id = id;
-      g_active_game.exe = exe;
-      g_active_game.install_dir = install_dir;
+      const auto normalized_id = lower_copy(id);
+      std::erase_if(g_active_games, [&](const auto &game) {
+        return lower_copy(game.id) == normalized_id;
+      });
+      g_active_games.push_back({
+        .active = true,
+        .id = id,
+        .exe = exe,
+        .install_dir = install_dir,
+      });
+      g_active_game = g_active_games.back();
     }
 
     void remember_active_game_stopped(const std::string &id) {
       std::scoped_lock lk(g_active_game_mutex);
-      if (!id.empty() && !g_active_game.id.empty() && id != g_active_game.id) {
-        return;
+      if (id.empty()) {
+        g_active_games.clear();
+      } else {
+        const auto normalized_id = lower_copy(id);
+        std::erase_if(g_active_games, [&](const auto &game) {
+          return lower_copy(game.id) == normalized_id;
+        });
       }
-      g_active_game = {};
+      g_active_game = g_active_games.empty() ? active_game_status_t {} : g_active_games.back();
     }
   }  // namespace
 
@@ -115,6 +128,11 @@ namespace platf::playnite {
   active_game_status_t get_active_game_status() {
     std::scoped_lock lk(g_active_game_mutex);
     return g_active_game;
+  }
+
+  std::vector<active_game_status_t> get_active_game_statuses() {
+    std::scoped_lock lk(g_active_game_mutex);
+    return g_active_games;
   }
 
   struct playnite_session_tracker_t {
@@ -314,7 +332,7 @@ namespace platf::playnite {
       return client_ && client_->send_json_line(s);
     }
 
-    bool trigger_sync() {
+    bool trigger_sync(const bool wait_for_snapshot) {
       // Reconciling against the cached snapshot right away is wrong when the IPC client just
       // started (cache empty) or Playnite has unsent changes: ask the plugin for a fresh snapshot
       // and wait for it to complete before syncing. Older plugins ignore the command and never
@@ -325,13 +343,14 @@ namespace platf::playnite {
         std::scoped_lock lk(mutex_);
         start_generation = snapshot_generation_;
       }
+      bool snapshot_requested = false;
       try {
         nlohmann::json req;
         req["type"] = "command";
         req["command"] = "snapshot";
-        send_cmd_json_line(req.dump());
+        snapshot_requested = send_cmd_json_line(req.dump());
       } catch (...) {}
-      {
+      if (snapshot_requested && wait_for_snapshot) {
         std::unique_lock lk(mutex_);
         const bool fresh = snapshot_cv_.wait_for(lk, kManualSyncSnapshotWait, [&]() {
           return snapshot_generation_ != start_generation;
@@ -341,9 +360,14 @@ namespace platf::playnite {
                              << std::chrono::duration_cast<std::chrono::seconds>(kManualSyncSnapshotWait).count()
                              << "s; syncing against cached data";
         }
+      } else if (!snapshot_requested) {
+        BOOST_LOG(debug) << "Playnite: snapshot command was not delivered; skipping snapshot wait";
+      } else {
+        BOOST_LOG(debug) << "Playnite: snapshot requested asynchronously; syncing against cached data without blocking startup";
       }
       auto stats = sync_apps_metadata();
-      BOOST_LOG(info) << "Playnite: manual library sync " << sync_summary(stats);
+      BOOST_LOG(info) << "Playnite: " << (wait_for_snapshot ? "manual" : "non-blocking")
+                      << " library sync " << sync_summary(stats);
       return stats.success;
     }
 
@@ -1443,13 +1467,17 @@ namespace platf::playnite {
     return inst->send_cmd_json_line(j.dump());
   }
 
-  bool force_sync() {
+  bool force_sync(const bool wait_for_snapshot) {
+    if (!is_plugin_installed()) {
+      BOOST_LOG(debug) << "Playnite: sync skipped because the plugin is not installed";
+      return false;
+    }
     auto inst = g_instance.load(std::memory_order_acquire);
     if (!inst) {
       return false;
     }
     inst->ensure_started_for_api();
-    return inst->trigger_sync();
+    return inst->trigger_sync(wait_for_snapshot);
   }
 
   bool get_cover_png_for_playnite_game(const std::string &playnite_id, std::string &out_path) {
