@@ -44,6 +44,10 @@ namespace platf::scry {
     /// the same conclusion forever.
     constexpr auto RESPAWN_BACKOFF = 30s;
 
+    /// A helper that survived at least this long was working, not failing, so
+    /// its exit does not earn the backoff above.
+    constexpr auto MIN_HEALTHY_RUN = 5s;
+
     /// How long a reader parks when its pipe has nothing to say. Small enough
     /// that the exit checks around it stay responsive, large enough that an idle
     /// game costs nothing.
@@ -66,6 +70,17 @@ namespace platf::scry {
     };
 
     sync_util::sync_t<snapshot_t> g_snapshot;
+
+    /// Monotonic across the whole process lifetime, never per-attach. A consumer
+    /// remembers the last revision it acted on, and two games in quick
+    /// succession must not be able to produce the same number twice — which is
+    /// exactly what a counter restarting at 1 on every attach would do.
+    std::atomic<std::uint64_t> g_revision {0};
+
+    /// Stamp the snapshot as changed. Callers must already hold its lock.
+    void bump(snapshot_t &snapshot) {
+      snapshot.revision = g_revision.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
 
     std::thread g_thread;
     std::mutex g_cv_mutex;
@@ -245,7 +260,7 @@ namespace platf::scry {
           snap.contract_version = it->get<std::uint32_t>();
         }
         snap.values = nlohmann::json::object();
-        ++snap.revision;
+        bump(snap);
         BOOST_LOG(info) << "scry: attached to " << snap.process << " with profile '" << snap.profile
                         << "' (contract " << (snap.contract_version ? std::to_string(*snap.contract_version) : "none") << ")";
         return;
@@ -266,7 +281,7 @@ namespace platf::scry {
         for (const auto &[name, value] : values->items()) {
           snap.values[name] = value;
         }
-        ++snap.revision;
+        bump(snap);
         return;
       }
 
@@ -327,6 +342,11 @@ namespace platf::scry {
         }
       });
 
+      // Re-checking the target costs a foreground-window query and a lock on
+      // `proc`; the read loop spins every POLL_INTERVAL, which is far too often
+      // to pay that. The answer only changes on human timescales anyway.
+      auto next_target_check = std::chrono::steady_clock::now() + SUPERVISE_INTERVAL;
+
       std::string buffer;
       while (!g_stop.load(std::memory_order_acquire)) {
         const auto result = pump(pipes.stdout_read.get(), buffer);
@@ -348,9 +368,12 @@ namespace platf::scry {
 
         // A target that changed out from under us (the game exited, the user
         // switched to a different one) makes this helper stale immediately.
-        const auto current = resolve_target();
-        if (!current || !(*current == target)) {
-          break;
+        if (const auto now = std::chrono::steady_clock::now(); now >= next_target_check) {
+          next_target_check = now + SUPERVISE_INTERVAL;
+          const auto current = resolve_target();
+          if (!current || !(*current == target)) {
+            break;
+          }
         }
       }
 
@@ -387,12 +410,21 @@ namespace platf::scry {
           continue;
         }
 
+        const auto started_at = std::chrono::steady_clock::now();
         run_helper(*helper, *profiles, *target);
+        const auto ran_for = std::chrono::steady_clock::now() - started_at;
 
-        // Whatever the reason the helper stopped, do not immediately re-run it
-        // against the same process: the likeliest reason is that no profile fits
-        // it, which will still be true a millisecond from now.
-        retry_after = std::chrono::steady_clock::now() + RESPAWN_BACKOFF;
+        if (ran_for < MIN_HEALTHY_RUN) {
+          // It gave up almost immediately. The likeliest reason is the honest
+          // one — no profile fits this game — and that will still be true a
+          // millisecond from now, so back off rather than spin.
+          retry_after = std::chrono::steady_clock::now() + RESPAWN_BACKOFF;
+        } else {
+          // A helper that ran and then stopped was doing its job until the game
+          // or the target changed. Penalising that would delay telemetry for the
+          // *next* game by half a minute for no reason.
+          retry_after.reset();
+        }
       }
 
       clear_snapshot();
