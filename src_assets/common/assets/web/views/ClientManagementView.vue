@@ -973,6 +973,7 @@ type PermissionToggleKey =
   | 'clipboard_set'
   | 'clipboard_read'
   | 'server_cmd'
+  | 'telemetry_read'
   | 'input_controller'
   | 'input_touch'
   | 'input_pen'
@@ -997,7 +998,8 @@ const permissionMapping = {
   file_upload: 0x00040000,
   file_dwnload: 0x00080000,
   server_cmd: 0x00100000,
-  _all_operations: 0x001f0000,
+  telemetry_read: 0x00200000,
+  _all_operations: 0x003f0000,
   list: 0x01000000,
   view: 0x02000000,
   launch: 0x04000000,
@@ -1005,7 +1007,7 @@ const permissionMapping = {
   _all_actions: 0x07000000,
   _default: 0x03000000,
   _no: 0x00000000,
-  _all: 0x071f1f00,
+  _all: 0x073f1f00,
 } as const;
 
 const permissionGroups: PermissionGroup[] = [
@@ -1025,6 +1027,7 @@ const permissionGroups: PermissionGroup[] = [
       { key: 'clipboard_set', suppressedBy: [] },
       { key: 'clipboard_read', suppressedBy: [] },
       { key: 'server_cmd', suppressedBy: [] },
+      { key: 'telemetry_read', suppressedBy: [] },
     ],
   },
   {
