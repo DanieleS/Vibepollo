@@ -365,6 +365,56 @@ jobs:
           "VDD_PREBUILT_PACKAGE_DIR=$($packageRoot.FullName)" >> $env:GITHUB_ENV
           "Using virtual display driver package: $($packageRoot.FullName)"
 
+      - name: Download pinned scry telemetry helper
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Pinned deliberately: this binary reads game memory, so which build
+          # ships is a decision, never "whatever was latest at build time".
+          SCRY_RELEASE_TAG: v0.1.0-alpha.2
+          SCRY_SHA256: ea3edd39d967721b73d88398ba73dedea198d9db9c0f82972b62695d8920ba41
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $releaseTag = $env:SCRY_RELEASE_TAG
+          $releaseVersion = $releaseTag -replace '^v', ''
+          $asset = "scry-$releaseVersion-x86_64-pc-windows-msvc.zip"
+          $downloadDir = Join-Path $PWD 'scry-release'
+          $extractDir = Join-Path $downloadDir 'extract'
+          New-Item -ItemType Directory -Force -Path $downloadDir, $extractDir | Out-Null
+
+          gh release download $releaseTag `
+            --repo DanieleS/scry `
+            --pattern $asset `
+            --dir $downloadDir `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download scry release $releaseTag."
+          }
+
+          $zip = Join-Path $downloadDir $asset
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+            throw "scry release asset $asset was not downloaded."
+          }
+
+          # The pin is only a pin if the bytes are checked against it.
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = $env:SCRY_SHA256.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "scry asset checksum mismatch: expected $expected, got $actual."
+          }
+
+          Expand-Archive -LiteralPath $zip -DestinationPath $extractDir -Force
+
+          $exe = Get-ChildItem -LiteralPath $extractDir -File -Filter 'scry.exe' -Recurse |
+            Select-Object -First 1
+          if (-not $exe) {
+            throw 'The scry release archive did not contain scry.exe.'
+          }
+
+          "SCRY_PREBUILT_DIR=$($exe.Directory.FullName)" >> $env:GITHUB_ENV
+          "Using scry $releaseTag from $($exe.Directory.FullName)"
+
       - name: Download pinned WebRTC artifacts
         shell: pwsh
         env:
@@ -424,6 +474,11 @@ jobs:
             vdd_prebuilt_arg=(-DSUNSHINE_LIBVIRTUALDISPLAY_PREBUILT_DIR="$(cygpath -u "${VDD_PREBUILT_PACKAGE_DIR}")")
             echo "Using prebuilt virtual display driver package: ${VDD_PREBUILT_PACKAGE_DIR}"
           fi
+          scry_prebuilt_arg=()
+          if [[ -n "${SCRY_PREBUILT_DIR:-}" ]]; then
+            scry_prebuilt_arg=(-DSUNSHINE_SCRY_PREBUILT_DIR="$(cygpath -u "${SCRY_PREBUILT_DIR}")")
+            echo "Using pinned scry telemetry helper: ${SCRY_PREBUILT_DIR}"
+          fi
           truehdr_runtime_arg=()
           if [[ "${REQUIRE_TRUEHDR_RUNTIME}" == "true" ]]; then
             truehdr_runtime_arg=(
@@ -455,6 +510,7 @@ jobs:
             -DSUNSHINE_PUBLISHER_WEBSITE="https://app.lizardbyte.dev" \
             -DSUNSHINE_PUBLISHER_ISSUE_URL="https://app.lizardbyte.dev/support" \
             "${vdd_prebuilt_arg[@]}" \
+            "${scry_prebuilt_arg[@]}" \
             "${truehdr_runtime_arg[@]}"
           echo "::add-matcher::.github/matchers/gcc.json"
           cmake --build build --target all -j "$(nproc)"

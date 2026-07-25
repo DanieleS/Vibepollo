@@ -38,6 +38,7 @@
   #include "src/platform/windows/misc.h"
   #include "src/platform/windows/playnite_integration.h"
   #include "src/platform/windows/rtss_integration.h"
+  #include "src/platform/windows/scry_integration.h"
   #include "src/platform/windows/virtual_display.h"
   #include "src/platform/windows/virtual_display_cleanup.h"
 #endif
@@ -471,6 +472,13 @@ int main(int argc, char *argv[]) {
   if (shutdown_event->peek()) {
     return lifetime::desired_exit_code;
   }
+
+#ifdef _WIN32
+  // Started unconditionally: the supervisor parks while the feature is off, so
+  // toggling it in the UI takes effect without a restart. It asks `proc` which
+  // app is running, hence the order.
+  auto scry_deinit_guard = platf::scry::start();
+#endif
 
 #ifdef _WIN32
   // Check if virtual display should be auto-enabled due to no physical monitors

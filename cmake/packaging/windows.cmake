@@ -102,6 +102,21 @@ install(FILES ${SUDOVDA_DRIVER_FILES}
         DESTINATION "drivers/sudovda"
         COMPONENT sudovda)
 
+# Game-memory telemetry helper (scry). Fetched in CI from a pinned upstream
+# release rather than built here — it is a separate Rust project with its own
+# cadence, and the host drives it as a subprocess, so a prebuilt binary is the
+# whole integration. Absent locally, which is fine: the feature simply reports
+# itself unavailable rather than failing the build.
+set(SUNSHINE_SCRY_PREBUILT_DIR "" CACHE PATH "Path to a directory containing a prebuilt scry.exe")
+if(SUNSHINE_SCRY_PREBUILT_DIR AND EXISTS "${SUNSHINE_SCRY_PREBUILT_DIR}/scry.exe")
+    install(FILES "${SUNSHINE_SCRY_PREBUILT_DIR}/scry.exe"
+            DESTINATION "tools"
+            COMPONENT application)
+    message(STATUS "Bundling scry telemetry helper from ${SUNSHINE_SCRY_PREBUILT_DIR}")
+elseif(SUNSHINE_SCRY_PREBUILT_DIR)
+    message(WARNING "SUNSHINE_SCRY_PREBUILT_DIR is set but contains no scry.exe; the telemetry helper will not be bundled.")
+endif()
+
 # Drivers (Vibepollo Display Driver)
 set(SUNSHINE_VIRTUAL_DISPLAY_DRIVER_SOURCE_DIR "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/drivers/sunshine")
 set(SUNSHINE_VIRTUAL_DISPLAY_DRIVER_REFRESH_SCRIPT "${CMAKE_SOURCE_DIR}/packaging/windows/virtual_display_driver/refresh_driver_package.ps1")

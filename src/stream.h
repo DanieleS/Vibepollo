@@ -88,6 +88,12 @@ namespace stream {
 
     uint32_t encryptionFlagsEnabled;
 
+    // Whether the client asked for game-memory telemetry (control message
+    // 0x3003). Negotiated rather than assumed: a client that does not know the
+    // message must never be sent it, and the host advertises its own support in
+    // the SDP so a client can tell whether asking is worth anything.
+    bool telemetryRequested {false};
+
     std::optional<int> gcmap;
     bool gen1_framegen_fix;
     bool gen2_framegen_fix;

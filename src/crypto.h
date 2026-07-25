@@ -62,7 +62,8 @@ namespace crypto {
     file_upload = _operation << 2,  // Allow upload files to host
     file_dwnload = _operation << 3,  // Allow download files from host
     server_cmd = _operation << 4,  // Allow execute server cmd
-    _all_opeiations = clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd,
+    telemetry_read = _operation << 5,  // Allow receiving game-memory telemetry
+    _all_opeiations = clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd | telemetry_read,
 
     _action = _operation << 8,  // Action permission group
     list = _action << 0,  // Allow list apps

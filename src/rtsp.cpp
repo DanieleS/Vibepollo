@@ -1282,6 +1282,15 @@ namespace rtsp_stream {
     ss << "a=x-ss-general.encryptionSupported:" << encryption_flags_supported << std::endl;
     ss << "a=x-ss-general.encryptionRequested:" << encryption_flags_requested << std::endl;
 
+    // Game-memory telemetry (control message 0x3003). Advertised only when the
+    // host is actually configured for it, so a client can distinguish "this host
+    // cannot" from "this host will not" before asking.
+#ifdef _WIN32
+    if (config::scry.enabled) {
+      ss << "a=x-ss-general.telemetrySupported:1"sv << std::endl;
+    }
+#endif
+
     if (video::last_encoder_probe_supported_ref_frames_invalidation) {
       ss << "a=x-nv-video[0].refPicInvalidation:1"sv << std::endl;
     }
@@ -1455,6 +1464,7 @@ namespace rtsp_stream {
     args.try_emplace("x-nv-aqos.qosTrafficType"sv, "4"sv);
     args.try_emplace("x-ml-video.configuredBitrateKbps"sv, "0"sv);
     args.try_emplace("x-ss-general.encryptionEnabled"sv, "0"sv);
+    args.try_emplace("x-ss-general.telemetry"sv, "0"sv);
     args.try_emplace("x-ss-video[0].chromaSamplingType"sv, "0"sv);
     args.try_emplace("x-ss-video[0].intraRefresh"sv, "0"sv);
     args.try_emplace("x-nv-video[0].clientRefreshRateX100"sv, "0"sv);
@@ -1499,6 +1509,7 @@ namespace rtsp_stream {
       config.audioQosType = (int) util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
       config.videoQosType = (int) util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
       config.encryptionFlagsEnabled = (uint32_t) util::from_view(args.at("x-ss-general.encryptionEnabled"sv));
+      config.telemetryRequested = util::from_view(args.at("x-ss-general.telemetry"sv)) != 0;
 
       // Legacy clients use nvFeatureFlags to indicate support for audio encryption
       if (util::from_view(args.at("x-nv-general.featureFlags"sv)) & 0x20) {
