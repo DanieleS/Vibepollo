@@ -365,6 +365,24 @@ namespace config {
     bool legacy_auto_detect {false};
   };
 
+  // Windows-only: game-memory telemetry read by the bundled `scry` helper and
+  // forwarded to clients that asked for it. Off by default — it reads a game's
+  // memory and ships what it finds off the machine, which is a decision the user
+  // makes explicitly, per client, not a default they discover afterwards.
+  struct scry_t {
+    bool enabled {false};
+
+    // Directory of per-game profiles handed to the helper. Every profile in it is
+    // a candidate; the helper picks the one whose probe actually resolves in the
+    // target's memory, so a stale or wrong profile costs a failed probe, not bad
+    // telemetry. Defaults to a per-machine directory under ProgramData.
+    std::string profiles_dir;
+
+    // Helper polling cadence in milliseconds. This is how often the *game* is
+    // read; what reaches a client is coalesced separately and more slowly.
+    int tick_ms {50};
+  };
+
   namespace flag {
     enum flag_e : std::size_t {
       PIN_STDIN = 0,  ///< Read PIN from stdin instead of http
@@ -458,6 +476,7 @@ namespace config {
   extern frame_limiter_t frame_limiter;
   extern rtss_t rtss;
   extern lossless_scaling_t lossless_scaling;
+  extern scry_t scry;
   extern sunshine_t sunshine;
 
   int parse(int argc, char *argv[]);

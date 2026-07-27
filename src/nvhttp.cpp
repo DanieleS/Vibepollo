@@ -56,6 +56,7 @@
   #include "platform/windows/display.h"
   #include "platform/windows/display_helper_request_helpers.h"
   #include "platform/windows/misc.h"
+  #include "platform/windows/scry_integration.h"
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/virtual_display_cleanup.h"
 #endif
@@ -3533,6 +3534,108 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+#ifdef _WIN32
+  /**
+   * @brief Stream game telemetry to a paired client as Server-Sent Events.
+   *
+   * The stream opens with one `snapshot` event carrying the whole picture, so a
+   * client that connects part-way through a game renders immediately, and then
+   * carries one `diff` event per tick with only what changed. That split is not
+   * an optimisation detail: scry reports diffs, and the first one is the entire
+   * state, which is why the opening frame is large and the rest are not.
+   *
+   * **Every frame is delivered, in order.** A missed diff would not delay a
+   * client, it would leave it rendering values the game never held. Backpressure
+   * is the mechanism: each event is written and awaited before the next is
+   * produced, so a client that reads slowly slows this thread and nothing else.
+   * A client that falls far enough behind gets a fresh `snapshot` instead of its
+   * backlog — a gap it can see rather than one it cannot.
+   */
+  void telemetry(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto named_cert_p = get_verified_cert(request);
+    if (!has_client_perm(named_cert_p, PERM::telemetry_read)) {
+      log_permission_denied("Stream telemetry"sv, "Receive game telemetry"sv, named_cert_p);
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    if (!config::scry.enabled || !named_cert_p) {
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    // Unlike a control-stream message, an HTTP route can be called at any time,
+    // including when nothing is being played. Telemetry is the contents of a
+    // running game's memory, so it is served only while this client is the one
+    // streaming that game — a constraint the previous transport got for free.
+    if (!rtsp_stream::find_session(named_cert_p->uuid)) {
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    std::thread([response, uuid = named_cert_p->uuid]() mutable {
+      response->close_connection_after_response = true;
+
+      response->write({{"Content-Type", "text/event-stream"}, {"Cache-Control", "no-cache"}, {"Connection", "keep-alive"}});
+
+      std::promise<bool> header_error;
+      response->send([&header_error](const SimpleWeb::error_code &ec) {
+        header_error.set_value(static_cast<bool>(ec));
+      });
+      if (header_error.get_future().get()) {
+        return;
+      }
+
+      // Subscribed only now: the opening snapshot has to be the state as of the
+      // moment the stream begins, not as of the moment the request arrived.
+      auto subscription = platf::scry::subscribe();
+
+      while (true) {
+        // The session ending is the normal way this loop finishes. Checked on
+        // every wakeup rather than only on write failure, because a client that
+        // stops reading without closing the socket would otherwise keep both
+        // this thread and a subscription alive for as long as it felt like.
+        if (!rtsp_stream::find_session(uuid)) {
+          return;
+        }
+
+        auto frame = subscription->next(std::chrono::seconds(1));
+        if (!frame) {
+          // Nothing this second. A comment doubles as a keepalive: it proves the
+          // socket is still writable, which is the only way to notice a client
+          // that vanished without a FIN.
+          *response << ": keepalive\n\n";
+          std::promise<bool> error;
+          response->send([&error](const SimpleWeb::error_code &ec) {
+            error.set_value(static_cast<bool>(ec));
+          });
+          if (error.get_future().get()) {
+            return;
+          }
+          continue;
+        }
+
+        *response << "event: " << frame->kind << "\n";
+        *response << "id: " << frame->revision << "\n";
+        *response << "data: " << frame->body.dump() << "\n\n";
+
+        std::promise<bool> error;
+        response->send([&error](const SimpleWeb::error_code &ec) {
+          error.set_value(static_cast<bool>(ec));
+        });
+        if (error.get_future().get()) {
+          return;
+        }
+      }
+    }).detach();
+  }
+#endif
+
   /**
    * @brief Serve a Playnite game's background/hero image as PNG, mirroring /appasset.
    *
@@ -3912,6 +4015,9 @@ namespace nvhttp {
     https_server.resource["^/appasset$"]["GET"] = appasset;
     https_server.resource["^/appmetadata$"]["GET"] = appmetadata;
     https_server.resource["^/appbackground$"]["GET"] = appbackground;
+#ifdef _WIN32
+    https_server.resource["^/telemetry$"]["GET"] = telemetry;
+#endif
     https_server.resource["^/launch$"]["GET"] = [&host_audio, run_blocking_nvhttp](auto resp, auto req) {
       run_blocking_nvhttp([&host_audio, resp = std::move(resp), req = std::move(req)]() mutable {
         std::lock_guard lock {launch_request_mutex};

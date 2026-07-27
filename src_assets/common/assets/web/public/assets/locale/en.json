@@ -904,6 +904,12 @@
     "lossless_scaling_legacy_auto_detect_desc": "Uses a timer-based auto-apply flow instead of the Lossless Scaling hotkey. Not recommended unless the hotkey method fails, because detection can be less reliable.",
     "rtss_frame_limit_type": "RTSS frame limit type",
     "rtss_install_path": "RTSS install path",
+    "scry_enabled": "Enable game telemetry",
+    "scry_enabled_desc": "Read live values (health, party, score) out of the running game with the bundled read-only helper, and send them to clients that ask for them. Each client also needs the \"Receive game telemetry\" permission. Off by default.",
+    "scry_profiles_dir": "Profiles directory",
+    "scry_profiles_dir_desc": "Folder of per-game profiles. Every profile in it is a candidate; the one that actually fits the running game is chosen by testing it against the game's memory, so a wrong profile is ignored rather than believed. Leave empty for the default next to the Vibepollo configuration.",
+    "scry_tick_ms": "Polling interval (ms)",
+    "scry_tick_ms_desc": "How often the helper reads the game. Every tick that changes something is sent; a tick that changes nothing costs nothing. Lower values mean more frequent, smaller updates rather than larger ones.",
     "vibepollo_file_state": "Vibepollo state file",
     "virtual_display_layout": "Virtual display layout",
     "virtual_display_mode": "Virtual display mode",
@@ -2047,11 +2053,16 @@
     "clipboard_set": "Set clipboard",
     "clipboard_read": "Read clipboard",
     "server_cmd": "Run server commands",
+    "telemetry_read": "Receive game telemetry",
     "input_controller": "Controller input",
     "input_touch": "Touch input",
     "input_pen": "Pen input",
     "input_mouse": "Mouse input",
     "input_kbd": "Keyboard input"
+  },
+  "telemetry": {
+    "config_header": "Game telemetry",
+    "config_desc": "Values read live out of the running game and forwarded to clients that support a second screen. The helper is read-only — it can observe a game but not change it — and sends nothing until both this setting and a per-client permission are on."
   },
   "stats": {
     "title": "Statistics",
@@ -2116,7 +2127,8 @@
       "capture": "Capture",
       "network": "Network",
       "files": "Files",
-      "advanced": "Advanced"
+      "advanced": "Advanced",
+      "telemetry": "Game Telemetry"
     }
   }
 }

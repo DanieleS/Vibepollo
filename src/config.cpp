@@ -954,6 +954,14 @@ namespace config {
     false  // legacy_auto_detect
   };
 
+  // Windows-only: game-memory telemetry defaults. The profiles directory is
+  // resolved at parse time because it is machine-dependent.
+  scry_t scry {
+    false,  // enabled
+    {},  // profiles_dir
+    50  // tick_ms
+  };
+
   namespace {
     int default_min_log_level() {
       if (version_compare::is_prerelease_channel(PROJECT_VERSION)) {
@@ -1003,6 +1011,7 @@ namespace config {
     const frame_limiter_t default_frame_limiter = frame_limiter;
     const rtss_t default_rtss = rtss;
     const lossless_scaling_t default_lossless_scaling = lossless_scaling;
+    const scry_t default_scry = scry;
     const sunshine_t default_sunshine = sunshine;
 
     std::unordered_map<std::string, std::string> command_line_overrides;
@@ -1021,6 +1030,7 @@ namespace config {
       frame_limiter = default_frame_limiter;
       rtss = default_rtss;
       lossless_scaling = default_lossless_scaling;
+      scry = default_scry;
 
       sunshine = default_sunshine;
       sunshine.username = preserved_username;
@@ -1813,6 +1823,15 @@ namespace config {
     }
     string_f(vars, "lossless_scaling_path", lossless_scaling.exe_path);
     bool_f(vars, "lossless_scaling_legacy_auto_detect", lossless_scaling.legacy_auto_detect);
+
+    bool_f(vars, "scry_enabled", scry.enabled);
+    string_f(vars, "scry_profiles_dir", scry.profiles_dir);
+    int_f(vars, "scry_tick_ms", scry.tick_ms);
+    if (scry.profiles_dir.empty()) {
+      // Alongside sunshine.conf and apps.json: the one directory that is both
+      // per-machine and already writable by however Sunshine is installed.
+      scry.profiles_dir = (platf::appdata() / "scry-profiles").string();
+    }
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

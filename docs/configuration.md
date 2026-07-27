@@ -2874,6 +2874,105 @@ They appear in the Frame Limiter section of the settings UI.
 
 @note{Legacy configurations may still use @code{rtss_disable_vsync_ullm}. Sunshine continues to accept the old key and maps it to @code{frame_limiter_disable_vsync}.}
 
+## Game Telemetry
+
+Reads live values out of a running game — health, party, score, whatever a
+profile names — and forwards them to clients that support a second screen.
+
+The reading is done by @code{scry}, a bundled helper in @code{tools/}, run as a
+separate process rather than inside Sunshine. It is **read-only**: it can observe
+a game's memory but has no way to modify it, so it cannot crash or alter the
+game it watches. It is launched in the signed-in user's session with that user's
+own token, not with the service's privileges.
+
+Values are delivered over the paired HTTPS connection as a stream of events: one
+complete snapshot when a client connects, then one event per tick carrying only
+what changed.
+
+Nothing is sent unless three things are true at once: the feature is enabled
+here, the client asking is the one currently streaming, and that client has been
+granted the **Receive game telemetry** permission. Windows only.
+
+### scry_enabled
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Enable game telemetry.
+            <br><br>
+            <b>Notes</b>:
+            <ul>
+                <li>Windows only.</li>
+                <li>Each client must also hold the <b>Receive game telemetry</b> permission; enabling this alone sends nothing.</li>
+                <li>Requires at least one matching profile in @code{scry_profiles_dir}. With no profile that fits the running game, no telemetry is produced — deliberately, since a profile that does not fit the game's memory is refused rather than guessed at.</li>
+            </ul>
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}disabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            scry_enabled = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### scry_profiles_dir
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Directory holding per-game telemetry profiles.
+            <br><br>
+            Every profile in the directory is a candidate. Which one is used is decided by testing each against the running game's memory, so extra or outdated profiles cost a failed test rather than wrong readings.
+            <br><br>
+            If empty, defaults to a @code{scry-profiles} directory alongside the Sunshine configuration.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            scry_profiles_dir = "C:\\ProgramData\\Vibepollo\\scry-profiles"
+            @endcode</td>
+    </tr>
+</table>
+
+### scry_tick_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            How often the helper reads the game, in milliseconds.
+            <br><br>
+            Every tick that changes something reaches the client, and a tick that changes nothing costs nothing — the helper stays silent. Lowering this makes updates more frequent and smaller, not larger: what is sent is the difference since the last tick, so no tick can be skipped without leaving a client rendering values the game never held.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}50@endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">@code{}10 - 1000@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            scry_tick_ms = 50
+            @endcode</td>
+    </tr>
+</table>
+
 ## NVIDIA NVENC Encoder
 
 ### nvenc_preset

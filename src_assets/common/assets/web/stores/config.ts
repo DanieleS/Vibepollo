@@ -260,6 +260,15 @@ const defaultGroups = [
     },
   },
   {
+    id: 'telemetry',
+    name: 'Game Telemetry',
+    options: {
+      scry_enabled: false,
+      scry_profiles_dir: '',
+      scry_tick_ms: 50,
+    },
+  },
+  {
     id: 'nv',
     name: 'NVIDIA NVENC Encoder',
     options: {
