@@ -56,7 +56,6 @@ extern "C" {
   #include "platform/windows/display.h"
   #include "platform/windows/ipc/misc_utils.h"
   #include "platform/windows/misc.h"
-  #include "platform/windows/scry_integration.h"
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/virtual_display_cleanup.h"
 #endif
@@ -79,7 +78,6 @@ extern "C" {
 #define IDX_SET_CLIPBOARD 16
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
-#define IDX_TELEMETRY_DATA 19
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -101,7 +99,6 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
-  0x3003,  // Game-memory telemetry (Vibepollo protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -543,12 +540,6 @@ namespace stream {
 
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
-
-      // Last telemetry revision this client has been sent. Zero means "nothing
-      // yet", which is exactly what a client that connects mid-session needs:
-      // the first send is then a complete picture rather than a delta into a
-      // state it never saw.
-      std::uint64_t telemetry_revision {0};
     } control;
 
     std::uint32_t launch_session_id;
@@ -1300,119 +1291,6 @@ namespace stream {
     return 0;
   }
 
-#ifdef _WIN32
-  /// Upper bound on one telemetry message's JSON. A profile emitting more than
-  /// this per tick is not a case worth truncating for: a half-written JSON
-  /// document is unparseable, so an oversized payload is dropped whole and said
-  /// out loud instead.
-  constexpr std::size_t MAX_TELEMETRY_JSON = 4096;
-
-  /// Wrap one telemetry JSON document in a 0x3003 control message and send it.
-  /// Returns false if it could not go out, in which case the caller must not
-  /// record it as delivered.
-  bool send_telemetry_message(session_t *session, const std::string &json) {
-    if (json.size() > MAX_TELEMETRY_JSON) {
-      BOOST_LOG(warning) << "Telemetry payload of "sv << json.size()
-                         << " bytes exceeds the "sv << MAX_TELEMETRY_JSON << " byte cap; not sending it."sv;
-      // Reported as delivered by the caller on purpose: re-measuring the same
-      // oversized payload every tick would log this forever.
-      return true;
-    }
-
-    // header + a version byte + the JSON. The byte is not redundant with the
-    // `v` field inside: it lets a reader route the frame before parsing it.
-    std::array<std::uint8_t, sizeof(control_header_v2) + 1 + MAX_TELEMETRY_JSON> plaintext {};
-    auto *header = reinterpret_cast<control_header_v2 *>(plaintext.data());
-    header->type = packetTypes[IDX_TELEMETRY_DATA];
-    header->payloadLength = static_cast<std::uint16_t>(1 + json.size());
-    plaintext[sizeof(control_header_v2)] = 0x01;
-    std::memcpy(plaintext.data() + sizeof(control_header_v2) + 1, json.data(), json.size());
-
-    const std::size_t plaintext_size = sizeof(control_header_v2) + 1 + json.size();
-
-    std::array<
-      std::uint8_t,
-      sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(control_header_v2) + 1 + MAX_TELEMETRY_JSON) + crypto::cipher::tag_size>
-      encrypted_payload;
-
-    auto payload = encode_control(session, std::string_view {(char *) plaintext.data(), plaintext_size}, encrypted_payload);
-    if (payload.empty()) {
-      return false;
-    }
-    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
-      TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
-      BOOST_LOG(debug) << "Couldn't send telemetry to ["sv << addr << ':' << port << ']';
-      return false;
-    }
-    return true;
-  }
-
-  /**
-   * @brief Send the current game telemetry to one client, if it has news.
-   *
-   * Called from the control loop's ~150 ms cadence, which is deliberately much
-   * slower than the helper polls the game: this message shares a channel with
-   * input, and input latency is the one thing telemetry must never cost. Sending
-   * the whole picture (rather than a diff) each time is what keeps a client that
-   * joined late, or missed a message, correct without a resync protocol.
-   */
-  void send_telemetry(session_t *session) {
-    if (!session->control.peer || !config::scry.enabled) {
-      return;
-    }
-    // Two independent gates: what the client can understand, and what this
-    // particular client is allowed to be told. Neither implies the other.
-    if (!session->config.telemetryRequested) {
-      return;
-    }
-    if (!(session->permission & crypto::PERM::telemetry_read)) {
-      return;
-    }
-
-    const auto snapshot = platf::scry::latest();
-
-    if (!snapshot.attached) {
-      // Nothing is being read. A client that was never told anything needs no
-      // telling now; one that was is still rendering the last values it got,
-      // with no way to tell a paused game from a finished one. It gets an
-      // explicit end, once.
-      if (session->control.telemetry_revision == 0) {
-        return;
-      }
-      const nlohmann::json message {
-        {"v", 1},
-        {"attached", false},
-      };
-      if (send_telemetry_message(session, message.dump())) {
-        session->control.telemetry_revision = 0;
-      }
-      return;
-    }
-
-    if (snapshot.revision == session->control.telemetry_revision) {
-      return;
-    }
-
-    nlohmann::json message {
-      {"v", 1},
-      {"attached", true},
-      {"slug", snapshot.slug},
-      {"process", snapshot.process},
-      {"profile", snapshot.profile},
-      {"values", snapshot.values},
-    };
-    if (snapshot.contract_version) {
-      message["contract"] = *snapshot.contract_version;
-    }
-
-    // A failed send leaves the revision alone: the next tick carries the whole
-    // picture again, so there is nothing to recover and nothing to retry.
-    if (send_telemetry_message(session, message.dump())) {
-      session->control.telemetry_revision = snapshot.revision;
-    }
-  }
-#endif
-
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1804,10 +1682,6 @@ namespace stream {
 
               send_hdr_mode(session, std::move(hdr_info));
             }
-
-#ifdef _WIN32
-            send_telemetry(session);
-#endif
           }
 
           ++pos;

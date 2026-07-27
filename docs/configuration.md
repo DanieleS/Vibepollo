@@ -2885,9 +2885,13 @@ a game's memory but has no way to modify it, so it cannot crash or alter the
 game it watches. It is launched in the signed-in user's session with that user's
 own token, not with the service's privileges.
 
+Values are delivered over the paired HTTPS connection as a stream of events: one
+complete snapshot when a client connects, then one event per tick carrying only
+what changed.
+
 Nothing is sent unless three things are true at once: the feature is enabled
-here, the client asked for telemetry when it started the stream, and that client
-has been granted the **Receive game telemetry** permission. Windows only.
+here, the client asking is the one currently streaming, and that client has been
+granted the **Receive game telemetry** permission. Windows only.
 
 ### scry_enabled
 
@@ -2950,7 +2954,7 @@ has been granted the **Receive game telemetry** permission. Windows only.
         <td colspan="2">
             How often the helper reads the game, in milliseconds.
             <br><br>
-            This is not how often a client is updated: what goes out is coalesced onto the control channel at a slower, fixed rate, so that telemetry never competes with input latency no matter how low this is set.
+            Every tick that changes something reaches the client, and a tick that changes nothing costs nothing — the helper stays silent. Lowering this makes updates more frequent and smaller, not larger: what is sent is the difference since the last tick, so no tick can be skipped without leaving a client rendering values the game never held.
         </td>
     </tr>
     <tr>

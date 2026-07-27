@@ -18,12 +18,15 @@
   #include <atomic>
   #include <chrono>
   #include <condition_variable>
+  #include <deque>
   #include <filesystem>
   #include <functional>
+  #include <memory>
   #include <mutex>
   #include <string>
   #include <string_view>
   #include <thread>
+  #include <vector>
 
   #include <windows.h>
 
@@ -86,6 +89,89 @@ namespace platf::scry {
     std::mutex g_cv_mutex;
     std::condition_variable g_cv;
     std::atomic<bool> g_stop {false};
+
+    /// How many frames a subscriber may fall behind before we stop keeping its
+    /// backlog. Diffs are small, so this is generous in bytes while still being
+    /// a hard bound: a client that stalls cannot grow our memory without limit.
+    constexpr std::size_t MAX_QUEUED_FRAMES = 256;
+
+    /// One subscriber's mailbox. Held by shared_ptr so a subscription that is
+    /// being destroyed cannot be written to by the supervisor mid-teardown.
+    struct subscriber_t {
+      std::deque<frame_t> queue;
+    };
+
+    std::mutex g_subs_mutex;
+    std::condition_variable g_subs_cv;
+    std::vector<std::shared_ptr<subscriber_t>> g_subs;
+
+    /// Lock order throughout this file: the snapshot lock is taken *before*
+    /// @ref g_subs_mutex, never the other way round. Publishing happens while
+    /// the snapshot is still held, which is what guarantees that frames enter
+    /// every mailbox in the same order their revisions were stamped.
+    frame_t snapshot_frame(const snapshot_t &snap) {
+      nlohmann::json body {
+        {"attached", snap.attached},
+      };
+      if (snap.attached) {
+        body["slug"] = snap.slug;
+        body["process"] = snap.process;
+        body["profile"] = snap.profile;
+        body["values"] = snap.values;
+        if (snap.contract_version) {
+          body["contract"] = *snap.contract_version;
+        }
+      }
+      return frame_t {snap.revision, "snapshot", std::move(body)};
+    }
+
+    /// Hand @p frame to every subscriber. Called with the snapshot lock held.
+    void publish(const snapshot_t &snap, const frame_t &frame) {
+      std::lock_guard lg {g_subs_mutex};
+      for (auto &sub : g_subs) {
+        if (sub->queue.size() >= MAX_QUEUED_FRAMES) {
+          // This subscriber is not draining. Replacing its backlog with the
+          // current picture is the one safe answer: dropping frames from a
+          // stream of diffs would leave it rendering values that never existed,
+          // and the snapshot already accounts for this frame.
+          sub->queue.clear();
+          sub->queue.push_back(snapshot_frame(snap));
+          continue;
+        }
+        sub->queue.push_back(frame);
+      }
+      g_subs_cv.notify_all();
+    }
+
+    class subscription_impl_t final: public subscription_t {
+    public:
+      explicit subscription_impl_t(std::shared_ptr<subscriber_t> sub):
+          _sub {std::move(sub)} {
+      }
+
+      ~subscription_impl_t() override {
+        std::lock_guard lg {g_subs_mutex};
+        std::erase(g_subs, _sub);
+      }
+
+      std::optional<frame_t> next(std::chrono::milliseconds timeout) override {
+        std::unique_lock lk {g_subs_mutex};
+        if (!g_subs_cv.wait_for(lk, timeout, [this] {
+              return !_sub->queue.empty() || g_stop.load(std::memory_order_acquire);
+            })) {
+          return std::nullopt;
+        }
+        if (_sub->queue.empty()) {
+          return std::nullopt;
+        }
+        frame_t frame = std::move(_sub->queue.front());
+        _sub->queue.pop_front();
+        return frame;
+      }
+
+    private:
+      std::shared_ptr<subscriber_t> _sub;
+    };
 
     /// Sleep that wakes early when the supervisor is asked to stop.
     void interruptible_wait(std::chrono::milliseconds duration) {
@@ -261,6 +347,8 @@ namespace platf::scry {
         }
         snap.values = nlohmann::json::object();
         bump(snap);
+        // A new game is a new picture, not a change to the old one.
+        publish(snap, snapshot_frame(snap));
         BOOST_LOG(info) << "scry: attached to " << snap.process << " with profile '" << snap.profile
                         << "' (contract " << (snap.contract_version ? std::to_string(*snap.contract_version) : "none") << ")";
         return;
@@ -282,12 +370,22 @@ namespace platf::scry {
           snap.values[name] = value;
         }
         bump(snap);
+        // Subscribers get the diff verbatim rather than the merged picture: it is
+        // what the game actually did this tick, and at these sizes resending the
+        // whole picture every tick is the difference between a few hundred bytes
+        // and tens of kilobytes.
+        publish(snap, frame_t {snap.revision, "diff", *values});
         return;
       }
 
       if (type == "detached") {
         auto lg = g_snapshot.lock();
         g_snapshot.raw = snapshot_t {};
+        // Stamped even though the picture is now empty: a subscriber has to be
+        // able to tell "the game ended" from "the game went quiet", and an
+        // unnumbered frame would break the ordering everything else relies on.
+        bump(g_snapshot.raw);
+        publish(g_snapshot.raw, frame_t {g_snapshot.raw.revision, "detached", nlohmann::json::object()});
         return;
       }
     }
@@ -297,7 +395,15 @@ namespace platf::scry {
     /// switched off — so that a consumer never renders a dead game's numbers.
     void clear_snapshot() {
       auto lg = g_snapshot.lock();
+      const bool was_attached = g_snapshot.raw.attached;
       g_snapshot.raw = snapshot_t {};
+      if (was_attached) {
+        // Only worth saying when there was something to end. Subscribers are
+        // told for the same reason the `detached` event is forwarded: whatever
+        // they are rendering is now a dead game's numbers.
+        bump(g_snapshot.raw);
+        publish(g_snapshot.raw, frame_t {g_snapshot.raw.revision, "detached", nlohmann::json::object()});
+      }
     }
 
     /**
@@ -434,6 +540,9 @@ namespace platf::scry {
       ~deinit_t() override {
         g_stop.store(true, std::memory_order_release);
         g_cv.notify_all();
+        // Subscribers park in next() with a timeout; without this they would sit
+        // out the rest of it before noticing that shutdown began.
+        g_subs_cv.notify_all();
         if (g_thread.joinable()) {
           g_thread.join();
         }
@@ -452,6 +561,20 @@ namespace platf::scry {
   snapshot_t latest() {
     auto lg = g_snapshot.lock();
     return g_snapshot.raw;
+  }
+
+  std::unique_ptr<subscription_t> subscribe() {
+    auto sub = std::make_shared<subscriber_t>();
+    {
+      // Both locks, in the file's order, so that registering and reading the
+      // opening snapshot are one step. Split them and a frame stamped in between
+      // is either lost or delivered twice — and with diffs, both are wrong.
+      auto lg = g_snapshot.lock();
+      sub->queue.push_back(snapshot_frame(g_snapshot.raw));
+      std::lock_guard sl {g_subs_mutex};
+      g_subs.push_back(sub);
+    }
+    return std::make_unique<subscription_impl_t>(std::move(sub));
   }
 
   bool helper_available() {

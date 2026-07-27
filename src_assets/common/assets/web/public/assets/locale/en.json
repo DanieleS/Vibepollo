@@ -909,7 +909,7 @@
     "scry_profiles_dir": "Profiles directory",
     "scry_profiles_dir_desc": "Folder of per-game profiles. Every profile in it is a candidate; the one that actually fits the running game is chosen by testing it against the game's memory, so a wrong profile is ignored rather than believed. Leave empty for the default next to the Vibepollo configuration.",
     "scry_tick_ms": "Polling interval (ms)",
-    "scry_tick_ms_desc": "How often the helper reads the game. What reaches a client is sent at a slower, fixed rate regardless, so that telemetry never competes with input latency.",
+    "scry_tick_ms_desc": "How often the helper reads the game. Every tick that changes something is sent; a tick that changes nothing costs nothing. Lower values mean more frequent, smaller updates rather than larger ones.",
     "vibepollo_file_state": "Vibepollo state file",
     "virtual_display_layout": "Virtual display layout",
     "virtual_display_mode": "Virtual display mode",

@@ -21,6 +21,7 @@
 
 #ifdef _WIN32
 
+  #include <chrono>
   #include <cstdint>
   #include <memory>
   #include <optional>
@@ -73,6 +74,50 @@ namespace platf::scry {
     /// which is a different claim from being absent.
     nlohmann::json values = nlohmann::json::object();
   };
+
+  /**
+   * @brief One frame of the telemetry stream, in the order the game produced it.
+   */
+  struct frame_t {
+    /// Sequence number, drawn from the same monotonic counter as
+    /// @ref snapshot_t::revision.
+    std::uint64_t revision {0};
+
+    /// `snapshot` — the complete picture. `diff` — only the watches this tick
+    /// changed. `detached` — the game is gone and what came before is history.
+    std::string kind;
+
+    /// For `snapshot`, the identity fields and the whole picture. For `diff`,
+    /// the changed watches alone. Empty for `detached`.
+    nlohmann::json body;
+  };
+
+  /**
+   * @brief One subscriber's position in the telemetry stream.
+   */
+  class subscription_t {
+  public:
+    virtual ~subscription_t() = default;
+
+    /**
+     * @brief The next frame, waiting up to @p timeout for one to arrive.
+     *
+     * Returns nothing on timeout or shutdown rather than blocking forever, so a
+     * caller can check whether its own client is still there in between.
+     */
+    virtual std::optional<frame_t> next(std::chrono::milliseconds timeout) = 0;
+  };
+
+  /**
+   * @brief Start following the stream. The first frame is always a `snapshot`.
+   *
+   * Every frame is delivered in order, because the values are **diffs**: a
+   * dropped frame would not merely delay a subscriber, it would silently
+   * corrupt its picture and leave it confidently wrong. So a subscriber that
+   * cannot keep up is never quietly skipped past — its backlog is replaced with
+   * a fresh `snapshot`, turning a gap it cannot see into one it can.
+   */
+  std::unique_ptr<subscription_t> subscribe();
 
   /**
    * @brief Start the supervisor thread.
