@@ -9,6 +9,7 @@
 
   #include <algorithm>
   #include <array>
+  #include <atomic>
   #include <chrono>
   #include <cstring>
   #include <display_device/windows/win_api_layer.h>
@@ -20,6 +21,22 @@
 
 namespace platf::virtual_display_cleanup {
   namespace {
+    std::atomic_uint g_cleanup_reservations {0};
+
+    class cleanup_reservation_t {
+    public:
+      cleanup_reservation_t() {
+        g_cleanup_reservations.fetch_add(1, std::memory_order_acq_rel);
+      }
+
+      ~cleanup_reservation_t() {
+        g_cleanup_reservations.fetch_sub(1, std::memory_order_acq_rel);
+      }
+
+      cleanup_reservation_t(const cleanup_reservation_t &) = delete;
+      cleanup_reservation_t &operator=(const cleanup_reservation_t &) = delete;
+    };
+
     bool has_active_virtual_display() {
       const auto virtual_displays = VDISPLAY::enumerateVirtualDisplays();
       return std::any_of(
@@ -101,6 +118,7 @@ namespace platf::virtual_display_cleanup {
     const bool prefer_golden_if_current_missing,
     const std::optional<std::array<std::uint8_t, 16>> virtual_display_guid_bytes
   ) {
+    cleanup_reservation_t cleanup_reservation;
     cleanup_result_t result;
 
     const std::string reason_text = reason.empty() ? "unspecified" : std::string(reason);
@@ -125,31 +143,48 @@ namespace platf::virtual_display_cleanup {
       }
     };
 
-    if (enforce_db_restore && revert_order == revert_order_t::restore_before_remove) {
-      try_helper_revert();
-    }
-
-    const bool specific_display_removed = remove_specific_virtual_display(virtual_display_guid_bytes);
-    const bool tracked_displays_removed = VDISPLAY::removeAllVirtualDisplays();
-    result.virtual_displays_removed = specific_display_removed && tracked_displays_removed;
-    const bool should_wait_for_teardown_before_restore =
-      had_active_virtual_display &&
-      enforce_db_restore &&
-      (revert_order == revert_order_t::remove_before_restore || !result.helper_revert_dispatched);
-    if (should_wait_for_teardown_before_restore) {
+    bool teardown_completed = false;
+    bool teardown_waited = false;
+    const auto wait_for_teardown_before_restore = [&]() {
+      if (teardown_waited || result.helper_revert_dispatched || !teardown_completed ||
+          !had_active_virtual_display || !enforce_db_restore) {
+        return;
+      }
       constexpr auto kTeardownSettleTimeout = std::chrono::seconds(5);
       if (wait_for_virtual_display_teardown(kTeardownSettleTimeout)) {
         BOOST_LOG(debug) << "Virtual display cleanup: teardown settled before restore.";
       }
-    }
+      teardown_waited = true;
+    };
 
-    if (enforce_db_restore) {
-      if (revert_order == revert_order_t::remove_before_restore) {
-        try_helper_revert();
-      }
-
-      if (!result.helper_revert_dispatched) {
-        result.database_restore_applied = restore_windows_display_database();
+    // Keep the retained probe display alive for restore-before-remove callers,
+    // but remove it in the normal remove-before-restore order with the other
+    // virtual displays. This also covers a driver-accepted target that has
+    // not yet appeared in Windows enumeration.
+    for (const auto step : ordered_restore_steps(revert_order)) {
+      switch (step) {
+        case cleanup_step_t::helper_revert:
+          wait_for_teardown_before_restore();
+          if (enforce_db_restore) {
+            try_helper_revert();
+          }
+          break;
+        case cleanup_step_t::retained_probe_remove:
+          VDISPLAY::cleanup_retained_ensure_display();
+          break;
+        case cleanup_step_t::explicit_display_remove: {
+          const bool specific_display_removed = remove_specific_virtual_display(virtual_display_guid_bytes);
+          const bool tracked_displays_removed = VDISPLAY::removeAllVirtualDisplays();
+          result.virtual_displays_removed = specific_display_removed && tracked_displays_removed;
+          teardown_completed = true;
+          break;
+        }
+        case cleanup_step_t::database_restore:
+          wait_for_teardown_before_restore();
+          if (enforce_db_restore && !result.helper_revert_dispatched) {
+            result.database_restore_applied = restore_windows_display_database();
+          }
+          break;
       }
     }
 
@@ -160,6 +195,10 @@ namespace platf::virtual_display_cleanup {
                     << ", database_restore_applied=" << (result.database_restore_applied ? "true" : "false")
                     << ")";
     return result;
+  }
+
+  bool in_progress() {
+    return g_cleanup_reservations.load(std::memory_order_acquire) != 0;
   }
 }  // namespace platf::virtual_display_cleanup
 

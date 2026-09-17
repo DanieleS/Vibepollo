@@ -49,8 +49,32 @@ namespace platf::dxgi {
   using factory1_t = util::safe_ptr<IDXGIFactory1, Release<IDXGIFactory1>>;
   using dxgi_t = util::safe_ptr<IDXGIDevice, Release<IDXGIDevice>>;
 
-  void set_last_wgc_adapter_luid(std::optional<LUID> luid);
+  struct wgc_adapter_identity_t {
+    LUID luid {};
+    // Stable configured/runtime output identity observed when WGC created its
+    // D3D device. This prevents a sticky LUID from being reused after capture
+    // moves to another output.
+    std::string output_name;
+  };
+
+  struct capture_output_identity_t {
+    std::string output_name;
+    adapter_id_t adapter_id;
+  };
+
+  /**
+   * Resolve Automatic display selection to the first output normal capture
+   * enumeration would use, together with the exact adapter that owns it. When
+   * required_adapter is present, consider outputs on that adapter only.
+   */
+  std::optional<capture_output_identity_t> resolve_automatic_capture_output(
+    mem_type_e hwdevice_type,
+    const std::optional<adapter_id_t> &required_adapter = std::nullopt
+  );
+
+  void set_last_wgc_adapter_luid(std::optional<LUID> luid, std::string output_name = {});
   std::optional<LUID> get_last_wgc_adapter_luid();
+  std::optional<wgc_adapter_identity_t> get_last_wgc_adapter_identity();
   void set_dxgi_adapter_luid_override(std::optional<LUID> luid);
   std::optional<LUID> get_dxgi_adapter_luid_override();
   bool should_use_wgc_default();
@@ -178,11 +202,23 @@ namespace platf::dxgi {
 
   class display_base_t: public display_t {
   public:
-    int init(const ::video::config_t &config, const std::string &display_name, bool skip_dd_test = false);
+    enum class output_refresh_e {
+      refreshed,
+      retry_later,
+      structural_change,
+    };
+
+    int init(
+      const ::video::config_t &config,
+      const std::string &display_name,
+      bool skip_dd_test = false,
+      const std::optional<LUID> &required_adapter_luid = std::nullopt
+    );
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
     void prepare_for_reinit() override;
-    bool refresh_output_after_expected_mode_change();
+    std::optional<adapter_id_t> capture_adapter_id() const override;
+    output_refresh_e refresh_output_after_nonstructural_change();
 
     factory1_t factory;
     adapter_t adapter;
@@ -306,7 +342,11 @@ namespace platf::dxgi {
 
     std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) override;
 
+    std::unique_ptr<avcodec_encode_device_t> make_deferred_avcodec_encode_device(pix_fmt_e pix_fmt) override;
+
     std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) override;
+
+    std::unique_ptr<amf_encode_device_t> make_amf_encode_device(pix_fmt_e pix_fmt) override;
 
     std::atomic<uint32_t> next_image_id;
   };
@@ -333,7 +373,11 @@ namespace platf::dxgi {
    */
   class display_ddup_ram_t: public display_ram_t {
   public:
-    int init(const ::video::config_t &config, const std::string &display_name);
+    int init(
+      const ::video::config_t &config,
+      const std::string &display_name,
+      const std::optional<LUID> &required_adapter_luid = std::nullopt
+    );
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
     capture_e release_snapshot() override;
 
@@ -346,7 +390,11 @@ namespace platf::dxgi {
    */
   class display_ddup_vram_t: public display_vram_t {
   public:
-    int init(const ::video::config_t &config, const std::string &display_name);
+    int init(
+      const ::video::config_t &config,
+      const std::string &display_name,
+      const std::optional<LUID> &required_adapter_luid = std::nullopt
+    );
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
     capture_e release_snapshot() override;
 
@@ -430,7 +478,11 @@ namespace platf::dxgi {
      * @param display_name Name of the display to capture.
      * @return Instance of the display backend, using WGC IPC if available, or a secure desktop fallback if not.
      */
-    static std::shared_ptr<display_t> create(const ::video::config_t &config, const std::string &display_name);
+    static std::shared_ptr<display_t> create(
+      const ::video::config_t &config,
+      const std::string &display_name,
+      const std::optional<LUID> &required_adapter_luid = std::nullopt
+    );
 
     /**
      * @brief Initializes the WGC IPC VRAM display backend.
@@ -439,7 +491,11 @@ namespace platf::dxgi {
      * @param display_name Name of the display to capture.
      * @return 0 on success, negative on failure.
      */
-    int init(const ::video::config_t &config, const std::string &display_name);
+    int init(
+      const ::video::config_t &config,
+      const std::string &display_name,
+      const std::optional<LUID> &required_adapter_luid = std::nullopt
+    );
 
     /**
      * @brief Captures a snapshot of the display.
@@ -507,7 +563,11 @@ namespace platf::dxgi {
      * @param display_name Name of the display to capture.
      * @return Instance of the display backend.
      */
-    static std::shared_ptr<display_t> create(const ::video::config_t &config, const std::string &display_name);
+    static std::shared_ptr<display_t> create(
+      const ::video::config_t &config,
+      const std::string &display_name,
+      const std::optional<LUID> &required_adapter_luid = std::nullopt
+    );
 
     /**
      * @brief Initializes the WGC IPC RAM display backend.
@@ -515,7 +575,11 @@ namespace platf::dxgi {
      * @param display_name Name of the display to capture.
      * @return 0 on success, negative on failure.
      */
-    int init(const ::video::config_t &config, const std::string &display_name);
+    int init(
+      const ::video::config_t &config,
+      const std::string &display_name,
+      const std::optional<LUID> &required_adapter_luid = std::nullopt
+    );
 
     /**
      * @brief Captures a snapshot of the display.
@@ -628,5 +692,14 @@ namespace platf::dxgi {
   // Type aliases for WGC data structures
   using shared_handle_data_t = platf::dxgi::shared_handle_data_t;
   using config_data_t = platf::dxgi::config_data_t;
+
+  /**
+   * @brief Check whether HDR is currently active on an output, without creating a capture device.
+   * @details Uses the same DXGI colorspace predicate as display_base_t::is_hdr(), so a caller that
+   *          waits on this will reach the same conclusion the capture path does. Cheap enough to poll.
+   * @param output_name GDI display name (e.g. `\\.\DISPLAY1`). Empty matches any attached output.
+   * @return true if the matched output reports the HDR10 colorspace.
+   */
+  bool is_hdr_active_for_output(const std::string &output_name);
 
 }  // namespace platf::dxgi

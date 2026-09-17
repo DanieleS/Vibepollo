@@ -3,6 +3,7 @@
 #include "src/logging.h"
 #include "src/platform/windows/display_helper_v2/snapshot_codec.h"
 #include "src/platform/windows/display_helper_v2/staged_settings.h"
+#include "src/platform/windows/display_helper_v2/topology_policy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -395,9 +396,7 @@ namespace display_helper::v2 {
             return false;
           }
           if (config.m_refresh_rate && refresh_hdr_device_ids.count(device_id)) {
-            const auto desired = floating_to_double(*config.m_refresh_rate);
-            const auto actual = floating_to_double(mode.m_refresh_rate);
-            if (!desired || !actual || !nearly_equal(*desired, *actual)) {
+            if (!refresh_rates_match(*config.m_refresh_rate, mode.m_refresh_rate)) {
               return false;
             }
           }
@@ -408,7 +407,13 @@ namespace display_helper::v2 {
         auto hdr_states = display_device_->getCurrentHdrStates(refresh_hdr_device_ids);
         for (const auto &device_id : refresh_hdr_device_ids) {
           const auto it = hdr_states.find(device_id);
-          if (it == hdr_states.end() || !it->second || *it->second != *config.m_hdr_state) {
+          if (it == hdr_states.end() || !it->second) {
+            if (*config.m_hdr_state == display_device::HdrState::Disabled) {
+              continue;
+            }
+            return false;
+          }
+          if (*it->second != *config.m_hdr_state) {
             return false;
           }
         }
@@ -612,7 +617,7 @@ namespace display_helper::v2 {
         return std::nullopt;
       }
 
-      const auto [new_topology, device_to_configure, additional_devices] = display_device::win_utils::computeNewTopologyAndMetadata(
+      const auto [new_topology, device_to_configure, additional_devices] = topology::compute_new_topology_and_metadata(
         config.m_device_prep,
         config.m_device_id,
         *initial
@@ -752,10 +757,24 @@ namespace display_helper::v2 {
     return static_cast<double>(rat.m_numerator) / static_cast<double>(rat.m_denominator);
   }
 
-  bool WinDisplaySettings::nearly_equal(double lhs, double rhs) {
-    const double diff = std::abs(lhs - rhs);
-    const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
-    return diff <= scale * 1e-4;
+  bool WinDisplaySettings::refresh_rates_match(
+    const display_device::FloatingPoint &desired,
+    const display_device::FloatingPoint &actual
+  ) {
+    const auto *desired_rational = std::get_if<display_device::Rational>(&desired);
+    const auto *actual_rational = std::get_if<display_device::Rational>(&actual);
+    if (desired_rational && actual_rational) {
+      return display_device::win_utils::fuzzyCompareRefreshRates(*desired_rational, *actual_rational);
+    }
+
+    // Production display configurations and active Windows modes are rational,
+    // but retain equivalent semantics for any legacy double-valued caller.
+    constexpr double kRefreshRateToleranceHz = 0.9;
+    const auto desired_value = floating_to_double(desired);
+    const auto actual_value = floating_to_double(actual);
+    return desired_value &&
+           actual_value &&
+           std::abs(*desired_value - *actual_value) <= kRefreshRateToleranceHz;
   }
 
   namespace {
@@ -1036,8 +1055,9 @@ namespace display_helper::v2 {
       case DevicePrepFailed:
       case PrimaryDevicePrepFailed:
       case DisplayModePrepFailed:
-      case HdrStatePrepFailed:
         return ApplyStatus::VerificationFailed;
+      case HdrStatePrepFailed:
+        return ApplyStatus::HdrStateFailed;
       case PersistenceSaveFailed:
         return ApplyStatus::Retryable;
       default:

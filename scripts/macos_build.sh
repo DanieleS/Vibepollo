@@ -10,7 +10,6 @@ publisher_website="https://app.lizardbyte.dev"
 publisher_issue_url="https://app.lizardbyte.dev/support"
 step="all"
 build_docs="OFF"
-build_tests="ON"
 build_type="Release"
 sign_app="true"
 notarize="true"
@@ -30,7 +29,6 @@ required_formulas=(
   "cmake"
   "doxygen"
   "graphviz"
-  "node"
   "pkgconf"
   "icu4c@78"
   "miniupnpc"
@@ -65,7 +63,6 @@ Options:
   --step=STEP              Which step(s) to run: deps, cmake, build, dmg, or all (default: all)
   --debug                  Build in debug mode.
   --build-docs             Build docs.
-  --skip-tests             Don't build the test suite.
   --skip-codesign          Don't sign/notarize the bundle.
   --skip-notarize          Don't notarize the dmg.
 
@@ -95,7 +92,7 @@ function run_step_cmake() {
     "-B=build"
     "-S=."
     "-DBUILD_DOCS=${build_docs}"
-    "-DBUILD_TESTS=${build_tests}"
+    "-DBUILD_TESTS=ON"
     "-DBUILD_WERROR=ON"
     "-DCMAKE_BUILD_TYPE=${build_type}"
     "-DICU_ROOT=$(brew --prefix icu4c@78 2>/dev/null)"
@@ -215,9 +212,6 @@ while getopts ":h-:" opt; do
           ;;
         build-docs)
           build_docs="ON"
-          ;;
-        skip-tests)
-          build_tests="OFF"
           ;;
         skip-codesign)
          sign_app=""

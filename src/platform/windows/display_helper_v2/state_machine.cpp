@@ -5,7 +5,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <utility>
 
-#include "src/logging.h"
+#include "src/platform/windows/display_helper_v2/diagnostics.h"
 
 namespace display_helper::v2 {
   namespace {
@@ -84,6 +84,8 @@ namespace display_helper::v2 {
           return "Retryable";
         case ApplyStatus::Fatal:
           return "Fatal";
+        case ApplyStatus::HdrStateFailed:
+          return "HdrStateFailed";
         default:
           return "Unknown";
       }
@@ -324,11 +326,17 @@ namespace display_helper::v2 {
     }
 
     const std::size_t stage = next_verification_reapply_++;
+    const auto delay = verification_reapply_delays_[stage];
+    if (current_request_.omit_final_initial_hdr_reapply &&
+        !session_was_verified_ &&
+        delay == std::chrono::milliseconds(5500)) {
+      BOOST_LOG(warning) << "Display helper: omitting the final initial HDR reapply to release the stream-start capture gate.";
+      return false;
+    }
     // Stage zero is v1's immediate synchronous reapply. Every later stage is
     // also a completed/claimed post-apply settling window, so do not schedule
     // that same check again after the repair succeeds.
     next_post_apply_stabilization_ = std::max(next_post_apply_stabilization_, stage);
-    const auto delay = verification_reapply_delays_[stage];
     BOOST_LOG(warning) << "Display helper: post-apply verification did not stick; reapplying settled display settings"
                        << (delay > std::chrono::milliseconds::zero() ? " after " + std::to_string(delay.count()) + " ms." : ".");
     transition(State::InProgress, ApplyAction::Apply, ApplyStatus::VerificationFailed);
@@ -754,6 +762,7 @@ namespace display_helper::v2 {
     system_.arm_heartbeat();
 
     apply_attempt_ = 1;
+    virtual_hdr_fallback_attempted_ = false;
     apply_result_sent_ = false;
     verification_result_sent_ = false;
     session_was_verified_ = false;
@@ -785,7 +794,9 @@ namespace display_helper::v2 {
     // Preserve v1's delayed stickiness checks as bounded FSM stages. The
     // immediate reapply is the legacy helper's second synchronous verify
     // attempt; later entries are its Windows-settling stair-step. HDR
-    // transitions receive the longer 750ms/2.5s/5.5s envelope.
+    // transitions receive the longer 750ms/2.5s/5.5s envelope. The dispatcher
+    // omits only the final initial repair for a capture-gated stream start;
+    // retaining it here keeps the same 5.5s repair available after verification.
     verification_reapply_delays_.push_back(std::chrono::milliseconds(0));
     post_apply_stabilization_delays_.push_back(std::chrono::milliseconds(750));
     verification_reapply_delays_.push_back(std::chrono::milliseconds(750));
@@ -904,7 +915,8 @@ namespace display_helper::v2 {
     // before the generic mutation fence: otherwise DISARM would cancel the
     // recovery, then be ignored after its stale completion, leaving the state
     // machine stranded in Recovery with no worker.
-    if (restore_pending() &&
+    if (!command.force &&
+        restore_pending() &&
         restore_state_.restore_attempted_unconfirmed.load(std::memory_order_acquire)) {
       BOOST_LOG(info) << "DISARM command ignored because an unconfirmed restore attempt is still pending.";
       return;
@@ -1181,13 +1193,33 @@ namespace display_helper::v2 {
       }
     }
 
-    if (completed.status == ApplyStatus::Retryable || completed.status == ApplyStatus::VerificationFailed) {
+    const bool status_allows_bounded_retry =
+      completed.status == ApplyStatus::Retryable ||
+      completed.status == ApplyStatus::VerificationFailed ||
+      completed.status == ApplyStatus::HdrStateFailed;
+    if (status_allows_bounded_retry) {
       if (apply_.can_retry(apply_attempt_)) {
         const auto delay = apply_.retry_delay(apply_attempt_);
         ++apply_attempt_;
         dispatch_apply_worker(current_request_, delay, false);
         return;
       }
+    }
+
+    const bool can_fallback_virtual_hdr =
+      !virtual_hdr_fallback_attempted_ &&
+      completed.virtual_display_requested &&
+      current_request_.configuration &&
+      current_request_.configuration->m_hdr_state == display_device::HdrState::Enabled &&
+      status_allows_bounded_retry;
+    if (can_fallback_virtual_hdr) {
+      virtual_hdr_fallback_attempted_ = true;
+      current_request_.configuration->m_hdr_state = display_device::HdrState::Disabled;
+      apply_attempt_ = 1;
+      BOOST_LOG(warning) << "Display helper: virtual-display HDR remained unavailable after bounded retries; applying topology and mode with effective SDR.";
+      transition(State::InProgress, ApplyAction::Apply, completed.status);
+      dispatch_apply_worker(current_request_, std::chrono::milliseconds(0), false);
+      return;
     }
 
     send_apply_result(completed.status);
@@ -1264,7 +1296,6 @@ namespace display_helper::v2 {
         const bool initial_verification = !verification_result_sent_;
         const bool disconnected_settlement = transient_disconnect_settlement_requested_;
         if (initial_verification) {
-          send_verification_result(true);
           session_was_verified_ = true;
           activate_recovery_lease();
           unconfirmed_cancelled_mutation_ = false;
@@ -1275,6 +1306,10 @@ namespace display_helper::v2 {
             system_.arm_heartbeat();
           }
           system_.refresh_shell();
+          // Verification is also the host's capture-start gate. Publish it
+          // only after dispatching the shell display-change refresh so the
+          // repaint request cannot lag behind capture startup.
+          send_verification_result(true);
           // wa_hdr_toggle is an explicitly requested workaround. Running it on
           // every successful APPLY was an unnecessary monitor off/on cycle.
           if (current_request_.hdr_blank) {
@@ -1367,10 +1402,13 @@ namespace display_helper::v2 {
     if (completed.success) {
       staged_state_prepared_ = false;
     }
-    BOOST_LOG(completed.success ? info : warning)
-      << "Display helper: reset staged SettingsManager state result="
-      << (completed.success ? "true" : "false")
-      << (was_stale ? " (completion followed a newer cancellation generation)" : "");
+    if (completed.success) {
+      BOOST_LOG(info) << "Display helper: reset staged SettingsManager state result=true"
+                      << (was_stale ? " (completion followed a newer cancellation generation)" : "");
+    } else {
+      BOOST_LOG(warning) << "Display helper: reset staged SettingsManager state result=false"
+                         << (was_stale ? " (completion followed a newer cancellation generation)" : "");
+    }
 
     const bool deferred_followup_mutation = std::any_of(
       deferred_mutation_commands_.begin(),

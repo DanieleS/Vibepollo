@@ -4,11 +4,16 @@
  */
 // standard includes
 #include <algorithm>
+#include <atomic>
 #include <codecvt>
+#include <condition_variable>
 #include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
+#include <system_error>
+#include <thread>
 
 // local includes
 #include "confighttp.h"
@@ -38,6 +43,7 @@
   #include "src/platform/windows/misc.h"
   #include "src/platform/windows/playnite_integration.h"
   #include "src/platform/windows/rtss_integration.h"
+  #include "src/platform/windows/startup_display_policy.h"
   #include "src/platform/windows/virtual_display.h"
   #include "src/platform/windows/virtual_display_cleanup.h"
 #endif
@@ -73,6 +79,102 @@ void on_signal(int sig, FN &&fn) {
 
   std::signal(sig, on_signal_forwarder);
 }
+
+namespace {
+  static_assert(std::atomic_bool::is_always_lock_free, "shutdown signal flag must be lock-free in a signal handler");
+
+  class shutdown_deadline_t {
+  public:
+    explicit shutdown_deadline_t(std::atomic_bool *signal_requested):
+        signal_requested_ {signal_requested} {
+      try {
+        worker_ = std::jthread([this](std::stop_token) {
+          run();
+        });
+      } catch (const std::system_error &e) {
+        BOOST_LOG(error) << "Unable to create the shutdown deadline watchdog: " << e.what();
+      }
+    }
+
+    shutdown_deadline_t(const shutdown_deadline_t &) = delete;
+    shutdown_deadline_t &operator=(const shutdown_deadline_t &) = delete;
+
+    ~shutdown_deadline_t() {
+      complete();
+    }
+
+    void arm() {
+      if (!worker_.joinable()) {
+        return;
+      }
+      std::lock_guard lock {mutex_};
+      if (state_ == state_e::idle) {
+        state_ = state_e::armed;
+        cv_.notify_one();
+      }
+    }
+
+    void complete() {
+      {
+        std::lock_guard lock {mutex_};
+        if (state_ != state_e::firing) {
+          state_ = state_e::completed;
+        }
+        cv_.notify_one();
+      }
+
+      // This object is owned by main(), never by its worker. Joining here
+      // prevents a deadline thread from escaping into CRT/static teardown.
+      if (worker_.joinable()) {
+        worker_.join();
+      }
+    }
+
+  private:
+    enum class state_e {
+      idle,
+      armed,
+      completed,
+      firing,
+    };
+
+    void run() {
+      std::unique_lock lock {mutex_};
+      while (state_ == state_e::idle && (!signal_requested_ || !signal_requested_->load(std::memory_order_relaxed))) {
+        // std::signal handlers cannot notify a condition variable safely. Poll
+        // the signal-safe flag so startup work is covered before main reaches
+        // shutdown_event->view().
+        cv_.wait_for(lock, std::chrono::milliseconds(50));
+      }
+      if (state_ == state_e::idle) {
+        state_ = state_e::armed;
+      }
+      if (state_ != state_e::armed) {
+        return;
+      }
+
+      constexpr auto kShutdownDeadline = std::chrono::seconds(10);
+      if (cv_.wait_until(lock, std::chrono::steady_clock::now() + kShutdownDeadline, [this] {
+            return state_ != state_e::armed;
+          })) {
+        return;
+      }
+
+      // Completion and expiry serialize through mutex_. A recovered shutdown
+      // therefore cannot leave a stale timer behind to trap later.
+      state_ = state_e::firing;
+      lock.unlock();
+      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
+      lifetime::debug_trap();
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    state_e state_ {state_e::idle};
+    std::atomic_bool *signal_requested_ = nullptr;
+    std::jthread worker_;
+  };
+}  // namespace
 
 std::map<std::string_view, std::function<int(const char *name, int argc, char **argv)>> cmd_to_func {
   {"creds"sv, [](const char *name, int argc, char **argv) {
@@ -139,8 +241,6 @@ WINAPI BOOL ConsoleCtrlHandler(DWORD type) {
 int main(int argc, char *argv[]) {
   lifetime::argv = argv;
 
-  task_pool_util::TaskPool::task_id_t force_shutdown = nullptr;
-
 #ifdef _WIN32
   // Avoid searching the PATH in case a user has configured their system insecurely
   // by placing a user-writable directory in the system-wide PATH variable.
@@ -191,6 +291,15 @@ int main(int argc, char *argv[]) {
   // if anything is logged prior to this point, it will appear in stdout, but not in the log viewer in the UI
   // the version should be printed to the log before anything else
   BOOST_LOG(info) << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
+#ifdef _WIN32
+  const auto windows_version = platf::query_windows_version();
+  BOOST_LOG(info) << "Windows version: product=" << windows_version.product_name
+                  << ", display_version=" << windows_version.display_version
+                  << ", build=" << windows_version.current_build;
+  if (windows_version.build_number.has_value() && *windows_version.build_number < 22000) {
+    BOOST_LOG(warning) << "Windows 10 detected; HDR will not work on the Vibepollo Virtual Display.";
+  }
+#endif
   if (version_compare::is_prerelease_channel(PROJECT_VERSION)) {
     BOOST_LOG(info) << "Prerelease build detected; default min_log_level is debug unless overridden.";
   }
@@ -229,6 +338,13 @@ int main(int argc, char *argv[]) {
   }
 
   // Display configuration is managed by the external Windows helper; no in-process init.
+
+  // Construct the process-owned shutdown deadline before the session monitor.
+  // Its cleanup guard also runs on early startup returns, so it must be able
+  // to bound that join as well as the ordinary shutdown path below.
+  auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+  std::atomic_bool shutdown_signal_requested {false};
+  shutdown_deadline_t shutdown_deadline {&shutdown_signal_requested};
 
 #ifdef WIN32
   // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
@@ -304,7 +420,16 @@ int main(int argc, char *argv[]) {
     }
   });
 
-  auto session_monitor_join_thread_guard = util::fail_guard([&]() {
+  auto shutdown_session_monitor = [&]() {
+    if (!session_monitor_thread.joinable()) {
+      return;
+    }
+
+    // This cleanup guard covers early returns before shutdown_event->view().
+    // Arm the owned deadline before any potentially unbounded join so that a
+    // pathological message loop cannot hang process teardown indefinitely.
+    shutdown_deadline.arm();
+
     auto request_session_monitor_shutdown = [&](bool force_quit_only) {
       if (!force_quit_only) {
         if (session_monitor_hwnd_future.wait_for(1s) == std::future_status::ready) {
@@ -351,16 +476,20 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(warning) << "session_monitor_join_thread_future reached timeout";
     request_session_monitor_shutdown(true);
 
-    // Detaching a thread that is still running causes undefined behavior
-    // when main() returns (CRT atexit cleanup may abort).  Join with a
-    // generous timeout so the thread has time to finish even on slow
-    // systems.  If it still hasn't exited, detach as a last resort.
+    // This thread owns a window/message queue and may access logging and
+    // process globals. It must never escape into CRT teardown. The shutdown
+    // deadline is armed before the normal call site below, so an unexpected
+    // stuck message loop is diagnosed instead of being detached unsafely.
     if (session_monitor_join_thread_future.wait_for(5s) == std::future_status::ready) {
       session_monitor_thread.join();
     } else {
-      BOOST_LOG(warning) << "session_monitor_thread still running after extended wait; detaching";
-      session_monitor_thread.detach();
+      BOOST_LOG(error) << "session_monitor_thread still running after forced WM_QUIT; waiting for owned thread exit";
+      session_monitor_thread.join();
     }
+  };
+
+  auto session_monitor_join_thread_guard = util::fail_guard([&]() {
+    shutdown_session_monitor();
   });
 
 #endif
@@ -389,21 +518,14 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
-  // Create signal handler after logging has been initialized
-  auto shutdown_event = mail::man->event<bool>(mail::shutdown);
-  on_signal(SIGINT, [&force_shutdown, shutdown_event]() {
+  // Create signal handlers after logging has been initialized.
+  on_signal(SIGINT, [&shutdown_signal_requested, shutdown_event]() {
+    shutdown_signal_requested.store(true, std::memory_order_relaxed);
     BOOST_LOG(info) << "Interrupt handler called"sv;
 
-    auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
-      logging::log_flush();
-      lifetime::debug_trap();
-    };
-
+    // Preserve Vibepollo's eager application cleanup; the owned deadline above
+    // replaces the detached task-pool watchdog that used to follow it.
     proc::proc.terminate();
-
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
-
     // Break out of the main loop
     shutdown_event->raise(true);
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
@@ -413,15 +535,9 @@ int main(int argc, char *argv[]) {
 #endif
   });
 
-  on_signal(SIGTERM, [&force_shutdown, shutdown_event]() {
+  on_signal(SIGTERM, [&shutdown_signal_requested, shutdown_event]() {
+    shutdown_signal_requested.store(true, std::memory_order_relaxed);
     BOOST_LOG(info) << "Terminate handler called"sv;
-
-    auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
-      logging::log_flush();
-      lifetime::debug_trap();
-    };
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
 
     // Break out of the main loop
     shutdown_event->raise(true);
@@ -472,39 +588,6 @@ int main(int argc, char *argv[]) {
     return lifetime::desired_exit_code;
   }
 
-#ifdef _WIN32
-  // Check if virtual display should be auto-enabled due to no physical monitors
-  if (VDISPLAY::should_auto_enable_virtual_display()) {
-    BOOST_LOG(info) << "No physical monitors detected at initialization. Initializing virtual display driver.";
-    proc::initVDisplayDriver();
-  }
-
-  if (shutdown_event->peek()) {
-    return lifetime::desired_exit_code;
-  }
-
-  // Crash-recovery janitor: if Sunshine starts and finds active virtual displays before
-  // any RTSP/WebRTC sessions exist, force cleanup to prevent stuck fallback issues.
-  if (rtsp_stream::session_count() == 0 && !webrtc_stream::has_active_sessions()) {
-    const auto virtual_displays = VDISPLAY::enumerateVirtualDisplays();
-    const bool has_active_virtual_display = std::any_of(
-      virtual_displays.begin(),
-      virtual_displays.end(),
-      [](const VDISPLAY::VirtualDisplayInfo &info) {
-        return info.is_active;
-      }
-    );
-    if (has_active_virtual_display) {
-      BOOST_LOG(warning) << "Startup detected active virtual display(s) with no active stream session; running cleanup.";
-      (void) platf::virtual_display_cleanup::run("startup_recovery", config::video.dd.config_revert_on_disconnect);
-    }
-  }
-#endif
-
-  if (shutdown_event->peek()) {
-    return lifetime::desired_exit_code;
-  }
-
   reed_solomon_init();
   auto input_deinit_guard = input::init();
 
@@ -513,70 +596,137 @@ int main(int argc, char *argv[]) {
   }
 
   auto startup_probe = [&shutdown_event]() {
-    if (video::has_attempted_encoder_probe()) {
-      BOOST_LOG(debug) << "Startup encoder probe skipped; probe already attempted.";
-      return;
-    }
-
-    if (shutdown_event->peek()) {
-      return;
-    }
-
 #ifdef _WIN32
-    if (!platf::is_default_input_desktop_active()) {
-      BOOST_LOG(info) << "Startup encoder probe deferred until the interactive desktop is ready.";
-      return;
-    }
-
-    // Ensure a display is available first; probing encoders generally requires a display.
-    auto encoder_probe_display_result = VDISPLAY::ensure_display();
-    if (!encoder_probe_display_result.success) {
-      BOOST_LOG(warning) << "Unable to ensure display for encoder probing. Probe may fail.";
-    }
-
-    bool encoder_probe_succeeded = false;
-    auto cleanup_encoder_probe_display = util::fail_guard([&encoder_probe_display_result, &encoder_probe_succeeded]() {
-      VDISPLAY::cleanup_ensure_display(encoder_probe_display_result, encoder_probe_succeeded, true);
-    });
-
-    if (shutdown_event->peek()) {
-      return;
-    }
+    bool desktop_defer_logged = false;
+    bool driver_init_attempted = false;
+    bool startup_recovery_checked = false;
+    while (!shutdown_event->peek()) {
 #endif
+      if (video::has_attempted_encoder_probe()) {
+        BOOST_LOG(debug) << "Startup encoder probe skipped; probe already attempted.";
+        return;
+      }
 
-    bool encoder_probe_failed = video::probe_encoders();
+      if (shutdown_event->peek()) {
+        return;
+      }
 
 #ifdef _WIN32
-    // If the probe failed and there's no active display (headless virtual display),
-    // wait for the display to become available via DXGI and retry.
-    if (encoder_probe_failed && !shutdown_event->peek()) {
-      BOOST_LOG(info) << "Startup encoder probe failed; waiting for display activation before retry.";
-      constexpr auto kDisplayActivationTimeout = std::chrono::seconds(5);
-      const auto deadline = std::chrono::steady_clock::now() + kDisplayActivationTimeout;
-      bool display_activated = false;
-      while (std::chrono::steady_clock::now() < deadline && !shutdown_event->peek()) {
-        if (VDISPLAY::has_active_physical_display() ||
-            !VDISPLAY::enumerateVirtualDisplays().empty()) {
-          display_activated = true;
-          break;
+      const auto has_stream_activity = [] {
+        return rtsp_stream::has_pending_launch_or_startup() ||
+               rtsp_stream::session_count() != 0 ||
+               webrtc_stream::has_active_or_pending_sessions();
+      };
+      const platf::startup_display_policy::state startup_state {
+        .interactive_desktop = platf::is_default_input_desktop_active(),
+        .stream_active = has_stream_activity(),
+        .shutting_down = shutdown_event->peek(),
+      };
+      if (platf::startup_display_policy::should_retry(startup_state)) {
+        if (!desktop_defer_logged) {
+          BOOST_LOG(info) << "Startup display initialization deferred until the interactive desktop is ready; RTSP listener remains available.";
+          desktop_defer_logged = true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(250ms);
+        continue;
       }
-      if (display_activated) {
-        BOOST_LOG(info) << "Display became active; retrying startup encoder probe.";
-        encoder_probe_failed = video::probe_encoders();
+      if (!platf::startup_display_policy::should_run(startup_state)) {
+        if (startup_state.stream_active) {
+          BOOST_LOG(debug) << "Startup display initialization skipped; a streaming session owns the display lifecycle.";
+        }
+        return;
       }
-    }
+      if (desktop_defer_logged) {
+        BOOST_LOG(info) << "Interactive desktop is ready; resuming deferred startup display initialization.";
+      }
 
-    encoder_probe_succeeded = !encoder_probe_failed;
+      // Keep driver recovery and the startup janitor out of the pre-listener
+      // path. Both can block while Windows restarts a virtual-display device,
+      // and the janitor must not mutate an intentional display before the
+      // user's interactive desktop exists.
+      if (!driver_init_attempted && VDISPLAY::should_auto_enable_virtual_display()) {
+        BOOST_LOG(info) << "No physical monitors detected after the interactive desktop became ready. Initializing virtual display driver.";
+        proc::initVDisplayDriver();
+        driver_init_attempted = true;
+      }
+
+      if (shutdown_event->peek() || has_stream_activity()) {
+        return;
+      }
+
+      // Crash-recovery janitor: only run after the interactive desktop is
+      // ready and while no RTSP/WebRTC session can claim the display.
+      if (!startup_recovery_checked) {
+        startup_recovery_checked = true;
+        const auto virtual_displays = VDISPLAY::enumerateVirtualDisplays();
+        const bool has_active_virtual_display = std::any_of(
+          virtual_displays.begin(),
+          virtual_displays.end(),
+          [](const VDISPLAY::VirtualDisplayInfo &info) {
+            return info.is_active;
+          }
+        );
+        if (has_active_virtual_display) {
+          BOOST_LOG(warning) << "Startup detected active virtual display(s) with no active stream session; running cleanup.";
+          (void) platf::virtual_display_cleanup::run("startup_recovery", config::video.dd.config_revert_on_disconnect);
+        }
+      }
+
+      if (shutdown_event->peek() || has_stream_activity()) {
+        return;
+      }
+
+      if (!VDISPLAY::should_auto_enable_virtual_display() && !VDISPLAY::has_active_physical_display()) {
+        BOOST_LOG(debug) << "Startup encoder probe skipped; no active display exists and virtual display auto-enable is disabled.";
+        return;
+      }
+
+      // Ensure the selected adapter has a usable output before a cold probe.
+      // The temporary probe target is scoped to this attempt; a later launch
+      // will create the client display it actually needs.
+      auto encoder_probe_display_result = VDISPLAY::ensure_display();
+      if (!encoder_probe_display_result.ready_for_probe()) {
+        VDISPLAY::cleanup_ensure_display(encoder_probe_display_result);
+        BOOST_LOG(info)
+          << "Startup encoder probe skipped because the exact display target did not become usable.";
+        return;
+      }
+      auto cleanup_encoder_probe_display = util::fail_guard([&encoder_probe_display_result]() {
+        VDISPLAY::cleanup_ensure_display(encoder_probe_display_result);
+      });
+
+      if (shutdown_event->peek()) {
+        return;
+      }
 #endif
 
-    if (encoder_probe_failed) {
-      BOOST_LOG(error) << "Failed to probe encoders during startup.";
-    }
-  };
+      bool encoder_probe_failed = video::probe_encoders();
 
-  startup_probe();
+#ifdef _WIN32
+      // Re-resolve the exact retained target before retrying. Never let another
+      // active output satisfy readiness for the requested probe display.
+      if (encoder_probe_failed && !shutdown_event->peek()) {
+        BOOST_LOG(info) << "Startup encoder probe failed; rechecking exact display readiness before retry.";
+        auto retry_display_result = VDISPLAY::ensure_display();
+        auto cleanup_retry_display = util::fail_guard([&retry_display_result]() {
+          VDISPLAY::cleanup_ensure_display(retry_display_result);
+        });
+        if (retry_display_result.ready_for_probe()) {
+          BOOST_LOG(info) << "Exact display target became ready; retrying startup encoder probe.";
+          encoder_probe_failed = video::probe_encoders();
+        }
+      }
+
+#endif
+
+      if (encoder_probe_failed) {
+        BOOST_LOG(error) << "Failed to probe encoders during startup.";
+      }
+      return;
+#ifdef _WIN32
+    }
+#endif
+  };
 
   // Initialize session history in its own directory so database hardening never
   // touches the shared config root that also contains credentials/pairing state.
@@ -667,6 +817,11 @@ int main(int argc, char *argv[]) {
   std::thread configThread {confighttp::start};
   std::thread rtspThread {rtsp_stream::start};
 
+  // Start listeners before any display-driver recovery or cold encoder probe.
+  // A boot-time driver restart can take several bounded attempts; it must not
+  // make the service unreachable while the interactive desktop converges.
+  startup_probe();
+
 #ifdef _WIN32
   // If we're using the default port and GameStream is enabled, warn the user
   if (config::sunshine.port == 47989 && is_gamestream_enabled()) {
@@ -677,6 +832,26 @@ int main(int argc, char *argv[]) {
 
   // Wait for shutdown
   shutdown_event->view();
+  // Arm the owned watchdog from main so signal handlers never construct
+  // watchdog threads or queue watchdog work from signal context.
+  shutdown_deadline.arm();
+
+#ifdef WIN32
+  // Join the hidden shutdown-notification window while the deadline watchdog
+  // is still armed. The guard remains for early-return paths only.
+  shutdown_session_monitor();
+  session_monitor_join_thread_guard.disable();
+#endif
+
+#ifdef _WIN32
+  // Stop the owned lock-screen virtual-output worker before recovery workers
+  // can publish more overrides. Both use configuration, the display helper,
+  // and mail, all of which remain live until these joins complete.
+  config::request_deferred_virtual_output_reapply_shutdown();
+  VDISPLAY::request_virtual_display_recovery_shutdown();
+  config::join_deferred_virtual_output_reapply_worker();
+  VDISPLAY::join_virtual_display_recovery_monitors();
+#endif
 
   httpThread.join();
   configThread.join();
@@ -686,10 +861,11 @@ int main(int argc, char *argv[]) {
   // Full process shutdown cannot leave the paused-session watchdog running.
   // If it survives past main(), CRT teardown can fast-fail while the helper
   // watchdog thread is still unwinding.
-  display_helper_integration::stop_watchdog();
+  display_helper_integration::stop_watchdog(true);
 
   // The virtual display watchdog thread also lives in static storage.
   // Ensure it is joined before CRT on-exit handlers destroy the thread object.
+  VDISPLAY::cleanup_retained_ensure_display();
   VDISPLAY::closeVDisplayDevice();
 #endif
 

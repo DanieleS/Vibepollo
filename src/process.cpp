@@ -27,6 +27,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 // lib includes
@@ -41,9 +42,11 @@
 #include <openssl/sha.h>
 
 // local includes
+#include "app_catalog_policy.h"
 #include "config.h"
 #include "crypto.h"
 #include "display_device.h"
+#include "deferred_action.h"
 #include "file_handler.h"
 #include "logging.h"
 #include "platform/common.h"
@@ -72,6 +75,7 @@
 #endif
 #include "rtsp.h"
 #include "state_storage.h"
+#include "stream.h"
 #include "system_tray.h"
 #include "utility.h"
 #include "uuid.h"
@@ -892,25 +896,25 @@ namespace proc {
   std::string terminate_app_id_str;
 
 #ifdef _WIN32
-  VDISPLAY::DRIVER_STATUS vDisplayDriverStatus = VDISPLAY::DRIVER_STATUS::UNKNOWN;
+  std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus {VDISPLAY::DRIVER_STATUS::UNKNOWN};
   namespace {
-    std::atomic_bool deferred_display_revert {false};
+    lifecycle::deferred_action_t deferred_display_revert;
   }
 
   void defer_display_revert() {
-    deferred_display_revert.store(true, std::memory_order_release);
+    deferred_display_revert.defer();
   }
 
   bool consume_deferred_display_revert() {
-    return deferred_display_revert.exchange(false, std::memory_order_acq_rel);
+    return deferred_display_revert.consume();
   }
 
   void clear_deferred_display_revert() {
-    deferred_display_revert.store(false, std::memory_order_release);
+    deferred_display_revert.clear();
   }
 
   void onVDisplayWatchdogFailed() {
-    vDisplayDriverStatus = VDISPLAY::DRIVER_STATUS::WATCHDOG_FAILED;
+    vDisplayDriverStatus.store(VDISPLAY::DRIVER_STATUS::WATCHDOG_FAILED, std::memory_order_release);
     VDISPLAY::closeVDisplayDevice();
   }
 
@@ -919,8 +923,8 @@ namespace proc {
     if (!VDISPLAY::ensure_driver_is_ready()) {
       BOOST_LOG(warning) << "Sunshine virtual display driver reported unavailable during initialization; attempting to continue.";
     }
-    vDisplayDriverStatus = VDISPLAY::openVDisplayDevice();
-    if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+    vDisplayDriverStatus.store(VDISPLAY::openVDisplayDevice(), std::memory_order_release);
+    if (vDisplayDriverStatus.load(std::memory_order_acquire) == VDISPLAY::DRIVER_STATUS::OK) {
       if (!VDISPLAY::startPingThread(onVDisplayWatchdogFailed)) {
         onVDisplayWatchdogFailed();
         return;
@@ -931,7 +935,7 @@ namespace proc {
 
   // Custom move operations to allow global proc replacement if ever needed
   proc_t::proc_t(proc_t &&other) noexcept:
-      _app_id(other._app_id),
+      _app_id(other._app_id.load(std::memory_order_acquire)),
       _env(std::move(other._env)),
       _apps(std::move(other._apps)),
       _app(std::move(other._app)),
@@ -943,6 +947,7 @@ namespace proc {
 #ifdef _WIN32
       _virtual_display_guid(other._virtual_display_guid),
       _virtual_display_active(other._virtual_display_active),
+      _runtime_output_override_lease(std::exchange(other._runtime_output_override_lease, std::nullopt)),
 #endif
       _pipe(std::move(other._pipe)),
       _app_prep_it(other._app_prep_it),
@@ -968,7 +973,7 @@ namespace proc {
 #ifdef _WIN32
       stop_lossless_scaling_support();
 #endif
-      _app_id = other._app_id;
+      _app_id.store(other._app_id.load(std::memory_order_acquire), std::memory_order_release);
       _env = std::move(other._env);
       _apps = std::move(other._apps);
       _app = std::move(other._app);
@@ -981,6 +986,10 @@ namespace proc {
       _app_prep_it = other._app_prep_it;
       _app_prep_begin = other._app_prep_begin;
 #ifdef _WIN32
+      if (_runtime_output_override_lease) {
+        (void) config::clear_runtime_output_name_override_if_lease(*_runtime_output_override_lease);
+      }
+      _runtime_output_override_lease = std::exchange(other._runtime_output_override_lease, std::nullopt);
       _lossless_thread = std::move(other._lossless_thread);
       _lossless_stop_requested.store(other._lossless_stop_requested.load(std::memory_order_acquire), std::memory_order_release);
       _lossless_profile_applied = other._lossless_profile_applied;
@@ -1249,12 +1258,12 @@ namespace proc {
     _lossless_metadata = {};
 #endif
     if (_app_id == input_only_app_id) {
-      terminate(false, false);
+      terminate(false, false, false, true);
       std::this_thread::sleep_for(1s);
     } else {
       // Ensure starting from a clean slate
       const bool skip_display_revert = launch_session && launch_session->display_config_preapplied;
-      terminate(false, false, skip_display_revert);
+      terminate(false, false, skip_display_revert, true);
     }
 
     _app = app;
@@ -1275,6 +1284,18 @@ namespace proc {
     launch_session->lossless_scaling_target_fps = _app.lossless_scaling_target_fps;
     launch_session->lossless_scaling_rtss_limit = _app.lossless_scaling_rtss_limit;
     launch_session->frame_generation_provider = _app.frame_generation_provider;
+    // Web UI launches do not resolve the app through make_launch_session().
+    // Carry app display policy into the session here so every launch path makes
+    // the same physical-versus-virtual decision before creating a display.
+    if (_app.output_name_override) {
+      launch_session->output_name_override = _app.output_name_override;
+    }
+    if (!launch_session->virtual_display_mode_override && _app.virtual_display_mode_override) {
+      launch_session->virtual_display_mode_override = _app.virtual_display_mode_override;
+    }
+    if (!launch_session->dd_config_option_override && _app.dd_config_option_override) {
+      launch_session->dd_config_option_override = _app.dd_config_option_override;
+    }
     std::optional<double> effective_lossless_target = launch_session->lossless_scaling_target_fps;
     if (
       (!effective_lossless_target || *effective_lossless_target <= 0) &&
@@ -1301,8 +1322,13 @@ namespace proc {
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
 
-    uint32_t client_width = launch_session->width ? launch_session->width : 1920;
-    uint32_t client_height = launch_session->height ? launch_session->height : 1080;
+    const bool has_resolution_override = launch_session->resolution_override.has_value();
+    uint32_t client_width = has_resolution_override ?
+                              static_cast<uint32_t>(launch_session->resolution_override->width) :
+                              (launch_session->width ? launch_session->width : 1920);
+    uint32_t client_height = has_resolution_override ?
+                               static_cast<uint32_t>(launch_session->resolution_override->height) :
+                               (launch_session->height ? launch_session->height : 1080);
 
     uint32_t render_width = client_width;
     uint32_t render_height = client_height;
@@ -1316,7 +1342,7 @@ namespace proc {
       scale_factor = 100;
     }
 
-    if (scale_factor != 100) {
+    if (!has_resolution_override && scale_factor != 100) {
       render_width *= ((float) scale_factor / 100);
       render_height *= ((float) scale_factor / 100);
 
@@ -1342,53 +1368,107 @@ namespace proc {
     }
 
 #ifdef _WIN32
-    using dd_config_option_e = config::video_t::dd_t::config_option_e;
-    const auto dd_config_option = config::video.dd.configuration_option;
-    const bool forced_sudavda_virtual_display = config::video.output_name == VDISPLAY::SUDOVDA_VIRTUAL_DISPLAY_SELECTION;
-    const bool headless_mode = config::video.virtual_display_mode != config::video_t::virtual_display_mode_e::disabled;
-    const bool dd_conflicts_with_virtual_display =
-      dd_config_option == dd_config_option_e::ensure_only_display &&
-      dd_config_option != dd_config_option_e::disabled &&
-      !headless_mode;
-    const bool metadata_requests_virtual = launch_session->app_metadata && launch_session->app_metadata->virtual_screen;
-    const bool app_requests_virtual = _app.virtual_display || _app.virtual_screen;
-    const bool session_requests_virtual = launch_session->virtual_display;
-
-    if (forced_sudavda_virtual_display) {
-      launch_session->virtual_display = true;
-    }
-
-    bool should_use_virtual_display =
-      headless_mode ||
-      app_requests_virtual ||
-      metadata_requests_virtual ||
-      session_requests_virtual ||
-      !video::allow_encoder_probing() ||
-      VDISPLAY::should_auto_enable_virtual_display();
-
-    const bool already_has_virtual_guid = std::any_of(
+    bool already_has_virtual_guid = std::any_of(
       launch_session->virtual_display_guid_bytes.begin(),
       launch_session->virtual_display_guid_bytes.end(),
       [](std::uint8_t b) { return b != 0; }
     );
 
-    if (should_use_virtual_display && dd_conflicts_with_virtual_display && !forced_sudavda_virtual_display) {
-      if (session_requests_virtual || app_requests_virtual) {
-        BOOST_LOG(info) << "Skipping virtual display activation because display device configuration is set to ensure-only-display.";
+    // Preserve an upstream resolver's decision. For Web UI and WebRTC launches,
+    // resolve the same app/client display policy locally before any VDD exists.
+    bool should_use_virtual_display = launch_session->virtual_display;
+    if (!launch_session->virtual_display_request_resolved) {
+      using dd_config_option_e = config::video_t::dd_t::config_option_e;
+      const auto dd_config_option =
+        launch_session->dd_config_option_override.value_or(config::video.dd.configuration_option);
+      const bool forced_sudavda_virtual_display = config::video.output_name == VDISPLAY::SUDOVDA_VIRTUAL_DISPLAY_SELECTION;
+      const auto effective_virtual_display_mode =
+        launch_session->virtual_display_mode_override.value_or(config::video.virtual_display_mode);
+      const bool headless_mode =
+        effective_virtual_display_mode != config::video_t::virtual_display_mode_e::disabled;
+      const bool dd_conflicts_with_virtual_display =
+        dd_config_option == dd_config_option_e::ensure_only_display &&
+        dd_config_option != dd_config_option_e::disabled &&
+        !headless_mode;
+      const bool metadata_requests_virtual = launch_session->app_metadata && launch_session->app_metadata->virtual_screen;
+      const bool app_requests_virtual = _app.virtual_display || _app.virtual_screen;
+      const bool client_requests_virtual = launch_session->client_requests_virtual_display;
+      const bool session_requests_virtual = launch_session->virtual_display;
+      std::optional<std::string> output_override;
+      if (launch_session->output_name_override) {
+        output_override = boost::algorithm::trim_copy(*launch_session->output_name_override);
       }
-      launch_session->virtual_display = false;
-      should_use_virtual_display = headless_mode || !video::allow_encoder_probing();
+      const bool output_selects_virtual =
+        output_override && !output_override->empty() && VDISPLAY::is_virtual_display_selection(*output_override);
+      const bool output_selects_physical =
+        output_override && (output_override->empty() || !output_selects_virtual);
+      const auto framegen_policy = framegen::make_stream_start_policy({
+        .fps = launch_session->fps,
+        .fps_scaled = launch_session->fps,
+        .display_refresh_millihz = launch_session->client_display_refresh_millihz,
+        .frame_generation_enabled = launch_session->frame_generation_enabled,
+        .gen1_framegen_fix = launch_session->gen1_framegen_fix,
+        .gen2_framegen_fix = launch_session->gen2_framegen_fix,
+        .lossless_scaling_framegen = launch_session->lossless_scaling_framegen,
+        .lossless_rtss_limit = launch_session->lossless_scaling_rtss_limit,
+        .frame_generation_provider = launch_session->frame_generation_provider,
+        .uses_virtual_display =
+          output_selects_physical ?
+            false :
+            (session_requests_virtual || headless_mode || app_requests_virtual || output_selects_virtual),
+        .capture_mode = config::video.capture,
+        .auto_capture_uses_wgc = platf::dxgi::should_use_wgc_default(),
+        .auto_virtual_framegen_limiter = config::frame_limiter.virtual_display_limiter_enabled(),
+        .virtual_display_refresh_multiplier = config::frame_limiter.fixed_virtual_display_refresh_multiplier(),
+      });
+      const bool framegen_requires_virtual = framegen_policy.requires_virtual_display;
+
+      if (forced_sudavda_virtual_display || output_selects_virtual) {
+        launch_session->virtual_display = true;
+      }
+
+      if (output_selects_physical && !framegen_requires_virtual) {
+        launch_session->virtual_display = false;
+        launch_session->virtual_display_failed = false;
+        launch_session->virtual_display_guid_bytes.fill(0);
+        launch_session->virtual_display_device_id.clear();
+        launch_session->virtual_display_ready_since.reset();
+        already_has_virtual_guid = false;
+        should_use_virtual_display = false;
+        _runtime_output_override_lease =
+          config::set_runtime_output_name_override_with_lease(*output_override);
+      } else {
+        should_use_virtual_display =
+          headless_mode ||
+          app_requests_virtual ||
+          metadata_requests_virtual ||
+          client_requests_virtual ||
+          session_requests_virtual ||
+          output_selects_virtual ||
+          framegen_requires_virtual ||
+          !video::allow_encoder_probing() ||
+          VDISPLAY::should_auto_enable_virtual_display();
+
+        if (should_use_virtual_display && dd_conflicts_with_virtual_display && !forced_sudavda_virtual_display) {
+          if (session_requests_virtual || app_requests_virtual || client_requests_virtual) {
+            BOOST_LOG(info) << "Skipping virtual display activation because display device configuration is set to ensure-only-display.";
+          }
+          launch_session->virtual_display = false;
+          should_use_virtual_display = headless_mode || !video::allow_encoder_probing();
+        }
+      }
+      launch_session->virtual_display_request_resolved = true;
     }
 
     bool dd_api_handled = false;
     // Display helper APPLY is handled in nvhttp to avoid duplicate helper restarts.
 
     if (should_use_virtual_display && !dd_api_handled && !already_has_virtual_guid) {
-      if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
+      if (vDisplayDriverStatus.load(std::memory_order_acquire) != VDISPLAY::DRIVER_STATUS::OK) {
         initVDisplayDriver();
       }
 
-      if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+      if (vDisplayDriverStatus.load(std::memory_order_acquire) == VDISPLAY::DRIVER_STATUS::OK) {
         if (!config::video.adapter_name.empty()) {
           (void) VDISPLAY::setRenderAdapterByName(platf::from_utf8(config::video.adapter_name));
         } else {
@@ -1399,7 +1479,10 @@ namespace proc {
         std::string device_uuid_str;
         uuid_util::uuid_t device_uuid;
 
-        const bool use_shared_display = (config::video.virtual_display_mode == config::video_t::virtual_display_mode_e::shared);
+        const auto effective_virtual_display_mode =
+          launch_session->virtual_display_mode_override.value_or(config::video.virtual_display_mode);
+        const bool use_shared_display =
+          effective_virtual_display_mode == config::video_t::virtual_display_mode_e::shared;
 
         if (use_shared_display) {
           if (http::shared_virtual_display_guid.empty()) {
@@ -1441,24 +1524,17 @@ namespace proc {
         std::memcpy(&display_guid, device_uuid.b8, sizeof(display_guid));
         std::copy_n(device_uuid.b8, launch_session->virtual_display_guid_bytes.size(), launch_session->virtual_display_guid_bytes.begin());
 
-        int target_fps = 0;
-        if (launch_session->framegen_refresh_rate && *launch_session->framegen_refresh_rate > 0) {
-          target_fps = *launch_session->framegen_refresh_rate;
-        } else if (launch_session->fps > 0) {
-          target_fps = launch_session->fps;
-        } else {
-          target_fps = 60000;
+        uint32_t target_fps = rtsp_stream::effective_display_refresh_millihz(*launch_session);
+        if (target_fps == 0) {
+          target_fps = 60000u;
         }
 
-        if (target_fps < 1000) {
-          target_fps *= 1000;
-        }
-
-        uint32_t base_fps_millihz = launch_session->fps > 0 ? static_cast<uint32_t>(launch_session->fps) : 0u;
-        if (base_fps_millihz > 0 && base_fps_millihz < 1000u) {
-          base_fps_millihz *= 1000u;
-        }
-        const bool framegen_refresh_active = launch_session->framegen_refresh_rate && *launch_session->framegen_refresh_rate > 0;
+        const uint32_t base_fps_millihz = launch_session->client_display_refresh_millihz > 0 ?
+                                                  launch_session->client_display_refresh_millihz :
+                                                  framegen::normalize_refresh_millihz(launch_session->fps);
+        const bool framegen_refresh_active =
+          (launch_session->framegen_refresh_millihz && *launch_session->framegen_refresh_millihz > 0) ||
+          (launch_session->framegen_refresh_rate && *launch_session->framegen_refresh_rate > 0);
         // Virtual displays always run at 4x the requested refresh (or the highest the driver
         // can provide) so frame pacing stays smooth; frame generation reuses the same target.
         const int refresh_multiplier = std::max(
@@ -1516,7 +1592,8 @@ namespace proc {
           BOOST_LOG(warning) << "Virtual display creation failed.";
         }
       } else {
-        BOOST_LOG(warning) << "SudoVDA driver unavailable (status=" << static_cast<int>(vDisplayDriverStatus) << ")";
+        BOOST_LOG(warning) << "SudoVDA driver unavailable (status="
+                           << static_cast<int>(vDisplayDriverStatus.load(std::memory_order_acquire)) << ")";
       }
     } else if (already_has_virtual_guid) {
       std::memcpy(&_virtual_display_guid, launch_session->virtual_display_guid_bytes.data(), sizeof(_virtual_display_guid));
@@ -1635,6 +1712,10 @@ namespace proc {
 
       const bool wants_lossless_framegen = using_lossless_provider;
       auto runtime = compute_lossless_runtime(_app, wants_lossless_framegen);
+      if (rtsp_stream::rtx_hdr_conversion_requested(*launch_session, config::video)) {
+        runtime.hdr_enabled = false;
+        BOOST_LOG(info) << "Lossless Scaling: disabling HDR support because RTX HDR conversion is active.";
+      }
 #ifdef _WIN32
       bool has_launch_commands = !_app.cmd.empty() || !_app.detached.empty();
       _lossless_should_start_support = has_launch_commands && _app.playnite_id.empty() && !_app.playnite_fullscreen;
@@ -1783,17 +1864,17 @@ namespace proc {
     }
 #endif
 
-    return launch_app_commands();
+    return launch_app_commands(true);
   }
 
-  int proc_t::launch_app_commands() {
+  int proc_t::launch_app_commands(bool stream_lifecycle_lock_held) {
     std::error_code ec;
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
 
     // Executed when returning from function on failure
     auto fg = util::fail_guard([&]() {
-      terminate();
+      terminate(false, true, false, stream_lifecycle_lock_held);
     });
 
 #ifdef _WIN32
@@ -2177,7 +2258,7 @@ namespace proc {
       }
       BOOST_LOG(info) << "User session detected; resuming deferred launch for app '" << _app.name << "'.";
       _deferred_launch = false;
-      int err = launch_app_commands();
+      int err = launch_app_commands(false);
       if (err != 0) {
         BOOST_LOG(error) << "Deferred launch failed; terminating session.";
         return 0;
@@ -2214,6 +2295,10 @@ namespace proc {
     }
 
     return 0;
+  }
+
+  int proc_t::current_app_id() const {
+    return _app_id.load(std::memory_order_acquire);
   }
 
   void proc_t::resume() {
@@ -2265,15 +2350,17 @@ namespace proc {
     }
   }
 
-  void proc_t::pause() {
-    if (!running()) {
+  void proc_t::pause(bool stream_lifecycle_lock_held) {
+    const int app_id =
+      stream_lifecycle_lock_held ? current_app_id() : running();
+    if (app_id <= 0) {
       BOOST_LOG(info) << "Session already stopped, do not run pause commands.";
       return;
     }
 
     if (_app.terminate_on_pause) {
       BOOST_LOG(info) << "Terminating app [" << _app_name << "] when all clients are disconnected. Pause commands are skipped.";
-      terminate();
+      terminate(false, true, false, stream_lifecycle_lock_held);
       return;
     }
 
@@ -2412,7 +2499,23 @@ namespace proc {
 #endif
   }
 
-  void proc_t::terminate(bool immediate, bool needs_refresh, bool skip_display_revert) {
+  void proc_t::terminate(
+    bool immediate,
+    bool needs_refresh,
+    bool skip_display_revert,
+    bool stream_lifecycle_lock_held
+  ) {
+    std::unique_lock<std::mutex> stream_lifecycle_lock;
+    if (!stream_lifecycle_lock_held) {
+      stream_lifecycle_lock =
+        std::unique_lock<std::mutex> {nvhttp::stream_lifecycle_mutex()};
+    }
+
+    // App termination can remove a display directly and can continue through
+    // process, undo-command, helper, watchdog, and deferred-config cleanup.
+    // Keep HTTP encoder probing out of that entire tail.
+    stream::session::cleanup_reservation_t cleanup_reservation;
+
     std::error_code ec;
     const bool had_active_app = _app_id > 0;
     placebo = false;
@@ -2518,7 +2621,7 @@ namespace proc {
     _pipe.reset();
 
     const bool other_streaming_session_active =
-      rtsp_stream::session_count() > 0 || webrtc_stream::has_active_sessions();
+      stream::session::has_shared_runtime_owner();
 
 #ifdef _WIN32
     if (_virtual_display_active) {
@@ -2530,14 +2633,14 @@ namespace proc {
           BOOST_LOG(info) << "Virtual display cleanup completed after app termination.";
         }
       } else {
-        if (!VDISPLAY::removeVirtualDisplay(_virtual_display_guid)) {
-          BOOST_LOG(warning) << "Failed to remove virtual display.";
-        } else {
-          BOOST_LOG(info) << "Virtual display removed.";
-        }
+        BOOST_LOG(info) << "Deferring virtual display removal after app termination because shared stream runtime is still owned.";
       }
       std::memset(&_virtual_display_guid, 0, sizeof(_virtual_display_guid));
       _virtual_display_active = false;
+    }
+    if (_runtime_output_override_lease) {
+      (void) config::clear_runtime_output_name_override_if_lease(*_runtime_output_override_lease);
+      _runtime_output_override_lease.reset();
     }
 #endif
 
@@ -2567,7 +2670,7 @@ namespace proc {
 #ifdef _WIN32
       clear_deferred_display_revert();
       const bool reverted = display_helper_integration::revert();
-      if (reverted && rtsp_stream::session_count() == 0) {
+      if (reverted && rtsp_stream::session_count_no_cleanup() == 0) {
         BOOST_LOG(debug) << "Display helper: stopping watchdog after app termination.";
         display_helper_integration::stop_watchdog();
       }
@@ -2603,7 +2706,7 @@ namespace proc {
     // If we can safely hot-apply immediately, restore global config now; otherwise defer.
     if (has_run) {
       config::clear_runtime_config_overrides();
-      if (rtsp_stream::session_count() == 0) {
+      if (!other_streaming_session_active) {
         config::apply_config_now();
       } else {
         config::mark_deferred_reload();
@@ -2767,79 +2870,30 @@ namespace proc {
    * @return true if the file has a valid PNG signature, false otherwise.
    */
   bool check_valid_png(const std::filesystem::path &path) {
-    // PNG signature as defined in PNG specification
-    // http://www.libpng.org/pub/png/spec/1.2/PNG-Structure.html
-    static constexpr std::array<unsigned char, 8> PNG_SIGNATURE = {
-      0x89,
-      0x50,
-      0x4E,
-      0x47,
-      0x0D,
-      0x0A,
-      0x1A,
-      0x0A
-    };
-
     std::ifstream file(path, std::ios::binary);
     if (!file) {
       return false;
     }
-
-    std::array<unsigned char, 8> header;
-    file.read(reinterpret_cast<char *>(header.data()), 8);
-
-    if (file.gcount() != 8) {
-      return false;
-    }
-
-    return header == PNG_SIGNATURE;
+    std::array<std::uint8_t, 8> header {};
+    file.read(reinterpret_cast<char *>(header.data()), static_cast<std::streamsize>(header.size()));
+    return file.gcount() == static_cast<std::streamsize>(header.size()) && catalog::has_png_signature(header);
   }
 
   std::string validate_app_image_path(std::string app_image_path) {
-    if (app_image_path.empty()) {
-      return DEFAULT_APP_IMAGE_PATH;
-    }
-
-    // get the image extension and convert it to lowercase
-    auto image_extension = std::filesystem::path(app_image_path).extension().string();
-    boost::to_lower(image_extension);
-
-    // return the default box image if the extension is not "png"
-    if (image_extension != ".png") {
-      return DEFAULT_APP_IMAGE_PATH;
-    }
-
-    // check if image is in assets directory
-    if (auto full_image_path = std::filesystem::path(SUNSHINE_ASSETS_DIR) / app_image_path; std::filesystem::exists(full_image_path)) {
-      // Validate PNG signature
-      if (!check_valid_png(full_image_path)) {
-        BOOST_LOG(warning) << "Invalid PNG file at path ["sv << full_image_path << ']';
-        return DEFAULT_APP_IMAGE_PATH;
+    const auto reader = [](const std::string &path) -> std::optional<catalog::byte_buffer_t> {
+      std::ifstream file(path, std::ios::binary);
+      if (!file) {
+        return std::nullopt;
       }
-      return full_image_path.string();
-    }
-
-    if (app_image_path == "./assets/steam.png") {
-      // handle old default steam image definition
-      return SUNSHINE_ASSETS_DIR "/steam.png";
-    }
-
-    // check if specified image exists
-    if (std::error_code code; !std::filesystem::exists(app_image_path, code)) {
-      // return default box image if image does not exist
-      BOOST_LOG(warning) << "Couldn't find app image at path ["sv << app_image_path << ']';
-      return DEFAULT_APP_IMAGE_PATH;
-    }
-
-    // Validate PNG signature
-    if (!check_valid_png(app_image_path)) {
-      BOOST_LOG(warning) << "Invalid PNG file at path ["sv << app_image_path << ']';
-      return DEFAULT_APP_IMAGE_PATH;
-    }
-
-    // image is a png, and not in assets directory
-    // return only "content-type" http header compatible image type
-    return app_image_path;
+      return catalog::byte_buffer_t {
+        std::istreambuf_iterator<char> {file},
+        std::istreambuf_iterator<char> {}};
+    };
+    return catalog::validate_image_path(
+      std::move(app_image_path),
+      SUNSHINE_ASSETS_DIR,
+      DEFAULT_APP_IMAGE_PATH,
+      reader);
   }
 
   std::optional<std::string> calculate_sha256(const std::string &filename) {
@@ -2883,49 +2937,7 @@ namespace proc {
     return result.checksum();
   }
 
-  std::tuple<std::string, std::string> calculate_app_id(const std::string &app_name, const std::string &app_uuid, std::string app_image_path, int index) {
-    // Prefer the persistent app UUID for stable client-facing IDs. Artwork can be
-    // refreshed by Playnite sync, so image bytes must not affect launch identity.
-    std::vector<std::string> to_hash;
-    if (!app_uuid.empty()) {
-      to_hash.push_back(app_uuid);
-    } else {
-      // Legacy fallback for app entries that predate UUID normalization.
-      to_hash.push_back(app_name);
-      auto file_path = validate_app_image_path(app_image_path);
-      if (file_path != DEFAULT_APP_IMAGE_PATH) {
-        auto file_hash = calculate_sha256(file_path);
-        if (file_hash) {
-          to_hash.push_back(file_hash.value());
-        } else {
-          BOOST_LOG(warning) << "Failed to compute SHA256 for image ["sv << file_path << "], falling back to path for app ID hash";
-          // Fallback to just hashing image path
-          to_hash.push_back(file_path);
-        }
-      }
-    }
-
-    // Create combined strings for hash
-    std::stringstream ss;
-    for_each(to_hash.begin(), to_hash.end(), [&ss](const std::string &s) {
-      ss << s;
-    });
-    auto input_no_index = ss.str();
-    ss << index;
-    auto input_with_index = ss.str();
-
-    // CRC32 then truncate to signed 32-bit range due to client limitations
-    auto id_no_index = std::to_string(abs((int32_t) calculate_crc32(input_no_index)));
-    auto id_with_index = std::to_string(abs((int32_t) calculate_crc32(input_with_index)));
-
-    return std::make_tuple(id_no_index, id_with_index);
-  }
-
-  struct app_id_alias_state_t {
-    std::string current_id;
-    std::string cover_fingerprint;
-    std::set<std::string> aliases;
-  };
+  using app_id_alias_state_t = catalog::alias_state_t;
 
   std::string calculate_numeric_id_from_parts(const std::vector<std::string> &parts, int index) {
     std::stringstream ss;
@@ -2945,10 +2957,7 @@ namespace proc {
   }
 
   std::tuple<std::string, std::string> calculate_cover_versioned_app_id(const std::string &app_uuid, const std::string &cover_fingerprint, int index) {
-    std::vector<std::string> parts {app_uuid, "\n", cover_fingerprint};
-    auto id_no_index = calculate_numeric_id_from_parts(parts);
-    auto id_with_index = calculate_numeric_id_from_parts(parts, index);
-    return std::make_tuple(id_no_index, id_with_index);
+    return catalog::calculate_versioned_ids(app_uuid, cover_fingerprint, index);
   }
 
   std::string calculate_app_cover_fingerprint(std::string app_image_path) {
@@ -3080,67 +3089,21 @@ namespace proc {
     std::set<std::string> &active_uuids,
     bool &alias_state_changed
   ) {
-    const auto legacy_ids = calculate_app_id(app_name, ctx.uuid, ctx.image_path, index);
+    catalog::app_identity_t identity;
+    identity.name = app_name;
+    identity.uuid = ctx.uuid;
     if (ctx.uuid.empty()) {
-      if (ids.count(std::get<0>(legacy_ids)) == 0) {
-        ctx.id = std::get<0>(legacy_ids);
-      } else {
-        ctx.id = std::get<1>(legacy_ids);
+      const auto validated = validate_app_image_path(ctx.image_path);
+      if (validated != DEFAULT_APP_IMAGE_PATH) {
+        identity.legacy_image_identity = calculate_sha256(validated).value_or(validated);
       }
-      ids.insert(ctx.id);
-      return;
+    } else {
+      identity.art_version = calculate_app_cover_fingerprint(ctx.image_path);
     }
-
-    active_uuids.insert(ctx.uuid);
-    ctx.art_version = calculate_app_cover_fingerprint(ctx.image_path);
-
-    auto [state_iter, inserted] = alias_state.try_emplace(
-      ctx.uuid,
-      app_id_alias_state_t {
-        std::get<0>(legacy_ids),
-        ctx.art_version,
-        {}
-      }
-    );
-    auto &state = state_iter->second;
-    if (inserted) {
-      alias_state_changed = true;
-    }
-
-    if (state.cover_fingerprint.empty()) {
-      state.cover_fingerprint = ctx.art_version;
-      alias_state_changed = true;
-    }
-    if (state.current_id.empty()) {
-      state.current_id = std::get<0>(legacy_ids);
-      alias_state_changed = true;
-    }
-
-    if (state.cover_fingerprint != ctx.art_version) {
-      const auto previous_current_id = state.current_id;
-      const auto versioned_ids = calculate_cover_versioned_app_id(ctx.uuid, ctx.art_version, index);
-      state.current_id = ids.count(std::get<0>(versioned_ids)) == 0 ? std::get<0>(versioned_ids) : std::get<1>(versioned_ids);
-      state.cover_fingerprint = ctx.art_version;
-      remember_alias(state, previous_current_id);
-      remember_alias(state, std::get<0>(legacy_ids));
-      alias_state_changed = true;
-    }
-
-    if (ids.count(state.current_id) != 0) {
-      BOOST_LOG(warning) << "App ID collision for UUID ["sv << ctx.uuid << "] and ID [" << state.current_id << "]; assigning indexed compatibility ID.";
-      remember_alias(state, state.current_id);
-      const auto versioned_ids = calculate_cover_versioned_app_id(ctx.uuid, ctx.art_version, index);
-      if (ids.count(std::get<1>(versioned_ids)) == 0) {
-        state.current_id = std::get<1>(versioned_ids);
-      } else {
-        state.current_id = std::get<1>(legacy_ids);
-      }
-      alias_state_changed = true;
-    }
-
-    ctx.id = state.current_id;
-    ctx.id_aliases.assign(state.aliases.begin(), state.aliases.end());
-    ids.insert(ctx.id);
+    catalog::assign_compatible_id(identity, index, ids, alias_state, active_uuids, alias_state_changed);
+    ctx.id = std::move(identity.id);
+    ctx.art_version = std::move(identity.art_version);
+    ctx.id_aliases = std::move(identity.aliases);
   }
 
   void prune_and_filter_app_id_alias_state(
@@ -3149,109 +3112,56 @@ namespace proc {
     const std::set<std::string> &active_uuids,
     bool &alias_state_changed
   ) {
-    for (auto it = alias_state.begin(); it != alias_state.end();) {
-      if (active_uuids.count(it->first) == 0) {
-        it = alias_state.erase(it);
-        alias_state_changed = true;
-      } else {
-        ++it;
-      }
-    }
-
-    std::set<std::string> current_ids;
-    std::map<std::string, int> alias_counts;
+    std::vector<catalog::app_identity_t> identities;
+    identities.reserve(apps.size());
     for (const auto &app : apps) {
-      if (!app.id.empty()) {
-        current_ids.insert(app.id);
-      }
-      if (app.uuid.empty()) {
-        continue;
-      }
-      for (const auto &alias : app.id_aliases) {
-        if (!alias.empty()) {
-          ++alias_counts[alias];
-        }
-      }
+      identities.push_back({app.name, app.uuid, {}, app.art_version, app.id, app.id_aliases});
     }
-
-    for (auto &app : apps) {
-      if (app.uuid.empty()) {
-        continue;
-      }
-
-      std::vector<std::string> filtered_aliases;
-      std::set<std::string> seen_aliases;
-      for (const auto &alias : app.id_aliases) {
-        if (alias.empty() || alias == app.id || !seen_aliases.insert(alias).second) {
-          alias_state_changed = true;
-          continue;
-        }
-        if (current_ids.count(alias) != 0) {
-          BOOST_LOG(warning) << "Dropping app ID alias ["sv << alias << "] for UUID [" << app.uuid << "] because it collides with a current app ID.";
-          alias_state_changed = true;
-          continue;
-        }
-        if (alias_counts[alias] > 1) {
-          BOOST_LOG(warning) << "Dropping app ID alias ["sv << alias << "] for UUID [" << app.uuid << "] because it is shared by multiple apps.";
-          alias_state_changed = true;
-          continue;
-        }
-        filtered_aliases.push_back(alias);
-      }
-
-      if (filtered_aliases != app.id_aliases) {
-        app.id_aliases = std::move(filtered_aliases);
-      }
-
-      if (auto state_iter = alias_state.find(app.uuid); state_iter != alias_state.end()) {
-        state_iter->second.current_id = app.id;
-        state_iter->second.cover_fingerprint = app.art_version;
-        state_iter->second.aliases = std::set<std::string>(app.id_aliases.begin(), app.id_aliases.end());
-      }
+    catalog::prune_and_filter_aliases(identities, alias_state, active_uuids, alias_state_changed);
+    for (std::size_t i = 0; i < apps.size(); ++i) {
+      apps[i].id_aliases = std::move(identities[i].aliases);
     }
   }
 
   std::optional<ctx_t> resolve_app_from_snapshot(const std::vector<ctx_t> &apps, const std::string &appid, const std::string &appuuid) {
-    if (!appuuid.empty()) {
-      auto iter = std::find_if(apps.begin(), apps.end(), [&appuuid](const auto &app) {
-        return app.uuid == appuuid;
-      });
-      if (iter != apps.end()) {
-        return *iter;
-      }
-    }
-
-    std::string appid_trimmed = appid;
-    boost::algorithm::trim(appid_trimmed);
-    if (appid_trimmed.empty() || appid_trimmed == "0") {
-      return std::nullopt;
-    }
-
-    auto current_iter = std::find_if(apps.begin(), apps.end(), [&appid_trimmed](const auto &app) {
-      return app.id == appid_trimmed;
-    });
-    if (current_iter != apps.end()) {
-      return *current_iter;
-    }
-
-    const ctx_t *alias_match = nullptr;
+    std::vector<catalog::app_identity_t> identities;
+    identities.reserve(apps.size());
     for (const auto &app : apps) {
-      if (std::find(app.id_aliases.begin(), app.id_aliases.end(), appid_trimmed) == app.id_aliases.end()) {
-        continue;
+      identities.push_back({app.name, app.uuid, {}, app.art_version, app.id, app.id_aliases});
+    }
+    const auto resolved = catalog::resolve_app(identities, appid, appuuid);
+    return resolved ? std::optional<ctx_t> {apps[*resolved]} : std::nullopt;
+  }
+
+  std::tuple<std::string, std::string> calculate_app_id(
+    const std::string &app_name,
+    const std::string &app_uuid,
+    std::string app_image_path,
+    int index
+  ) {
+    // Prefer the persistent app UUID for stable client-facing IDs. Artwork can be
+    // refreshed by Playnite sync, so image bytes must not affect launch identity.
+    std::vector<std::string> to_hash;
+    if (!app_uuid.empty()) {
+      to_hash.push_back(app_uuid);
+    } else {
+      // Legacy fallback for app entries that predate UUID normalization.
+      to_hash.push_back(app_name);
+      auto file_path = validate_app_image_path(app_image_path);
+      if (file_path != DEFAULT_APP_IMAGE_PATH) {
+        auto file_hash = calculate_sha256(file_path);
+        if (file_hash) {
+          to_hash.push_back(file_hash.value());
+        } else {
+          BOOST_LOG(warning) << "Failed to compute SHA256 for image ["sv << file_path << "], falling back to path for app ID hash";
+          // Fallback to just hashing image path.
+          to_hash.push_back(file_path);
+        }
       }
-      if (alias_match) {
-        BOOST_LOG(warning) << "Ignoring ambiguous app ID alias ["sv << appid_trimmed << "] shared by UUIDs ["
-                           << alias_match->uuid << "] and [" << app.uuid << "].";
-        return std::nullopt;
-      }
-      alias_match = &app;
     }
 
-    if (alias_match) {
-      return *alias_match;
-    }
-
-    return std::nullopt;
+    const std::string legacy_image_identity = to_hash.size() > 1 ? to_hash[1] : std::string {};
+    return catalog::calculate_ids(app_name, app_uuid, legacy_image_identity, index);
   }
 
   /**
@@ -3452,6 +3362,7 @@ namespace proc {
     bool app_id_alias_state_changed = false;
     int i = 0;
 
+    bool apps_parsed_ok = false;
     size_t fail_count = 0;
     do {
       // Read the JSON file into a tree.
@@ -3600,6 +3511,11 @@ namespace proc {
                 ctx.config_overrides.emplace(item.key(), std::move(encoded));
               }
             }
+          }
+          {
+            std::unordered_map<std::string, std::string> normalized_overrides;
+            config::merge_config_overrides(normalized_overrides, ctx.config_overrides);
+            ctx.config_overrides = std::move(normalized_overrides);
           }
 
         ctx.frame_gen_limiter_fix = util::get_non_string_json_value<bool>(app_node, "frame-gen-limiter-fix", util::get_non_string_json_value<bool>(app_node, "dlss-framegen-limiter-fix", false));
@@ -3833,6 +3749,7 @@ namespace proc {
         }
 
         fail_count = 0;
+        apps_parsed_ok = true;
       } catch (std::exception &e) {
         BOOST_LOG(error) << "Error happened during app loading: "sv << e.what();
 
@@ -3902,7 +3819,7 @@ namespace proc {
 
     // Virtual Display entry
 #ifdef _WIN32
-    if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+    if (vDisplayDriverStatus.load(std::memory_order_acquire) == VDISPLAY::DRIVER_STATUS::OK) {
       proc::ctx_t ctx {};
       ctx.idx = std::to_string(i);
       ctx.uuid = VIRTUAL_DISPLAY_UUID;
@@ -4006,9 +3923,14 @@ namespace proc {
       apps.emplace_back(std::move(ctx));
     }
 
-    prune_and_filter_app_id_alias_state(apps, app_id_alias_state, active_app_uuids, app_id_alias_state_changed);
-    if (app_id_alias_state_changed) {
-      save_app_id_alias_state(app_id_alias_state);
+    // Only reconcile the persisted alias map when apps.json actually parsed. A failed or partial
+    // parse leaves active_app_uuids empty or incomplete, so pruning here would erase the aliases of
+    // apps that still exist and permanently break their cover-versioned IDs on the next good parse.
+    if (apps_parsed_ok) {
+      prune_and_filter_app_id_alias_state(apps, app_id_alias_state, active_app_uuids, app_id_alias_state_changed);
+      if (app_id_alias_state_changed) {
+        save_app_id_alias_state(app_id_alias_state);
+      }
     }
 
     return proc::proc_t {
@@ -4023,15 +3945,11 @@ namespace proc {
     }
 
 #ifdef _WIN32
-    size_t fail_count = 0;
-    while (fail_count < 5 && vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
+    // initVDisplayDriver() already performs one bounded readiness/recovery pass.
+    // Repeating it here can outlive the restart cooldown and launch a fresh PnP
+    // cycle on every parse, which stalls secondary instances for minutes.
+    if (vDisplayDriverStatus.load(std::memory_order_acquire) != VDISPLAY::DRIVER_STATUS::OK) {
       initVDisplayDriver();
-      if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
-        break;
-      }
-
-      fail_count += 1;
-      std::this_thread::sleep_for(1s);
     }
 #endif
 
@@ -4064,8 +3982,17 @@ namespace proc {
     // until terminate() runs the undo prep commands.
     {
       std::scoped_lock lk(_apps_mutex);
+      const bool app_was_running = _app_id > 0;
+      if (app_was_running && !_app.uuid.empty()) {
+        const auto refreshed_app = std::find_if(apps.begin(), apps.end(), [&](const ctx_t &candidate) {
+          return candidate.uuid == _app.uuid;
+        });
+        if (refreshed_app != apps.end()) {
+          _app_id = util::from_view(refreshed_app->id);
+        }
+      }
       _apps = std::move(apps);
-      if (_app_id <= 0) {
+      if (!app_was_running) {
         _env = std::move(env);
       }
     }

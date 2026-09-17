@@ -3,13 +3,19 @@
  * @brief Unit tests for Vibepollo's semver comparison rules.
  */
 
-#include "../tests_common.h"
+#include <gtest/gtest.h>
 
 #include <src/version_compare.h>
 
 TEST(VersionCompareTest, StableRespinsSortAbovePlainRelease) {
   EXPECT_LT(version_compare::compare_semver("1.14.14", "1.14.14-stable.1"), 0);
   EXPECT_GT(version_compare::compare_semver("1.14.14-stable.1", "1.14.14"), 0);
+}
+
+TEST(VersionCompareTest, VLessReleaseTagsRemainCompatibleWithLegacyPrefixedTags) {
+  EXPECT_EQ(version_compare::compare_semver("v1.18.4", "1.18.4"), 0);
+  EXPECT_LT(version_compare::compare_semver("v1.18.4", "1.18.4-stable.2"), 0);
+  EXPECT_GT(version_compare::compare_semver("1.18.4-stable.2", "v1.18.4"), 0);
 }
 
 TEST(VersionCompareTest, StandardPrereleasesStayBelowRelease) {

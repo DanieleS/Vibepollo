@@ -8,13 +8,17 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <queue>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 
@@ -39,6 +43,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
@@ -146,6 +151,77 @@ namespace stream {
         }
       }
     }
+
+    class join_deadline_t {
+    public:
+      explicit join_deadline_t(std::shared_ptr<std::atomic<const char *>> hung_stage):
+          hung_stage_ {std::move(hung_stage)} {
+        try {
+          worker_ = std::jthread([this](std::stop_token) {
+            run();
+          });
+        } catch (const std::system_error &e) {
+          // Teardown must continue even when the system cannot allocate a
+          // diagnostic worker; otherwise the original session threads would
+          // remain joinable while this exception unwinds.
+          BOOST_LOG(error) << "Unable to create the session join deadline watchdog: " << e.what();
+        }
+      }
+
+      join_deadline_t(const join_deadline_t &) = delete;
+      join_deadline_t &operator=(const join_deadline_t &) = delete;
+
+      ~join_deadline_t() {
+        complete();
+      }
+
+      void complete() {
+        {
+          std::lock_guard lock {mutex_};
+          if (state_ != state_e::firing) {
+            state_ = state_e::completed;
+          }
+          cv_.notify_one();
+        }
+
+        // join() is always called by session cleanup, never by this worker.
+        // This keeps the watchdog from outliving the stage storage or runtime.
+        if (worker_.joinable()) {
+          worker_.join();
+        }
+      }
+
+    private:
+      enum class state_e {
+        armed,
+        completed,
+        firing,
+      };
+
+      void run() {
+        std::unique_lock lock {mutex_};
+        constexpr auto kJoinDeadline = std::chrono::seconds(10);
+        if (cv_.wait_until(lock, std::chrono::steady_clock::now() + kJoinDeadline, [this] {
+              return state_ != state_e::armed;
+            })) {
+          return;
+        }
+
+        // Completion and timeout are mutually exclusive under mutex_, so a
+        // successful join cannot leave a stale watchdog that traps later.
+        state_ = state_e::firing;
+        lock.unlock();
+        BOOST_LOG(fatal) << "Hang detected! Session failed to terminate in 10 seconds. Stuck waiting for: "sv
+                         << hung_stage_->load();
+        lifetime::debug_trap();
+      }
+
+      std::shared_ptr<std::atomic<const char *>> hung_stage_;
+      std::mutex mutex_;
+      std::condition_variable cv_;
+      state_e state_ {state_e::armed};
+      std::jthread worker_;
+    };
   }  // namespace
 
   enum class socket_e : int {
@@ -169,16 +245,18 @@ namespace stream {
       const auto generation = g_paused_display_cleanup_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
       std::thread([timeout, generation, reason = std::move(reason), enforce_display_restore, virtual_display_guid_bytes]() {
         std::this_thread::sleep_for(timeout);
+        session::cleanup_reservation_t cleanup_reservation;
+        std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
 
         if (g_paused_display_cleanup_generation.load(std::memory_order_acquire) != generation) {
           return;
         }
 
-        if (session::running_sessions.load(std::memory_order_acquire) != 0 || webrtc_stream::has_active_or_pending_sessions()) {
+        if (session::has_shared_runtime_owner()) {
           return;
         }
 
-        if (proc::proc.running() <= 0) {
+        if (proc::proc.current_app_id() <= 0) {
           return;
         }
 
@@ -471,6 +549,7 @@ namespace stream {
     config_t config;
     int stream_fps = 0;
     int stream_fps_scaled = 0;
+    std::uint32_t client_display_refresh_millihz = 0;
 
     safe::mail_t mail;
 
@@ -645,30 +724,6 @@ namespace stream {
 
   static auto broadcast = safe::make_shared<broadcast_ctx_t>(start_broadcast, end_broadcast);
 
-  std::optional<control_packet_view_t> decode_control_packet(std::string_view packet_bytes) {
-    if (packet_bytes.size() < sizeof(std::uint16_t)) {
-      return std::nullopt;
-    }
-
-    const auto type = util::packet::read_u16_le(packet_bytes, 0);
-    const auto payload = util::packet::slice(
-      packet_bytes,
-      sizeof(std::uint16_t),
-      packet_bytes.size() - sizeof(std::uint16_t)
-    );
-    if (!type || !payload) {
-      return std::nullopt;
-    }
-
-    return control_packet_view_t {*type, *payload};
-  }
-
-#ifdef SUNSHINE_TESTS
-  std::optional<control_packet_view_t> decode_control_packet_for_tests(std::string_view packet_bytes) {
-    return decode_control_packet(packet_bytes);
-  }
-#endif
-
   void request_idr_for_all_sessions() {
     auto ref = broadcast.ref();
     if (!ref) {
@@ -791,8 +846,8 @@ namespace stream {
     return true;
   }
 
-  bool stream_start_actions_still_needed() {
-    return session::running_sessions.load(std::memory_order_acquire) != 0 || webrtc_stream::has_active_or_pending_sessions();
+  bool rtsp_stream_start_actions_still_needed() {
+    return session::running_sessions.load(std::memory_order_acquire) != 0;
   }
 
   void defer_stream_start_actions(deferred_stream_start_t deferred) {
@@ -807,6 +862,10 @@ namespace stream {
 
   bool apply_deferred_stream_start_actions_if_ready() {
     {
+      // The control-broadcast thread polls this every iteration at critical priority.
+      // Check the cheap flag before any syscall or the process-wide lifecycle gate so a
+      // long-running launch/teardown holding that gate cannot stall client input feedback.
+      // The authoritative re-check below still runs under the gate.
       std::lock_guard<std::mutex> lock(deferred_stream_start_mutex());
       if (!deferred_stream_start_state()) {
         return false;
@@ -817,24 +876,28 @@ namespace stream {
       return false;
     }
 
+    std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
     std::optional<deferred_stream_start_t> deferred;
     {
       std::lock_guard<std::mutex> lock(deferred_stream_start_mutex());
       if (!deferred_stream_start_state()) {
         return false;
       }
-      if (!stream_start_actions_still_needed()) {
-        deferred_stream_start_state().reset();
-        BOOST_LOG(debug) << "Stream-start actions skipped because no active stream remains.";
-        return false;
-      }
-      deferred = std::move(*deferred_stream_start_state());
+      deferred = std::move(deferred_stream_start_state());
       deferred_stream_start_state().reset();
     }
 
+    if (!rtsp_stream_start_actions_still_needed()) {
+      BOOST_LOG(debug) << "Stream-start actions skipped because no active RTSP stream remains.";
+      return false;
+    }
+
     BOOST_LOG(info) << "Stream-start actions applied after user session became available.";
-    platf::frame_limiter_streaming_start(deferred->policy);
-    platf::streaming_will_start();
+    platf::frame_limiter_streaming_start(
+      platf::frame_limiter_owner::rtsp,
+      deferred->policy
+    );
+    session::start_shared_platform_if_needed();
     return true;
   }
 #endif
@@ -851,57 +914,70 @@ namespace stream {
 
     // Slow path - process new session
     TUPLE_2D(peer_port, peer_addr, platf::from_sockaddr_ex((sockaddr *) &peer->address.address));
-    auto lg = _sessions.lock();
-    for (auto pos = std::begin(*_sessions); pos != std::end(*_sessions); ++pos) {
-      auto session_p = *pos;
+    session_t *matched_session = nullptr;
+    uint32_t matched_launch_session_id = 0;
+    {
+      auto lg = _sessions.lock();
+      for (auto pos = std::begin(*_sessions); pos != std::end(*_sessions); ++pos) {
+        auto session_p = *pos;
 
-      // Skip sessions that are already established
-      if (session_p->control.peer) {
-        continue;
-      }
-
-      // Identify the connection by the unique connect data if the client supports it.
-      // Only fall back to IP address matching for clients without session ID support.
-      if (session_p->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) {
-        if (session_p->control.connect_data != connect_data) {
+        // Skip sessions that are already established
+        if (session_p->control.peer) {
           continue;
-        } else {
-          BOOST_LOG(debug) << "Initialized new control stream session by connect data match [v2]"sv;
         }
-      } else {
-        if (session_p->control.expected_peer_address != peer_addr) {
-          continue;
+
+        // Identify the connection by the unique connect data if the client supports it.
+        // Only fall back to IP address matching for clients without session ID support.
+        if (session_p->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) {
+          if (session_p->control.connect_data != connect_data) {
+            continue;
+          } else {
+            BOOST_LOG(debug) << "Initialized new control stream session by connect data match [v2]"sv;
+          }
         } else {
-          BOOST_LOG(debug) << "Initialized new control stream session by IP address match [v1]"sv;
+          if (session_p->control.expected_peer_address != peer_addr) {
+            continue;
+          } else {
+            BOOST_LOG(debug) << "Initialized new control stream session by IP address match [v1]"sv;
+          }
         }
+
+        session_p->control.peer = peer;
+
+        // Use the local address from the control connection as the source address
+        // for other communications to the client. This is necessary to ensure
+        // proper routing on multi-homed hosts.
+        auto local_address = platf::from_sockaddr((sockaddr *) &peer->localAddress.address);
+        try {
+          session_p->localAddress = boost::asio::ip::make_address(local_address);
+        } catch (const boost::system::system_error &e) {
+          BOOST_LOG(error) << "boost::system::system_error in address parsing: " << e.what() << " (code: " << e.code() << ")"sv;
+          throw;
+        }
+
+        BOOST_LOG(debug) << "Control local address ["sv << local_address << ']';
+        BOOST_LOG(debug) << "Control peer address ["sv << peer_addr << ':' << peer_port << ']';
+
+        // Bind the peer and publish the lookup while _sessions keeps this raw
+        // session pointer alive. RTSP launch-state cleanup takes the lifecycle
+        // gate, so defer it until after releasing _sessions to preserve the
+        // lifecycle -> control-session lock order used by session startup.
+        auto ptslg = _peer_to_session.lock();
+        _peer_to_session->emplace(peer, session_p);
+        matched_session = session_p;
+        matched_launch_session_id = session_p->launch_session_id;
+        break;
       }
-
-      // Once the control stream connection is established, RTSP session state can be torn down
-      rtsp_stream::launch_session_clear(session_p->launch_session_id);
-
-      session_p->control.peer = peer;
-
-      // Use the local address from the control connection as the source address
-      // for other communications to the client. This is necessary to ensure
-      // proper routing on multi-homed hosts.
-      auto local_address = platf::from_sockaddr((sockaddr *) &peer->localAddress.address);
-      try {
-        session_p->localAddress = boost::asio::ip::make_address(local_address);
-      } catch (const boost::system::system_error &e) {
-        BOOST_LOG(error) << "boost::system::system_error in address parsing: " << e.what() << " (code: " << e.code() << ")"sv;
-        throw;
-      }
-
-      BOOST_LOG(debug) << "Control local address ["sv << local_address << ']';
-      BOOST_LOG(debug) << "Control peer address ["sv << peer_addr << ':' << peer_port << ']';
-
-      // Insert this into the map for O(1) lookups in the future
-      auto ptslg = _peer_to_session.lock();
-      _peer_to_session->emplace(peer, session_p);
-      return session_p;
     }
 
-    return nullptr;
+    if (!matched_session) {
+      return nullptr;
+    }
+
+    // Once the control stream connection is established, RTSP launch state can
+    // be torn down without holding the control-session collection lock.
+    rtsp_stream::launch_session_clear(matched_launch_session_id);
+    return matched_session;
   }
 
   /**
@@ -1096,44 +1172,6 @@ namespace stream {
    * @param data1 The first data buffer.
    * @param data2 The second data buffer.
    */
-  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
-    auto data_size = data1.size() + data2.size();
-    auto pad = data_size % slice_size != 0;
-    auto elements = data_size / slice_size + (pad ? 1 : 0);
-
-    std::vector<uint8_t> result;
-    result.resize(elements * insert_size + data_size);
-
-    auto next = std::begin(data1);
-    auto end = std::end(data1);
-    for (auto x = 0; x < elements; ++x) {
-      void *p = &result[x * (insert_size + slice_size)];
-
-      // For the last iteration, only copy to the end of the data
-      if (x == elements - 1) {
-        slice_size = data_size - (x * slice_size);
-      }
-
-      // Test if this slice will extend into the next buffer
-      if (next + slice_size > end) {
-        // Copy the first portion from the first buffer
-        auto copy_len = end - next;
-        std::copy(next, end, (char *) p + insert_size);
-
-        // Copy the remaining portion from the second buffer
-        next = std::begin(data2);
-        end = std::end(data2);
-        std::copy(next, next + (slice_size - copy_len), (char *) p + copy_len + insert_size);
-        next += slice_size - copy_len;
-      } else {
-        std::copy(next, next + slice_size, (char *) p + insert_size);
-        next += slice_size;
-      }
-    }
-
-    return result;
-  }
-
   std::vector<uint8_t> replace(const std::string_view &original, const std::string_view &old, const std::string_view &_new) {
     std::vector<uint8_t> replaced;
     replaced.reserve(original.size() + _new.size() - old.size());
@@ -2605,6 +2643,170 @@ namespace stream {
 
   namespace session {
     std::atomic_uint running_sessions;
+    std::atomic_uint teardown_sessions;
+    std::atomic_uint cleanup_reservations;
+    bool shared_platform_started;
+    bool shared_runtime_cleanup_armed;
+    bool shared_runtime_force_display_revert_when_idle;
+    std::optional<std::array<std::uint8_t, 16>> shared_runtime_virtual_display_guid_bytes;
+
+    cleanup_reservation_t::cleanup_reservation_t() {
+      cleanup_reservations.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    cleanup_reservation_t::~cleanup_reservation_t() {
+      cleanup_reservations.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    bool has_shared_runtime_owner(const shared_runtime_finalize_context_t &context) {
+      const auto rtsp_teardown_count = teardown_sessions.load(std::memory_order_acquire);
+      const auto webrtc_teardown_count = webrtc_stream::teardown_session_count();
+      const bool other_rtsp_teardown =
+        rtsp_teardown_count > (context.ignore_current_rtsp_teardown ? 1U : 0U);
+      const bool other_webrtc_teardown =
+        webrtc_teardown_count > (context.ignore_current_webrtc_teardown ? 1U : 0U);
+
+      return rtsp_stream::has_pending_launch_or_startup() ||
+             rtsp_stream::session_count_no_cleanup() > 0 ||
+             running_sessions.load(std::memory_order_acquire) != 0 ||
+             other_rtsp_teardown ||
+             webrtc_stream::has_active_or_pending_sessions() ||
+             webrtc_stream::has_capture_active() ||
+             other_webrtc_teardown;
+    }
+
+    void arm_shared_runtime_cleanup(
+      const std::optional<std::array<std::uint8_t, 16>> virtual_display_guid_bytes
+    ) {
+      shared_runtime_cleanup_armed = true;
+      if (virtual_display_guid_bytes &&
+          std::any_of(
+            virtual_display_guid_bytes->begin(),
+            virtual_display_guid_bytes->end(),
+            [](const std::uint8_t byte) {
+              return byte != 0;
+            }
+          )) {
+        shared_runtime_virtual_display_guid_bytes =
+          virtual_display_guid_bytes;
+      }
+    }
+
+    void start_shared_platform_if_needed() {
+      arm_shared_runtime_cleanup();
+      if (shared_platform_started) {
+        return;
+      }
+
+      platf::streaming_will_start();
+      shared_platform_started = true;
+    }
+
+    bool finalize_shared_runtime_if_idle(
+      const std::string_view reason,
+      const shared_runtime_finalize_context_t &context
+    ) {
+      if (!shared_runtime_cleanup_armed) {
+        return false;
+      }
+
+      arm_shared_runtime_cleanup(context.virtual_display_guid_bytes);
+      shared_runtime_force_display_revert_when_idle =
+        shared_runtime_force_display_revert_when_idle ||
+        context.force_display_revert_when_idle;
+
+      if (has_shared_runtime_owner(context)) {
+        return false;
+      }
+
+      config::set_runtime_output_name_override(std::nullopt);
+#ifdef _WIN32
+      display_helper_integration::clear_pending_apply();
+      clear_deferred_stream_start_actions();
+#endif
+
+      const bool is_paused = proc::proc.current_app_id() > 0;
+#ifdef _WIN32
+      const bool deferred_app_revert =
+        !is_paused && proc::consume_deferred_display_revert();
+#else
+      constexpr bool deferred_app_revert = false;
+#endif
+      // A restore is an asynchronous helper operation. It must keep the
+      // virtual display alive while the helper restores the physical topology;
+      // the teardown-only cleanup path removes it before any optional database
+      // fallback and is not used for this final restore request.
+      const bool display_restore_requested =
+        config::video.dd.config_revert_on_disconnect ||
+        deferred_app_revert ||
+        (!is_paused && shared_runtime_force_display_revert_when_idle);
+      const int paused_timeout_secs = std::max(0, config::video.dd.paused_virtual_display_timeout_secs);
+      const bool delay_virtual_display_cleanup_due_to_pause =
+        is_paused && !display_restore_requested && paused_timeout_secs > 0;
+      const bool keep_virtual_display_due_to_pause =
+        is_paused && !display_restore_requested && paused_timeout_secs == 0;
+
+#ifdef _WIN32
+      if (delay_virtual_display_cleanup_due_to_pause) {
+        BOOST_LOG(info) << "Display cleanup: shared stream runtime paused with revert-on-disconnect disabled; "
+                        << "scheduling virtual display removal without display restore in " << paused_timeout_secs << "s.";
+        schedule_paused_display_cleanup(
+          std::chrono::seconds(paused_timeout_secs),
+          "shared_runtime_paused",
+          false,
+          shared_runtime_virtual_display_guid_bytes
+        );
+      } else if (keep_virtual_display_due_to_pause) {
+        BOOST_LOG(debug) << "Display cleanup: shared stream runtime is paused; keeping virtual display alive "
+                            "(config_revert_on_disconnect=false, paused timeout disabled).";
+      } else if (display_restore_requested) {
+        // The final owner is gone, so no recovery worker may legitimately
+        // recreate or reapply this ended session while REVERT intentionally
+        // deactivates its retained virtual display. Cancellation does not
+        // remove the VDD or latch shutdown; a later session arms fresh workers.
+        VDISPLAY::cancel_all_virtual_display_recovery_monitors();
+        BOOST_LOG(info) << "Display restore: final stream ended; dispatching restore while keeping virtual display alive.";
+        if (!display_helper_integration::revert(true)) {
+          BOOST_LOG(debug) << "Display helper: restore dispatch failed after final stream; virtual display remains active.";
+        }
+      } else {
+        g_paused_display_cleanup_generation.fetch_add(1, std::memory_order_acq_rel);
+        const auto cleanup_reason =
+          is_paused ? "shared_runtime_paused" : reason;
+        (void) platf::virtual_display_cleanup::run(
+          cleanup_reason,
+          false,
+          platf::virtual_display_cleanup::revert_order_t::remove_before_restore,
+          true,
+          shared_runtime_virtual_display_guid_bytes
+        );
+        if (is_paused) {
+          BOOST_LOG(info) << "Display cleanup: shared stream runtime paused with revert-on-disconnect disabled; "
+                          << "removed virtual display(s) without restoring physical display configuration.";
+        }
+      }
+
+      VDISPLAY::restorePhysicalHdrProfiles();
+      platf::rtss_set_sync_limiter_override(std::nullopt);
+#else
+      if (display_restore_requested) {
+        (void) display_helper_integration::revert();
+      }
+#endif
+
+      if (shared_platform_started) {
+        platf::streaming_will_stop();
+        shared_platform_started = false;
+      }
+
+      if (context.apply_deferred_config) {
+        config::maybe_apply_deferred();
+      }
+      shared_runtime_cleanup_armed = false;
+      shared_runtime_force_display_revert_when_idle = false;
+      shared_runtime_virtual_display_guid_bytes.reset();
+      return true;
+    }
 
     state_e state(session_t &session) {
       return session.state.load(std::memory_order_relaxed);
@@ -2690,32 +2892,44 @@ namespace stream {
     }
 
     void join(session_t &session) {
+      bool teardown_reserved = true;
+      teardown_sessions.fetch_add(1, std::memory_order_acq_rel);
+      auto teardown_reservation = util::fail_guard([&]() {
+        if (teardown_reserved) {
+          teardown_sessions.fetch_sub(1, std::memory_order_acq_rel);
+          teardown_reserved = false;
+        }
+      });
+
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
       // GPU scheduling enabled. If this happens, we will terminate ourselves and the service can restart.
       // The alternative is that Sunshine can never start another session until it's manually restarted.
       // Name the join stage for the watchdog so a crash bundle says outright what hung
       // (e.g. vibeshine#187 took dump archaeology to learn it was the video thread).
-      auto hung_stage = std::make_shared<std::atomic<const char *>>("video thread");
-      auto task = [hung_stage]() {
-        BOOST_LOG(fatal) << "Hang detected! Session failed to terminate in 10 seconds. Stuck waiting for: "sv << hung_stage->load();
-        logging::log_flush();
-        lifetime::debug_trap();
-      };
-      auto force_kill = task_pool.pushDelayed(task, 10s).task_id;
-      auto fg = util::fail_guard([&force_kill]() {
-        // Cancel the kill task if we manage to return from this function
-        task_pool.cancel(force_kill);
-      });
+      {
+        auto hung_stage = std::make_shared<std::atomic<const char *>>("video thread");
+        join_deadline_t join_deadline {hung_stage};
 
-      BOOST_LOG(debug) << "Waiting for video to end..."sv;
-      session.videoThread.join();
-      hung_stage->store("audio thread");
-      BOOST_LOG(debug) << "Waiting for audio to end..."sv;
-      session.audioThread.join();
-      hung_stage->store("control end");
-      BOOST_LOG(debug) << "Waiting for control to end..."sv;
-      session.controlEnd.view();
-      hung_stage->store("post-join cleanup");
+        BOOST_LOG(debug) << "Waiting for video to end..."sv;
+        session.videoThread.join();
+        hung_stage->store("audio thread");
+        BOOST_LOG(debug) << "Waiting for audio to end..."sv;
+        session.audioThread.join();
+        hung_stage->store("control end");
+        BOOST_LOG(debug) << "Waiting for control to end..."sv;
+        session.controlEnd.view();
+      }
+      // Watchdog coverage ends with the thread joins, which are the unbounded and
+      // unrecoverable part. Everything below waits on the process-wide lifecycle
+      // gate, which other threads legitimately hold for much longer than
+      // kJoinDeadline: proc_t::terminate() blocks per undo command, nvhttp
+      // launch/resume runs execute() plus two encoder probes under it, and the
+      // WebRTC start holds it across a 15s apply-verification budget. This path
+      // also calls proc::proc.pause(true) under that gate, which with
+      // terminate_on_pause runs the same multi-second terminate() inline.
+      // Trapping on any of that is a false positive that would kill every other
+      // live stream.
+
       // Reset input on session stop to avoid stuck repeated keys
       BOOST_LOG(debug) << "Resetting Input..."sv;
       input::reset(session.input);
@@ -2739,88 +2953,56 @@ namespace stream {
         exec_thread.detach();
       }
 
-      // If this is the last session, invoke the platform callbacks
+      // Serialize only the ownership transition and shared cleanup. Blocking
+      // thread joins above must remain outside the lifecycle gate.
+      std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
+      auto lifecycle_teardown_reservation = util::fail_guard([&]() {
+        if (teardown_reserved) {
+          teardown_sessions.fetch_sub(1, std::memory_order_acq_rel);
+          teardown_reserved = false;
+        }
+      });
+      teardown_reservation.disable();
+
       const bool last_rtsp_session = --running_sessions == 0;
+      bool finalized_shared_runtime = false;
       if (last_rtsp_session) {
         webrtc_stream::set_rtsp_sessions_active(false);
-        config::set_runtime_output_name_override(std::nullopt);
-#ifdef _WIN32
-        display_helper_integration::clear_pending_apply();
-        clear_deferred_stream_start_actions();
-#endif
-        const bool webrtc_active = webrtc_stream::has_active_or_pending_sessions();
-        if (!webrtc_active) {
-          proc::proc.pause();
+        const bool rtsp_pending = rtsp_stream::has_pending_launch_or_startup();
+        const bool webrtc_active =
+          webrtc_stream::has_active_or_pending_sessions() ||
+          webrtc_stream::has_teardown_in_progress();
+        if (!rtsp_pending && !webrtc_active) {
+          proc::proc.pause(true);
         }
-        const bool is_paused = proc::proc.running() > 0;
+        const bool is_paused = proc::proc.current_app_id() > 0;
         if (is_paused) {
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
           system_tray::update_tray_pausing(proc::proc.get_last_run_app_name());
 #endif
         }
-#ifdef _WIN32
-        // App teardown may have reached us before the RTSP session finished.
-        // Consume that deferred request only after the app and every stream are gone.
-        const bool deferred_app_revert =
-          !is_paused && !webrtc_active && proc::consume_deferred_display_revert();
-#else
-        constexpr bool deferred_app_revert = false;
-#endif
-        // Revert immediately on disconnect when configured, or complete a restore
-        // that an app exit deferred until the final streaming session ended.
-        const bool revert_display_config =
-          config::video.dd.config_revert_on_disconnect || deferred_app_revert;
-        const int paused_timeout_secs = std::max(0, config::video.dd.paused_virtual_display_timeout_secs);
-        const bool delay_virtual_display_cleanup_due_to_pause = is_paused && !revert_display_config && paused_timeout_secs > 0;
-        const bool keep_virtual_display_due_to_pause = is_paused && !revert_display_config && paused_timeout_secs == 0;
 
 #ifdef _WIN32
-        if (webrtc_active) {
-          BOOST_LOG(debug) << "Display cleanup: WebRTC session is still active; skipping RTSP-triggered teardown.";
-        } else if (delay_virtual_display_cleanup_due_to_pause) {
-          BOOST_LOG(info) << "Display cleanup: session paused with revert-on-disconnect disabled; "
-                          << "scheduling virtual display removal without display restore in " << paused_timeout_secs << "s.";
-          schedule_paused_display_cleanup(
-            std::chrono::seconds(paused_timeout_secs),
-            "rtsp_session_paused",
-            false,
-            session.virtual_display.guid_bytes
-          );
-        } else if (keep_virtual_display_due_to_pause) {
-          BOOST_LOG(debug) << "Display cleanup: session is paused; keeping virtual display alive (config_revert_on_disconnect=false, paused timeout disabled).";
-        } else {
-          g_paused_display_cleanup_generation.fetch_add(1, std::memory_order_acq_rel);
-          const auto cleanup_reason = is_paused && !revert_display_config ? "rtsp_session_paused" : "rtsp_session_end";
-          const auto cleanup = platf::virtual_display_cleanup::run(
-            cleanup_reason,
-            revert_display_config,
-            platf::virtual_display_cleanup::revert_order_t::remove_before_restore,
-            true,
-            session.virtual_display.guid_bytes
-          );
-          if (cleanup.helper_revert_dispatched) {
-            // If we reverted the display configuration, the helper watchdog is no longer needed.
-            display_helper_integration::stop_watchdog();
-          } else if (revert_display_config) {
-            BOOST_LOG(debug) << "Display helper: revert dispatch failed; leaving watchdog running.";
-          } else if (is_paused) {
-            BOOST_LOG(info) << "Display cleanup: session paused with revert-on-disconnect disabled; "
-                            << "removed virtual display(s) without restoring physical display configuration.";
-          }
-        }
+        clear_deferred_stream_start_actions();
+        const session::shared_runtime_finalize_context_t finalize_context {
+          .ignore_current_rtsp_teardown = true,
+          .apply_deferred_config = false,
+          .virtual_display_guid_bytes = session.virtual_display.guid_bytes,
+        };
+        const bool shared_runtime_still_owned =
+          session::has_shared_runtime_owner(finalize_context);
+        platf::frame_limiter_streaming_stop(
+          platf::frame_limiter_owner::rtsp,
+          is_paused || shared_runtime_still_owned
+        );
 #else
-        if (revert_display_config && !webrtc_active) {
-          (void) display_helper_integration::revert();
-        }
+        const session::shared_runtime_finalize_context_t finalize_context {
+          .ignore_current_rtsp_teardown = true,
+          .apply_deferred_config = false,
+        };
 #endif
-
-        // Restore any Windows-only integrations first
-#ifdef _WIN32
-        VDISPLAY::restorePhysicalHdrProfiles();
-        platf::rtss_set_sync_limiter_override(std::nullopt);
-        platf::frame_limiter_streaming_stop(is_paused);
-#endif
-        platf::streaming_will_stop();
+        finalized_shared_runtime =
+          session::finalize_shared_runtime_if_idle("rtsp_session_end", finalize_context);
       }
 
       BOOST_LOG(info) << "Session ended"sv;
@@ -2828,7 +3010,18 @@ namespace stream {
       // Record session end in persistent history (fires exactly once, after join)
       session_history::end_session(session.history_uuid);
 
-      if (last_rtsp_session) {
+      if (last_rtsp_session && finalized_shared_runtime) {
+        // Keep the cleanup tail externally observable while dropping the
+        // protocol-specific owner so config's full activity predicate can
+        // apply the deferred reload that this teardown just unblocked.
+        session::cleanup_reservation_t cleanup_reservation;
+        // The shared cleanup and history tail are complete. Drop this teardown
+        // owner before the comprehensive config activity predicate runs so a
+        // deferred reload is not blocked by the very teardown that proved idle.
+        if (teardown_reserved) {
+          teardown_sessions.fetch_sub(1, std::memory_order_acq_rel);
+          teardown_reserved = false;
+        }
         // Apply deferred config updates only after the session end is queued.
         // This prevents a deferred session_history_enabled=false reload from
         // disabling the writer before it records stream_ended/end_time_unix.
@@ -2928,11 +3121,12 @@ namespace stream {
               }
             }
           }
-          // Frame limiter should follow the stream FPS the user/client selected (NVHTTP "mode" fps),
-          // not the capture display refresh rate.
+          // Keep the client stream cadence separate from its exact display-mode
+          // override so RTSS can preserve each without conflating the two.
           const auto policy = framegen::make_stream_start_policy({
             .fps = session.stream_fps,
             .fps_scaled = session.stream_fps_scaled,
+            .display_refresh_millihz = session.client_display_refresh_millihz,
             .frame_generation_enabled = session.config.frame_generation_enabled,
             .gen1_framegen_fix = session.config.gen1_framegen_fix,
             .gen2_framegen_fix = session.config.gen2_framegen_fix,
@@ -2951,14 +3145,17 @@ namespace stream {
             defer_stream_start_actions(std::move(deferred));
             BOOST_LOG(info) << "Stream-start actions deferred until user session is ready.";
           } else {
-            platf::frame_limiter_streaming_start(policy);
-            platf::streaming_will_start();
+            platf::frame_limiter_streaming_start(
+              platf::frame_limiter_owner::rtsp,
+              policy
+            );
+            session::start_shared_platform_if_needed();
           }
         } else {
-          platf::streaming_will_start();
+          session::start_shared_platform_if_needed();
         }
 #else
-        platf::streaming_will_start();
+        session::start_shared_platform_if_needed();
 #endif
         proc::proc.resume();
       }
@@ -3028,6 +3225,7 @@ namespace stream {
         session->stream_fps = (int) std::lround((double) fps_millihz / 1000.0);
         session->stream_fps_scaled = fps_millihz;
       }
+      session->client_display_refresh_millihz = launch_session.client_display_refresh_millihz;
 
 #ifdef _WIN32
       session->virtual_display.active = launch_session.virtual_display;

@@ -23,6 +23,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -65,6 +66,7 @@
 #include "session_history.h"
 #include "stream.h"
 #include "host_stats.h"
+#include "video.h"
 #include "webrtc_stream.h"
 
 #ifdef _WIN32
@@ -114,11 +116,14 @@ namespace confighttp {
     {"jpg", "image/jpeg"},
     {"js", "application/javascript"},
     {"json", "application/json"},
+    {"map", "application/json"},
     {"png", "image/png"},
     {"webp", "image/webp"},
     {"svg", "image/svg+xml"},
     {"ttf", "font/ttf"},
     {"txt", "text/plain"},
+    {"wasm", "application/wasm"},
+    {"webmanifest", "application/manifest+json"},
     {"woff2", "font/woff2"},
     {"xml", "text/xml"},
   };
@@ -413,6 +418,54 @@ namespace confighttp {
       return value.dump();
     }
 
+    void normalize_adapter_config_pair(nlohmann::json &config_object) {
+      if (!config_object.is_object()) {
+        return;
+      }
+
+      const auto adapter_name = config_object.find("adapter_name");
+      if (adapter_name == config_object.end() ||
+          !adapter_name->is_string() ||
+          adapter_name->get_ref<const std::string &>().empty()) {
+        config_object.erase("adapter_pnp_id");
+        return;
+      }
+
+      const auto adapter_pnp_id = config_object.find("adapter_pnp_id");
+      if (adapter_pnp_id == config_object.end() ||
+          !adapter_pnp_id->is_string() ||
+          adapter_pnp_id->get_ref<const std::string &>().empty()) {
+        config_object.erase("adapter_pnp_id");
+      }
+    }
+
+    void normalize_adapter_config_patch(nlohmann::json &patch_object) {
+      if (!patch_object.is_object()) {
+        return;
+      }
+
+      const auto adapter_name = patch_object.find("adapter_name");
+      if (adapter_name == patch_object.end()) {
+        // A PnP identity cannot independently replace half of the pair.
+        patch_object.erase("adapter_pnp_id");
+        return;
+      }
+
+      const bool name_is_nonempty =
+        adapter_name->is_string() &&
+        !adapter_name->get_ref<const std::string &>().empty();
+      const auto adapter_pnp_id = patch_object.find("adapter_pnp_id");
+      const bool pnp_is_nonempty =
+        adapter_pnp_id != patch_object.end() &&
+        adapter_pnp_id->is_string() &&
+        !adapter_pnp_id->get_ref<const std::string &>().empty();
+      if (!name_is_nonempty || !pnp_is_nonempty) {
+        // A name-only patch explicitly selects legacy matching and must clear
+        // any persistent identity inherited from the existing file.
+        patch_object["adapter_pnp_id"] = nullptr;
+      }
+    }
+
     bool can_hot_apply_during_session(const std::set<std::string> &keys) {
       if (keys.empty()) {
         return false;
@@ -450,15 +503,17 @@ namespace confighttp {
 
   static std::string get_web_ui_host_for_local_open() {
     const auto address_family = net::af_from_enum_string(config::sunshine.address_family);
-    const auto bind_address = boost::algorithm::trim_copy(config::sunshine.bind_address);
-    if (bind_address.empty()) {
-      return address_family == net::IPV4 ? "127.0.0.1"s : "localhost"s;
-    }
+    // Derive the advertised host from the same accessor the listeners bind through.
+    // Resolving the configured value independently let an unparseable bind_address
+    // be advertised verbatim while the acceptors had already degraded to the family
+    // wildcard, so the logged/tray URL pointed at an address nothing listens on.
+    const auto bind_address = net::get_bind_address(address_family);
 
     boost::system::error_code ec;
     const auto address = boost::asio::ip::make_address(bind_address, ec);
     if (ec) {
-      return bind_address;
+      // get_bind_address only returns a validated address or the family wildcard.
+      return address_family == net::IPV4 ? "127.0.0.1"s : "localhost"s;
     }
 
     if (address.is_unspecified()) {
@@ -487,6 +542,7 @@ namespace confighttp {
   void getPlayniteGames(std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request> request);
   void getPlayniteCategories(std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request> request);
   void postPlayniteForceSync(std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request> request);
+  void postPlayniteCover(std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request> request);
   void postPlayniteLaunch(std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request> request);
   // Helper to keep confighttp.cpp free of Playnite details
   void enhance_app_with_playnite_cover(nlohmann::json &input_tree);
@@ -565,11 +621,18 @@ namespace confighttp {
    * @param response The HTTP response object.
    * @param output_tree The JSON tree to send.
    */
-  void send_response(resp_https_t response, const nlohmann::json &output_tree) {
+  void send_response(resp_https_t response, const nlohmann::json &output_tree, std::string_view cache_control) {
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json; charset=utf-8");
+    if (!cache_control.empty()) {
+      headers.emplace("Cache-Control", cache_control);
+    }
     add_cors_headers(headers);
     response->write(success_ok, output_tree.dump(), headers);
+  }
+
+  void send_response(resp_https_t response, const nlohmann::json &output_tree) {
+    send_response(response, output_tree, {});
   }
 
   nlohmann::json load_webrtc_ice_servers() {
@@ -860,7 +923,7 @@ namespace confighttp {
    */
   void send_unauthorized(resp_https_t response, req_https_t request) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
-    BOOST_LOG(info) << "Web UI: ["sv << address << "] -- not authorized"sv;
+    BOOST_LOG(info) << "Configuration API: ["sv << address << "] -- not authorized"sv;
 
     constexpr auto code = client_error_unauthorized;
 
@@ -1210,12 +1273,16 @@ namespace confighttp {
   }
 
   std::string generate_csrf_token(const std::string &client_id) {
-    std::string token = crypto::rand_alphabet(CSRF_TOKEN_SIZE);
     const auto now = std::chrono::steady_clock::now();
     std::scoped_lock lock(csrf_tokens_mutex);
     std::erase_if(csrf_tokens, [&now](const auto &entry) {
       return entry.second.expiration < now;
     });
+    if (const auto existing = csrf_tokens.find(client_id); existing != csrf_tokens.end()) {
+      return existing->second.token;
+    }
+
+    std::string token = crypto::rand_alphabet(CSRF_TOKEN_SIZE);
     csrf_tokens[client_id] = csrf_token_t {token, now + CSRF_TOKEN_LIFETIME};
     return token;
   }
@@ -1276,9 +1343,9 @@ namespace confighttp {
   }
 
   void getCSRFToken(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
+    // The browser needs a token before login. Issuing one does not grant any
+    // authority: it is bound to the request's client identity and every API
+    // handler still performs its own authentication and authorization checks.
     nlohmann::json output_tree;
     output_tree["csrf_token"] = generate_csrf_token(get_client_id(request));
     send_response(response, output_tree);
@@ -1379,38 +1446,117 @@ namespace confighttp {
    */
   // Consolidated redirect helper: use the const char* variant below.
 
-  /**
-   * @brief SPA entry responder - serves the single-page app shell (index.html)
-   * for any non-API and non-static-asset GET requests. Allows unauthenticated
-   * access so the frontend can render login/first-run flows. Static and API
-   * routes are expected to be registered explicitly; this function returns
-   * a 404 for reserved prefixes to avoid accidentally exposing files.
-   */
-  void getSpaEntry(resp_https_t response, req_https_t request) {
-    print_req(request);
+  namespace {
+    bool is_safe_web_path(std::string_view relative_path) {
+      if (relative_path.empty() || relative_path.front() == '/' || relative_path.find('\\') != std::string_view::npos ||
+          relative_path.find('%') != std::string_view::npos || relative_path.find(':') != std::string_view::npos ||
+          relative_path.find('\0') != std::string_view::npos) {
+        return false;
+      }
 
-    const std::string &p = request->path;
-    // Reserved prefixes that should not be handled by the SPA entry
-    static const std::vector<std::string> reserved = {"/api", "/assets", "/covers", "/images", "/images/"};
-    for (const auto &r : reserved) {
-      if (p.rfind(r, 0) == 0) {
-        // Let explicit handlers or default not_found handle these
+      const fs::path path {relative_path};
+      if (path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
+        return false;
+      }
+      return std::ranges::none_of(path, [](const fs::path &part) {
+        return part == "..";
+      });
+    }
+
+    SimpleWeb::CaseInsensitiveMultimap web_headers(std::string_view content_type, bool cache_immutable) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", std::string {content_type});
+      headers.emplace("Cache-Control", cache_immutable ? "public, max-age=31536000, immutable" : "no-cache");
+      headers.emplace("Content-Security-Policy",
+                      "default-src 'self'; base-uri 'self'; connect-src 'self' https://raw.githubusercontent.com wss:; font-src 'self'; "
+                      "form-action 'self'; frame-ancestors 'none'; img-src 'self' https://images.igdb.com data: blob:; media-src 'self' blob:; "
+                      "object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:");
+      headers.emplace("Referrer-Policy", "no-referrer");
+      headers.emplace("X-Content-Type-Options", "nosniff");
+      headers.emplace("X-Frame-Options", "DENY");
+      return headers;
+    }
+
+    void serve_web_file(resp_https_t response, req_https_t request, std::string_view relative_path) {
+      if (!is_safe_web_path(relative_path)) {
         not_found(response, request);
         return;
       }
-    }
 
-    // Serve the SPA shell (index.html) without server-side auth so frontend
-    // can manage routing and authentication flows.
-    std::string content = file_handler::read_file(WEB_DIR "index.html");
-    SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
-    response->write(content, headers);
+      const fs::path file_path = fs::path {WEB_DIR} / fs::path {relative_path};
+      std::error_code error;
+      if (!fs::is_regular_file(file_path, error) || error) {
+        not_found(response, request);
+        return;
+      }
+
+      auto extension = file_path.extension().string();
+      if (!extension.empty() && extension.front() == '.') {
+        extension.erase(0, 1);
+      }
+      boost::algorithm::to_lower(extension);
+      const auto mime_type = mime_types.find(extension);
+      if (mime_type == mime_types.end()) {
+        not_found(response, request);
+        return;
+      }
+
+      std::ifstream input {file_path, std::ios::binary};
+      if (!input) {
+        not_found(response, request);
+        return;
+      }
+
+      const bool cache_immutable = extension == "css" || extension == "js" || extension == "woff2";
+      response->write(success_ok, input, web_headers(mime_type->second, cache_immutable));
+    }
+  }  // namespace
+
+  /**
+   * @brief Serve a built browser asset from the isolated web root.
+   */
+  void getWebAsset(resp_https_t response, req_https_t request) {
+    print_req(request);
+    if (request->path.size() <= 1) {
+      not_found(response, request);
+      return;
+    }
+    const std::string relative_path = request->path.substr(1);
+    serve_web_file(std::move(response), std::move(request), relative_path);
   }
 
-  // legacy per-page handlers removed; SPA entry handles these routes
+  /**
+   * @brief Serve the Vue application shell for browser navigation routes.
+   */
+  void getWebUi(resp_https_t response, req_https_t request) {
+    print_req(request);
+
+    const std::string &path = request->path;
+    const std::string_view path_view {path};
+    static constexpr std::array reserved_prefixes {"/api"sv, "/assets"sv, "/covers"sv, "/images"sv};
+    if (std::ranges::any_of(reserved_prefixes, [&path](std::string_view prefix) {
+          return std::string_view {path}.starts_with(prefix);
+        })) {
+      not_found(response, request);
+      return;
+    }
+
+    const bool is_v2_route = path_view == "/v2" || path_view.starts_with("/v2/");
+    const bool is_v2_static_path = path_view == "/v2/assets" || path_view.starts_with("/v2/assets/") ||
+                                   path_view == "/v2/images" || path_view.starts_with("/v2/images/");
+    if (is_v2_static_path) {
+      not_found(response, request);
+      return;
+    }
+
+    // Missing files should remain 404s. Extension-free paths are client-side
+    // navigation routes and receive the single application shell.
+    if (fs::path {path}.has_extension()) {
+      not_found(response, request);
+      return;
+    }
+    serve_web_file(std::move(response), std::move(request), is_v2_route ? "v2/index.html" : "index.html");
+  }
 
   /**
    * @brief Get the favicon image.
@@ -1776,6 +1922,7 @@ namespace confighttp {
           overrides["nvenc_split_encode"] = overrides["nvenc_force_split_encode"];
         }
         overrides.erase("nvenc_force_split_encode");
+        normalize_adapter_config_pair(overrides);
       }
 
       // If image-path omitted but we have a Playnite id, let Playnite helper resolve a cover (Windows)
@@ -1786,7 +1933,7 @@ namespace confighttp {
         if (input_tree.contains("playnite-id") && input_tree["playnite-id"].is_string()) {
           const auto playnite_id = input_tree["playnite-id"].get<std::string>();
           if (!playnite_id.empty()) {
-            input_tree["uuid"] = platf::playnite::sync::canonical_playnite_app_uuid(playnite_id);
+            input_tree["uuid"] = platf::playnite::sync::policy::canonical_playnite_app_uuid(playnite_id);
           }
         }
       } catch (...) {}
@@ -2377,7 +2524,9 @@ namespace confighttp {
 #endif
     output_tree["status"] = true;
     output_tree["platform"] = SUNSHINE_PLATFORM;
-    send_response(response, output_tree);
+    // The list changes immediately after pair/unpair. Avoid serving an old empty
+    // list from an HTTP cache after the client state has changed.
+    send_response(response, output_tree, "no-store");
   }
 
 #ifdef _WIN32
@@ -2580,11 +2729,9 @@ namespace confighttp {
       bool enable_legacy_ordering = input_tree.value("enable_legacy_ordering", true);
       bool allow_client_commands = input_tree.value("allow_client_commands", true);
       bool always_use_virtual_display = input_tree.value("always_use_virtual_display", false);
-      std::optional<bool> prefer_10bit_sdr;
+      bool prefer_10bit_sdr = false;
       if (input_tree.contains("prefer_10bit_sdr") && !input_tree["prefer_10bit_sdr"].is_null()) {
         prefer_10bit_sdr = util::get_non_string_json_value<bool>(input_tree, "prefer_10bit_sdr", false);
-      } else {
-        prefer_10bit_sdr.reset();
       }
       std::optional<std::unordered_map<std::string, std::string>> config_overrides;
       if (input_tree.contains("config_overrides")) {
@@ -2728,7 +2875,7 @@ namespace confighttp {
     output_tree["platform"] = SUNSHINE_PLATFORM;
     output_tree["version"] = PROJECT_VERSION;
 #ifdef _WIN32
-    output_tree["vdisplayStatus"] = (int) proc::vDisplayDriverStatus;
+    output_tree["vdisplayStatus"] = static_cast<int>(proc::vDisplayDriverStatus.load(std::memory_order_acquire));
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
     for (auto &[name, value] : vars) {
@@ -2780,6 +2927,7 @@ namespace confighttp {
         for (const auto &gpu : gpus) {
           nlohmann::json gpu_entry;
           gpu_entry["description"] = gpu.description;
+          gpu_entry["pnp_id"] = gpu.pnp_id;
           gpu_entry["vendor_id"] = gpu.vendor_id;
           gpu_entry["device_id"] = gpu.device_id;
           gpu_entry["dedicated_video_memory"] = gpu.dedicated_video_memory;
@@ -2913,6 +3061,7 @@ namespace confighttp {
       std::stringstream config_stream;
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
+      normalize_adapter_config_pair(input_tree);
       std::set<std::string> changed_keys;
       for (const auto &[k, v] : input_tree.items()) {
         changed_keys.insert(k);
@@ -2996,6 +3145,7 @@ namespace confighttp {
         bad_request(response, request, "PATCH body must be a JSON object");
         return;
       }
+      normalize_adapter_config_patch(patch_tree);
 
       // Load existing config into a map
       std::unordered_map<std::string, std::string> current = config::parse_config(
@@ -3087,12 +3237,13 @@ namespace confighttp {
     print_req(request);
 
     nlohmann::json output_tree;
-    const int active = rtsp_stream::session_count();
+    const int active = rtsp_stream::session_count() + static_cast<int>(webrtc_stream::active_session_count());
     const bool app_running = proc::proc.running() > 0;
     output_tree["activeSessions"] = active;
     output_tree["appRunning"] = app_running;
     output_tree["appName"] = app_running ? proc::proc.get_last_run_app_name() : "";
     output_tree["paused"] = app_running && active == 0;
+    output_tree["lastEncoderProbeFailed"] = video::last_encoder_probe_failed();
     output_tree["status"] = true;
     send_response(response, output_tree);
   }
@@ -3107,7 +3258,7 @@ namespace confighttp {
     send_response(response, host_stats_to_json(host_stats::latest()));
   }
 
-  // Static host info — model strings + total RAM/VRAM, sampled once.
+  // Static host info â€” model strings + total RAM/VRAM, sampled once.
   void getHostInfo(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -3144,7 +3295,7 @@ namespace confighttp {
     send_response(response, output);
   }
 
-  // ── Session History endpoints ────────────────────────────────────
+  // â”€â”€ Session History endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   void listSessionHistory(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
@@ -3246,10 +3397,79 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  void getWebRTCCapabilities(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    nlohmann::json output;
+#ifndef SUNSHINE_ENABLE_WEBRTC
+    output["enabled"] = false;
+    output["availability"] = {
+      {"state", "disabled"},
+      {"reason", "WebRTC support is disabled in this build"},
+    };
+    send_response(response, output);
+    return;
+#else
+    const auto capabilities = nvhttp::get_web_stream_capabilities();
+    constexpr int kMaxWebRtcDimension = 16384;
+    constexpr int kMaxWebRtcFps = 1000;
+    constexpr int kAbsoluteMaxWebRtcBitrateKbps = 500000;
+    const int max_bitrate_kbps = config::video.max_bitrate > 0 ?
+                                      std::min(config::video.max_bitrate, kAbsoluteMaxWebRtcBitrateKbps) :
+                                      kAbsoluteMaxWebRtcBitrateKbps;
+
+    bool hdr_policy_allows = true;
+    std::string_view hdr_policy = "automatic";
+#ifdef _WIN32
+    using hdr_request_override_e = config::video_t::dd_t::hdr_request_override_e;
+    switch (config::video.dd.hdr_request_override) {
+      case hdr_request_override_e::force_on:
+        hdr_policy = "force_on";
+        break;
+      case hdr_request_override_e::force_off:
+        hdr_policy = "force_off";
+        hdr_policy_allows = false;
+        break;
+      case hdr_request_override_e::automatic:
+        break;
+    }
+#endif
+
+    output["enabled"] = true;
+    output["availability"] = {
+      {"state", capabilities.probe_complete ? "ready" : "unverified"},
+      {"reason", capabilities.probe_complete ? "" : "The selected capture adapter has not reported a usable encoder."},
+    };
+    output["codecs"] = {
+      {"h264", {{"supported", capabilities.h264}, {"hdr", false}}},
+      {"hevc", {{"supported", capabilities.hevc}, {"hdr", capabilities.hevc_hdr}}},
+      {"av1", {{"supported", capabilities.av1}, {"hdr", capabilities.av1_hdr}}},
+    };
+    output["hdr_policy_allows"] = hdr_policy_allows;
+    output["hdr_policy"] = std::string {hdr_policy};
+    output["limits"] = {
+      {"min_dimension", 64},
+      {"max_dimension", kMaxWebRtcDimension},
+      {"min_fps", 1},
+      {"max_fps", kMaxWebRtcFps},
+      {"min_bitrate_kbps", 0},
+      {"max_bitrate_kbps", max_bitrate_kbps},
+    };
+    send_response(response, output);
+#endif
+  }
+
   void createWebRTCSession(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
     }
+
+#ifndef SUNSHINE_ENABLE_WEBRTC
+    service_unavailable(response, "WebRTC support is disabled in this build");
+    return;
+#endif
 
     BOOST_LOG(debug) << "WebRTC: create session request received";
 
@@ -3391,6 +3611,12 @@ namespace confighttp {
           }
         }
         if (options.hdr.value_or(false)) {
+#ifdef _WIN32
+          if (config::video.dd.hdr_request_override == config::video_t::dd_t::hdr_request_override_e::force_off) {
+            bad_request(response, request, "HDR is disabled by the host display policy");
+            return;
+          }
+#endif
           if (!options.encoded) {
             bad_request(response, request, "HDR requires encoded video for WebRTC sessions");
             return;
@@ -3400,15 +3626,38 @@ namespace confighttp {
             return;
           }
         }
-        if (options.hdr.value_or(false)) {
-          if (!options.encoded) {
-            bad_request(response, request, "HDR requires encoded video for WebRTC sessions");
-            return;
-          }
-          if (!options.codec || (*options.codec != "hevc" && *options.codec != "av1")) {
-            bad_request(response, request, "HDR requires HEVC or AV1 video encoding");
-            return;
-          }
+#ifdef _WIN32
+        if (config::video.dd.hdr_request_override == config::video_t::dd_t::hdr_request_override_e::force_on &&
+            (!options.codec || (*options.codec != "hevc" && *options.codec != "av1"))) {
+          bad_request(response, request, "The host HDR display policy requires HEVC or AV1 video encoding");
+          return;
+        }
+#endif
+
+        constexpr int kMinWebRtcDimension = 64;
+        constexpr int kMaxWebRtcDimension = 16384;
+        constexpr int kMaxWebRtcFps = 1000;
+        constexpr int kAbsoluteMaxWebRtcBitrateKbps = 500000;
+        const int max_bitrate_kbps = config::video.max_bitrate > 0 ?
+                                          std::min(config::video.max_bitrate, kAbsoluteMaxWebRtcBitrateKbps) :
+                                          kAbsoluteMaxWebRtcBitrateKbps;
+        const auto valid_dimension = [=](const std::optional<int> &dimension) {
+          return !dimension ||
+                 (*dimension >= kMinWebRtcDimension &&
+                  *dimension <= kMaxWebRtcDimension &&
+                  *dimension % 2 == 0);
+        };
+        if (!valid_dimension(options.width) || !valid_dimension(options.height)) {
+          bad_request(response, request, "WebRTC width and height must be even values between 64 and 16384");
+          return;
+        }
+        if (options.fps && (*options.fps < 1 || *options.fps > kMaxWebRtcFps)) {
+          bad_request(response, request, "WebRTC fps must be between 1 and 1000");
+          return;
+        }
+        if (options.bitrate_kbps && (*options.bitrate_kbps < 0 || *options.bitrate_kbps > max_bitrate_kbps)) {
+          bad_request(response, request, "WebRTC bitrate_kbps exceeds this host's allowed range");
+          return;
         }
       } catch (const std::exception &e) {
         bad_request(response, request, e.what());
@@ -3417,18 +3666,29 @@ namespace confighttp {
     }
 
     BOOST_LOG(debug) << "WebRTC: creating session";
-    if (auto error = webrtc_stream::ensure_capture_started(options)) {
+    std::optional<std::string> capture_start_error;
 #ifdef _WIN32
-      // Lifecycle gap: if capture start fails after a virtual display was created/applied but
-      // before a session exists, ensure we don't leave the virtual display behind.
-      if (rtsp_stream::session_count() == 0 && !webrtc_stream::has_active_or_pending_sessions()) {
-        (void) platf::virtual_display_cleanup::run(
-          "webrtc_session_start_failed",
-          config::video.dd.config_revert_on_disconnect
-        );
+    {
+      // Publish the cleanup tail before capture startup mutates any display or
+      // runtime configuration. The lifecycle gate below then closes the gap
+      // between the failed start releasing its gate and direct VDD cleanup.
+      stream::session::cleanup_reservation_t cleanup_reservation;
+      capture_start_error = webrtc_stream::ensure_capture_started(options);
+      if (capture_start_error) {
+        std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
+        if (!stream::session::has_shared_runtime_owner()) {
+          (void) platf::virtual_display_cleanup::run(
+            "webrtc_session_start_failed",
+            config::video.dd.config_revert_on_disconnect
+          );
+        }
       }
+    }
+#else
+    capture_start_error = webrtc_stream::ensure_capture_started(options);
 #endif
-      bad_request(response, request, error->c_str());
+    if (capture_start_error) {
+      bad_request(response, request, capture_start_error->c_str());
       return;
     }
     auto session = webrtc_stream::create_session(options);
@@ -3511,7 +3771,8 @@ namespace confighttp {
         if (!webrtc_stream::get_session(session_id)) {
           output["error"] = "Session not found";
         } else {
-          output["error"] = "Failed to process offer";
+          const auto negotiation_error = webrtc_stream::get_negotiation_error(session_id);
+          output["error"] = negotiation_error.empty() ? "Failed to process offer" : negotiation_error;
         }
         send_response(response, output);
         return;
@@ -3706,13 +3967,31 @@ namespace confighttp {
     std::thread([response, session_id, since]() mutable {
       response->close_connection_after_response = true;
 
-      response->write({{"Content-Type", "text/event-stream"}, {"Cache-Control", "no-cache"}, {"Connection", "keep-alive"}, {"Access-Control-Allow-Origin", get_cors_origin()}});
+      response->write({
+        {"Content-Type", "text/event-stream"},
+        {"Cache-Control", "no-cache, no-transform"},
+        {"Connection", "keep-alive"},
+        {"X-Accel-Buffering", "no"},
+        {"Access-Control-Allow-Origin", get_cors_origin()},
+      });
 
       std::promise<bool> header_error;
       response->send([&header_error](const SimpleWeb::error_code &ec) {
         header_error.set_value(static_cast<bool>(ec));
       });
       if (header_error.get_future().get()) {
+        return;
+      }
+
+      // Make the initial response large enough for buffering proxies to release
+      // the stream without adding padding to every browser-visible event.
+      constexpr std::size_t sse_proxy_prelude_size = 2048;
+      *response << ':' << std::string(sse_proxy_prelude_size - 3, ' ') << "\n\n";
+      std::promise<bool> prelude_error;
+      response->send([&prelude_error](const SimpleWeb::error_code &ec) {
+        prelude_error.set_value(static_cast<bool>(ec));
+      });
+      if (prelude_error.get_future().get()) {
         return;
       }
 
@@ -3934,7 +4213,7 @@ namespace confighttp {
         }
       }
 #else
-      // Non-Windows: we can’t transcode here; accept only already-PNG data
+      // Non-Windows: we canâ€™t transcode here; accept only already-PNG data
       if (file_is_png(src_tmp)) {
         std::error_code ec {};
 
@@ -4061,6 +4340,40 @@ namespace confighttp {
     if (!handled) {
       read_sunshine_log(content);
     }
+
+    // The logs page polls this endpoint. Returning the complete file on every poll
+    // can overwhelm the browser once a long-running host has accumulated a large log.
+    // Keep the legacy full response unless the caller explicitly requests a tail.
+    if (const auto it = query.find("tail"); it != query.end()) {
+      try {
+        constexpr std::size_t kMaxTailLines = 10000;
+        const auto requested = std::stoull(it->second);
+        const auto tail_lines = std::min<std::size_t>(requested, kMaxTailLines);
+        if (tail_lines > 0 && !content.empty()) {
+          std::size_t cursor = content.size();
+          if (content.back() == '\n') {
+            --cursor;
+          }
+
+          std::size_t tail_start = 0;
+          for (std::size_t line = 0; line < tail_lines && cursor > 0; ++line) {
+            const auto separator = content.rfind('\n', cursor - 1);
+            if (separator == std::string::npos) {
+              tail_start = 0;
+              break;
+            }
+            tail_start = separator + 1;
+            cursor = separator;
+          }
+          if (tail_start > 0) {
+            content.erase(0, tail_start);
+          }
+        }
+      } catch (const std::exception &) {
+        // Invalid tail values preserve the legacy full-log response.
+      }
+    }
+
     SimpleWeb::CaseInsensitiveMultimap headers;
     std::string contentType = "text/plain";
 #ifdef _WIN32
@@ -4760,6 +5073,13 @@ namespace confighttp {
     std::string current_mismatch_reason;
     std::optional<golden_restore_status_t> restore_status;
     try {
+      const auto query = request->parse_query_string();
+      const auto compare_current_it = query.find("compare_current");
+      const bool compare_current = compare_current_it != query.end() &&
+                                   (boost::iequals(compare_current_it->second, "1") ||
+                                    boost::iequals(compare_current_it->second, "true") ||
+                                    boost::iequals(compare_current_it->second, "yes"));
+
       for (const auto &p : golden_snapshot_candidates()) {
         if (file_exists_nofail(p)) {
           exists = true;
@@ -4772,7 +5092,11 @@ namespace confighttp {
             if (needs_layout_upgrade) {
               out_of_date_reason = "schema_upgrade_required";
             }
-            if (!has_active_stream_sessions()) {
+            // A current-topology comparison walks QDC_ALL_PATHS. On a system
+            // with stale CCD paths, doing that for every ordinary Settings
+            // status refresh can monopolize the single HTTPS I/O thread. It
+            // is diagnostic-only, so retain it behind an explicit request.
+            if (compare_current && !has_active_stream_sessions()) {
               if (auto mismatch = snapshot_current_mismatch_reason(*root)) {
                 comparison_available = true;
                 if (!mismatch->empty()) {
@@ -5087,6 +5411,8 @@ namespace confighttp {
             .perm = crypto::PERM::_all,
           };
           BOOST_LOG(info) << "Launching app ["sv << app.name << "] from web UI"sv;
+          (void) proc::proc.running();
+          std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
           auto launch_session = nvhttp::make_launch_session(true, false, request->parse_query_string(), &named_cert);
           auto err = proc::proc.execute(app, launch_session);
           if (err) {
@@ -5385,20 +5711,12 @@ namespace confighttp {
       bad_request(response, request);
     };
 
-    // Serve the SPA shell for any unmatched GET route. Explicit static and API
-    // routes are registered below; UI page routes are deprecated server-side
-    // and are handled by the SPA entry responder so frontend can manage
-    // authentication and routing.
-    server.default_resource["GET"] = getSpaEntry;
-    server.resource["^/$"]["GET"] = getSpaEntry;
-    server.resource["^/pin/?$"]["GET"] = getSpaEntry;
-    server.resource["^/apps/?$"]["GET"] = getSpaEntry;
-    server.resource["^/clients/?$"]["GET"] = getSpaEntry;
-    server.resource["^/config/?$"]["GET"] = getSpaEntry;
-    server.resource["^/password/?$"]["GET"] = getSpaEntry;
-    server.resource["^/welcome/?$"]["GET"] = getSpaEntry;
-    server.resource["^/login/?$"]["GET"] = getSpaEntry;
-    server.resource["^/troubleshooting/?$"]["GET"] = getSpaEntry;
+    // Static browser assets are public; every state-changing API below still
+    // passes through the existing authentication and CSRF gates.
+    server.resource["^/(assets|images)/.+$"]["GET"] = getWebAsset;
+    server.resource["^/v2/(assets|images)/.+$"]["GET"] = getWebAsset;
+    server.resource["^/v2/[^/]+\\.webmanifest$"]["GET"] = getWebAsset;
+    server.default_resource["GET"] = getWebUi;
     thread_pool_util::ThreadPool blocking_route_pool;
     blocking_route_pool.start(1);
     clear_token_route_catalog();
@@ -5462,7 +5780,7 @@ namespace confighttp {
     register_blocking_api_route("^/api/reset-display-device-persistence$", "POST", resetDisplayDevicePersistence);
 #if defined(_WIN32)
     register_blocking_api_route("^/api/display/export_golden$", "POST", postExportGoldenDisplay);
-    register_api_route("^/api/display/golden_status$", "GET", getGoldenStatus);
+    register_blocking_api_route("^/api/display/golden_status$", "GET", getGoldenStatus);
     register_api_route("^/api/display/golden$", "DELETE", deleteGolden);
 #endif
     register_api_route("^/api/password$", "POST", savePassword);
@@ -5490,6 +5808,7 @@ namespace confighttp {
     register_api_route("^/api/host/stats$", "GET", getHostStats);
     register_api_route("^/api/host/info$", "GET", getHostInfo);
     register_api_route("^/api/rtsp/sessions$", "GET", listRTSPSessions);
+    register_blocking_api_route("^/api/webrtc/capabilities$", "GET", getWebRTCCapabilities);
     register_api_route("^/api/webrtc/sessions$", "GET", listWebRTCSessions);
     register_api_route("^/api/history/sessions$", "GET", listSessionHistory);
     register_api_route("^/api/history/sessions/active$", "GET", getActiveSessionHistory);
@@ -5519,6 +5838,7 @@ namespace confighttp {
     register_api_route("^/api/playnite/games$", "GET", getPlayniteGames);
     register_api_route("^/api/playnite/categories$", "GET", getPlayniteCategories);
     register_api_route("^/api/playnite/force_sync$", "POST", postPlayniteForceSync);
+    register_blocking_api_route("^/api/playnite/cover$", "POST", postPlayniteCover);
     register_api_route("^/api/playnite/launch$", "POST", postPlayniteLaunch);
     // Export logs bundle (Windows only)
     register_api_route("^/api/logs/export$", "GET", downloadPlayniteLogs);
@@ -5617,14 +5937,8 @@ namespace confighttp {
    * @return TokenScope The corresponding TokenScope enum value.
    * @throws std::invalid_argument If the input string does not match any known scope.
    */
-  TokenScope scope_from_string(std::string_view s) {
-    if (s == "Read" || s == "read") {
-      return TokenScope::Read;
-    }
-    if (s == "Write" || s == "write") {
-      return TokenScope::Write;
-    }
-    throw std::invalid_argument("Unknown TokenScope: " + std::string(s));
+  TokenScope scope_from_string(std::string_view scope) {
+    return policy::scope_from_string(scope);
   }
 
   /**
@@ -5633,14 +5947,7 @@ namespace confighttp {
    * @return The string representation of the scope.
    */
   std::string scope_to_string(TokenScope scope) {
-    switch (scope) {
-      case TokenScope::Read:
-        return "Read";
-      case TokenScope::Write:
-        return "Write";
-      default:
-        throw std::invalid_argument("Unknown TokenScope enum value");
-    }
+    return policy::scope_to_string(scope);
   }
 
   /**

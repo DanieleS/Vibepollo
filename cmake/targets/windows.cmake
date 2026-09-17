@@ -64,6 +64,7 @@ add_custom_command(
             "${CMAKE_SOURCE_DIR}/packaging/windows/bootstrapper/app.manifest"
             "${CMAKE_SOURCE_DIR}/LICENSE"
             "${CMAKE_SOURCE_DIR}/apollo.ico"
+            "${SUNSHINE_WINDOWS_VERSIONINFO_STAMP}"
             generate_windows_versioninfo
     COMMENT "Building lightweight Vibepollo uninstaller UI"
 )
@@ -85,7 +86,7 @@ endforeach()
 # Convenience target to build MSI via CPack (WiX)
 add_custom_target(package_msi
     COMMAND "${CMAKE_CPACK_COMMAND}" -G WIX -C "$<IF:$<CONFIG:>,${CMAKE_BUILD_TYPE},$<CONFIG>>"
-    DEPENDS ${SUNSHINE_WINDOWS_PACKAGED_TARGETS} copy_playnite_plugin build_uninstall_ui
+    DEPENDS ${SUNSHINE_WINDOWS_PACKAGED_TARGETS} copy_playnite_plugin build_uninstall_ui web_ui
     COMMENT "Building MSI installer via CPack (WiX)"
 )
 

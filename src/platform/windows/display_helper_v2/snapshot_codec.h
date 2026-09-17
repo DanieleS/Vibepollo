@@ -2,7 +2,6 @@
 
 #include "src/platform/windows/display_helper_v2/types.h"
 
-#include <filesystem>
 #include <map>
 #include <optional>
 #include <set>
@@ -65,9 +64,9 @@ namespace display_helper::v2::codec {
   // --- filtering rules ---
 
   /**
-   * @brief Save-side filtering: reject snapshots that contain active virtual displays,
-   *        drop devices without a display_name (not safe restore targets), apply the
-   *        exclusion list, and reject when nothing restorable remains.
+   * @brief Save-side filtering: omit virtual displays, drop devices without a
+   *        display_name (not safe restore targets), apply the exclusion list, and
+   *        reject when nothing restorable remains.
    * @param exclusions Normalized (normalize_device_id) exclusion list.
    * @returns Filtered snapshot, or nullopt with reject_reason set.
    */
@@ -92,7 +91,4 @@ namespace display_helper::v2::codec {
     const std::vector<std::string> &exclusions,
     const std::string &source_label);
 
-  // --- file IO ---
-  bool write_text_atomically(const std::string &text, const std::filesystem::path &path);
-  std::optional<std::string> read_file_text(const std::filesystem::path &path);
 }  // namespace display_helper::v2::codec

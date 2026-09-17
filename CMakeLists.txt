@@ -24,8 +24,8 @@ set(PROJECT_BRIEF_DESCRIPTION "GameStream host for Artemis")  # must be <= 35 ch
 
 set(PROJECT_LONG_DESCRIPTION "Offering low latency, cloud gaming server capabilities with support for AMD, Intel, \
 and Nvidia GPUs for hardware encoding. Software encoding is also available. You can connect to Apollo from any \
-Artemis client on a variety of devices. A web UI is provided to allow configuration, and client pairing, from \
-your favorite web browser. Pair from the local server or any mobile device.")
+Artemis client on a variety of devices. A web UI and configuration API are available for configuration, client \
+pairing, and integrations.")
 
 # Ensure WiX-specific CPack variables are present early in config generation
 if (WIN32)
@@ -84,3 +84,11 @@ include(${CMAKE_MODULE_PATH}/targets/common.cmake)
 
 # packaging
 include(${CMAKE_MODULE_PATH}/packaging/common.cmake)
+
+# Unit tests are part of every project build. Configure packaging first so its
+# globally guarded contracts are initialized in the project scope before test
+# targets consume them.
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

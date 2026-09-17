@@ -33,6 +33,7 @@ namespace display_helper::v2 {
     NeedsVirtualDisplayReset,
     Retryable,
     Fatal,
+    HdrStateFailed,
   };
 
   enum class SnapshotTier {
@@ -125,6 +126,10 @@ namespace display_helper::v2 {
     /// When false, a broken Sunshine connection must not autonomously restore
     /// (stream is intentionally pause-retained).
     bool restore_on_disconnect = true;
+    /// A capture-gated stream start needs a terminal verification result before
+    /// Moonlight UWP's first-video timeout. Keep the final 5.5s repair for
+    /// non-stream APPLYs and post-verified stabilization.
+    bool omit_final_initial_hdr_reapply = false;
     std::optional<std::string> virtual_layout;
     /// Optional snapshot exclusions supplied with this APPLY. Keeping this on
     /// the queued command ensures the state machine, rather than the pipe
@@ -169,6 +174,10 @@ namespace display_helper::v2 {
   struct DisarmCommand {
     std::uint64_t generation = 0;
     std::uint64_t connection_epoch = 0;
+    /// A real stream start must be able to supersede even an unconfirmed
+    /// restore. Non-forced DISARM remains available for speculative probes
+    /// that must not strand a partially applied recovery.
+    bool force = false;
   };
 
   struct ExportGoldenCommand {

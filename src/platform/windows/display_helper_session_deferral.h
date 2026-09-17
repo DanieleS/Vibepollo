@@ -16,12 +16,15 @@ namespace display_helper_integration {
       int width = 0;
       int height = 0;
       int fps = 0;
+      bool client_display_mode_override = false;
+      std::uint32_t client_display_refresh_millihz = 0;
       bool enable_hdr = false;
       bool enable_sops = false;
       bool virtual_display = false;
       std::string virtual_display_device_id;
       std::optional<std::chrono::steady_clock::time_point> virtual_display_ready_since;
       std::optional<int> framegen_refresh_rate;
+      std::optional<std::uint32_t> framegen_refresh_millihz;
       int framegen_refresh_multiplier = 1;
       bool gen1_framegen_fix = false;
       bool gen2_framegen_fix = false;
@@ -63,7 +66,16 @@ namespace display_helper_integration {
 
     explicit SessionDeferralManager(NowFn now_fn);
 
+    // The core owns only a value snapshot. Runtime adapters convert live
+    // sessions before handing work to it, which keeps retry scheduling
+    // independent of RTSP and the application runtime.
     void set_pending(const DisplayApplyRequest &request);
+    void set_pending(
+      const DisplayApplyRequest &request,
+      PendingSessionSnapshot session_snapshot,
+      std::uint32_t session_id,
+      bool has_session
+    );
     TakeResult take_ready(bool session_ready);
     RescheduleResult reschedule(PendingApplyState pending);
     void clear();
@@ -74,7 +86,12 @@ namespace display_helper_integration {
     static int max_attempts();
 
   private:
-    PendingApplyState make_state(const DisplayApplyRequest &request) const;
+    PendingApplyState make_state(
+      const DisplayApplyRequest &request,
+      PendingSessionSnapshot session_snapshot,
+      std::uint32_t session_id,
+      bool has_session
+    ) const;
 
     NowFn now_fn_;
     mutable std::mutex mutex_;

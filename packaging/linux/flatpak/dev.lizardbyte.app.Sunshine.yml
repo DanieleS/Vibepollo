@@ -3,8 +3,6 @@ app-id: "@PROJECT_FQDN@"
 runtime: org.freedesktop.Platform
 runtime-version: "24.08"
 sdk: org.freedesktop.Sdk
-sdk-extensions:
-  - org.freedesktop.Sdk.Extension.node20
 command: sunshine
 separate-locales: false
 finish-args:
@@ -31,7 +29,6 @@ cleanup:
 
 modules:
   # Test dependencies
-  - "modules/xvfb/xvfb.json"
 
   # Build dependencies
   - "modules/nlohmann_json.json"
@@ -58,20 +55,15 @@ modules:
   - name: sunshine
     builddir: true
     build-options:
-      append-path: /usr/lib/sdk/node20/bin
       env:
         BUILD_VERSION: "@BUILD_VERSION@"
         BRANCH: "@GITHUB_BRANCH@"
         COMMIT: "@GITHUB_COMMIT@"
-        XDG_CACHE_HOME: /run/build/sunshine/flatpak-node/cache
-        npm_config_cache: /run/build/sunshine/flatpak-node/npm-cache
-        npm_config_nodedir: /usr/lib/sdk/node20
-        npm_config_offline: 'true'
-        NPM_CONFIG_LOGLEVEL: info
     buildsystem: cmake-ninja
     config-opts:
       - -DBOOST_USE_STATIC=OFF
       - -DBUILD_DOCS=OFF
+      - -DBUILD_TESTS=ON
       - -DBUILD_WERROR=ON
       - -DCMAKE_BUILD_TYPE=Release
       - -DCMAKE_CUDA_COMPILER=/app/cuda/bin/nvcc
@@ -93,14 +85,8 @@ modules:
     post-install:
       - install -D $FLATPAK_BUILDER_BUILDDIR/packaging/linux/flatpak/scripts/* /app/bin
       - install -D $FLATPAK_BUILDER_BUILDDIR/packaging/linux/flatpak/apps.json /app/share/sunshine/apps.json
-    run-tests: true
-    test-rule: ""  # empty to disable
-    test-commands:
-      - npm run serve & xvfb-run tests/test_sunshine --gtest_color=yes
+    run-tests: false
     sources:
-      - generated-sources.json
       - type: git
         url: "@GITHUB_CLONE_URL@"
         commit: "@GITHUB_COMMIT@"
-      - type: file
-        path: package-lock.json

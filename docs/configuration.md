@@ -925,13 +925,21 @@ editing the `conf` file in a text editor. Use the examples as reference.
             <br>
             **Windows:**
             <br>
-            Enter the following command in command prompt or PowerShell.
+            Select the adapter in the web interface so Vibepollo can save both
+            its display name and persistent Windows device identity. For
+            manually authored configurations, use the following command in
+            command prompt or PowerShell to list adapter descriptions.
             @code{}
             %ProgramFiles%\Sunshine\tools\dxgi-info.exe
             @endcode
             For hybrid graphics systems, DXGI reports the outputs are connected to whichever graphics
             adapter that the application is configured to use, so it's not a reliable indicator of how the
             display is physically connected.
+            <br>
+            <br>
+            Once an adapter is selected, capture stays pinned to it. If that GPU currently has no display
+            attached (for example a TV that is powered off), Vibepollo does **not** fall back to another
+            GPU; it treats the host as displayless and creates the virtual display on the selected adapter.
             }
         </td>
     </tr>
@@ -949,6 +957,35 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Example (Windows)</td>
         <td colspan="2">@code{}
             adapter_name = Radeon RX 580 Series
+            @endcode</td>
+    </tr>
+</table>
+
+### adapter_pnp_id
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Windows-only persistent PnP identity paired with `adapter_name`.
+            The web interface records this value automatically when an adapter
+            is selected, allowing adapters with identical descriptions to
+            remain distinct across restarts and enumeration-order changes.
+            The same identity selects the render adapter when Vibepollo creates
+            a virtual display fallback.
+            Do not configure this key by itself. If it is omitted,
+            `adapter_name` retains its legacy description-only behavior.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Unset.</td>
+    </tr>
+    <tr>
+        <td>Example (Windows)</td>
+        <td colspan="2">@code{}
+            adapter_name = Radeon RX 580 Series
+            adapter_pnp_id = PCI\VEN_1002&DEV_67DF&SUBSYS_00000000&REV_E7
             @endcode</td>
     </tr>
 </table>
@@ -2509,32 +2546,6 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
-### prefer_10bit_sdr
-
-<table>
-    <tr>
-        <td>Description</td>
-        <td colspan="2">
-            Capture and encode SDR sessions in 10-bit when the client and encoder negotiate HEVC/AV1 Main10 support.
-            @note{HDR stays disabled.}
-            @note{Applies to HEVC or AV1 only; H.264 streaming remains 8-bit.}
-            @warning{May cause crashes on client devices with older GPUs that don't support HEVC 10-bit decoding.}
-        </td>
-    </tr>
-    <tr>
-        <td>Default</td>
-        <td colspan="2">@code{}
-            disabled
-            @endcode</td>
-    </tr>
-    <tr>
-        <td>Example</td>
-        <td colspan="2">@code{}
-            prefer_10bit_sdr = enabled
-            @endcode</td>
-    </tr>
-</table>
-
 ### capture
 
 <table>
@@ -2647,7 +2658,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="5">Choices</td>
+        <td rowspan="7">Choices</td>
         <td>nvenc</td>
         <td>For NVIDIA graphics cards</td>
     </tr>
@@ -2657,7 +2668,13 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
     <tr>
         <td>amdvce</td>
-        <td>For AMD graphics cards</td>
+        <td>For AMD graphics cards (native AMF encoder)</td>
+    </tr>
+    <tr>
+        <td>amdvce_legacy</td>
+        <td>Explicit rollback to the FFmpeg-based AMD AMF encoder. Never selected automatically —
+            automatic probing and `amdvce` fail closed instead of silently falling back.
+            @note{Applies to Windows only.}</td>
     </tr>
     <tr>
         <td>vaapi</td>
@@ -2744,7 +2761,9 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Optional FPS limit to apply while streaming. Set to 0 to use the stream's requested FPS.
+            Optional FPS limit to apply while streaming. RTSS supports fractional values with up to
+            three decimal places; NVIDIA Control Panel rounds them to the nearest whole FPS.
+            Set to 0 to use a client display-mode override when present, otherwise the stream's requested FPS.
         </td>
     </tr>
     <tr>
@@ -2754,7 +2773,7 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            frame_limiter_fps_limit = 120
+            frame_limiter_fps_limit = 59.94
             @endcode</td>
     </tr>
 </table>
@@ -3338,6 +3357,18 @@ They appear in the Frame Limiter section of the settings UI.
 
 ## AMD AMF Encoder
 
+@note{HDR (HEVC Main10) encoding through AMF requires the AMF runtime shipped with Adrenalin 23.30
+or newer, which reports AMF 1.4.32. FFmpeg refuses 10-bit P010 surfaces on any older runtime, so HDR
+is not offered to clients even though Vibepollo's own AMF check only needs 1.4.23. Update your
+graphics drivers if HDR is unavailable on an AMD GPU. This limitation applies to the
+@code{amdvce_legacy} rollback encoder only; the native @code{amdvce} encoder talks to AMF directly
+and is not subject to FFmpeg's 10-bit refusal. Vibepollo carries one narrow exception for the legacy
+encoder: on a Radeon Pro 5500 XT (PCI @code{1002:7340}) running AMF 1.4.31.x, it presents 1.4.32 to
+FFmpeg for the duration of codec validation so HEVC Main10 is not refused. The exception is applied
+automatically, has no configuration option, and does not apply to any other adapter. The detected AMF
+runtime version is written to the log on every AMD HDR HEVC attempt (search for
+@code{AMF Main10 override}).}
+
 ### amd_usage
 
 <table>
@@ -3411,7 +3442,7 @@ They appear in the Frame Limiter section of the settings UI.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="4">Choices</td>
+        <td rowspan="7">Choices</td>
         <td>cqp</td>
         <td>constant qp mode</td>
     </tr>
@@ -3426,6 +3457,48 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td>vbr_peak</td>
         <td>variable bitrate, peak constrained</td>
+    </tr>
+    <tr>
+        <td>qvbr</td>
+        <td>quality-defined variable bitrate (see amd_qvbr_quality_level)</td>
+    </tr>
+    <tr>
+        <td>hqvbr</td>
+        <td>high quality variable bitrate</td>
+    </tr>
+    <tr>
+        <td>hqcbr</td>
+        <td>high quality constant bitrate</td>
+    </tr>
+</table>
+
+### amd_qvbr_quality_level
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The target quality level used by the `qvbr` rate control method, where 1 is the lowest quality and 51
+            is the highest. Higher values spend more bits to preserve quality.
+            @note{This option only applies to AMD [encoders](#encoder) with `amd_rc` set to `qvbr`. Native `amdvce` automatically enables PreAnalysis with a one-frame low-latency lookahead for `qvbr`, `hqvbr`, and `hqcbr`.}
+            @note{Leave this at `0` to keep the encoder default.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            0
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">1-51 (0 to use the encoder default)</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            amd_qvbr_quality_level = 18
+            @endcode</td>
     </tr>
 </table>
 
@@ -3461,6 +3534,7 @@ They appear in the Frame Limiter section of the settings UI.
         <td>Description</td>
         <td colspan="2">
             The quality profile controls the tradeoff between speed and quality of encoding.
+            `auto` leaves the quality property unset so the selected AMF usage preset can choose it.
             @note{This option only applies when using amdvce [encoder](#encoder).}
         </td>
     </tr>
@@ -3477,7 +3551,11 @@ They appear in the Frame Limiter section of the settings UI.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="3">Choices</td>
+        <td rowspan="4">Choices</td>
+        <td>auto</td>
+        <td>follow the selected AMF usage preset</td>
+    </tr>
+    <tr>
         <td>speed</td>
         <td>prefer speed</td>
     </tr>
@@ -3497,8 +3575,9 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Preanalysis can increase encoding quality at the cost of latency.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            Preanalysis can increase encoding quality at the cost of latency. Native `amdvce` uses a one-frame
+            low-latency lookahead; it is enabled automatically by `qvbr`, `hqvbr`, and `hqcbr`. The setting is
+            also forwarded to `amdvce_legacy`.
         </td>
     </tr>
     <tr>
@@ -3523,6 +3602,8 @@ They appear in the Frame Limiter section of the settings UI.
         <td colspan="2">
             Variance Based Adaptive Quantization (VBAQ) can increase subjective visual quality by prioritizing
             allocation of more bits to smooth areas compared to more textured areas.
+            `auto` leaves the property unset so the selected AMF usage preset can choose it. VBAQ is enabled
+            by default.
             @note{This option only applies when using amdvce [encoder](#encoder).}
         </td>
     </tr>
@@ -3537,6 +3618,19 @@ They appear in the Frame Limiter section of the settings UI.
         <td colspan="2">@code{}
             amd_vbaq = enabled
             @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="3">Choices</td>
+        <td>auto</td>
+        <td>follow the selected AMF usage preset</td>
+    </tr>
+    <tr>
+        <td>enabled</td>
+        <td>enable VBAQ</td>
+    </tr>
+    <tr>
+        <td>disabled</td>
+        <td>disable VBAQ</td>
     </tr>
 </table>
 
@@ -3566,7 +3660,7 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td rowspan="3">Choices</td>
         <td>auto</td>
-        <td>let ffmpeg decide</td>
+        <td>leave the encoder default</td>
     </tr>
     <tr>
         <td>cabac</td>
@@ -3575,6 +3669,91 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td>cavlc</td>
         <td>context adaptive variable-length coding - higher quality</td>
+    </tr>
+</table>
+
+### amd_av1_screen_content
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Enable AV1 screen-content coding tools, which can improve efficiency and text/UI clarity for desktop and
+            screen-heavy content.
+            @note{AV1 only. This option only applies to the native amdvce [encoder](#encoder) (not amdvce_legacy).}
+            @note{Leave at `auto` to use the driver default.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            auto
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            amd_av1_screen_content = enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="3">Choices</td>
+        <td>auto</td>
+        <td>leave the driver default</td>
+    </tr>
+    <tr>
+        <td>enabled</td>
+        <td>force screen-content tools on</td>
+    </tr>
+    <tr>
+        <td>disabled</td>
+        <td>force screen-content tools off</td>
+    </tr>
+</table>
+
+### amd_av1_latency_mode
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            AV1 encoding-latency tier. Lower tiers finish each frame faster at the cost of higher power draw.
+            @note{AV1 only. This option only applies to the native amdvce [encoder](#encoder) (not amdvce_legacy).}
+            @note{Leave at `auto` to use the driver default.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            auto
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            amd_av1_latency_mode = lowest
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="5">Choices</td>
+        <td>auto</td>
+        <td>leave the driver default</td>
+    </tr>
+    <tr>
+        <td>none</td>
+        <td>balance latency and power</td>
+    </tr>
+    <tr>
+        <td>power_saving</td>
+        <td>real-time with lower power</td>
+    </tr>
+    <tr>
+        <td>realtime</td>
+        <td>real-time</td>
+    </tr>
+    <tr>
+        <td>lowest</td>
+        <td>lowest latency (highest power)</td>
     </tr>
 </table>
 
@@ -4044,6 +4223,172 @@ playnite_exclude_categories = ["Steam", {"id": "deck", "name": "Steam Deck"}]
 @endcode</td>
     </tr>
 </table>
+
+## Advanced runtime and recovery options
+
+### amd_ltr_frames
+
+Sets the number of long-term reference frames used by the native AMD encoder. Leave this at the automatic default unless a client or driver-specific recovery workflow requires a fixed value.
+
+### amd_input_queue_size
+
+Sets the native AMD encoder input queue depth. A positive explicit value overrides automatic low-latency queue selection.
+
+### amd_smart_access_video
+
+Controls AMD SmartAccess Video when the installed AMF runtime exposes that capability. Use `auto` to leave the driver default unchanged.
+
+### amd_lowlatency_mode
+
+Controls AMD's native encoder low-latency mode. Use `auto` to leave the driver default unchanged.
+
+### amd_high_motion_quality_boost
+
+Controls AMD's high-motion quality boost. Use `auto` to leave the driver default unchanged.
+
+### dd_paused_virtual_display_timeout_secs
+
+Sets how long a paused virtual display may remain ready before the display helper releases it. Set `0` to disable the timeout.
+
+### dd_virtual_display_scale
+
+Sets the virtual-display scale override. Leave it unset or at the automatic setting to use the recommended scale for the requested display mode.
+
+### dd_wa_hdr_toggle
+
+Enables the display-helper HDR-toggle workaround for display stacks that require an explicit HDR transition.
+
+### dd_wa_hdr_toggle_delay
+
+Sets the delay, in milliseconds, used by the display-helper HDR-toggle workaround.
+
+### lossless_scaling_legacy_auto_detect
+
+Enables legacy automatic discovery of Lossless Scaling when no explicit `lossless_scaling_path` is configured.
+
+### realtime_stats_enabled
+
+Enables collection of the host and session statistics shown by the real-time statistics view.
+
+### realtime_stats_poll_interval_ms
+
+Sets the real-time statistics polling interval in milliseconds. Lower values refresh the dashboard more frequently.
+
+### rtx_hdr
+
+Enables RTX HDR processing when the active NVIDIA environment supports it.
+
+### rtx_hdr_force_sdr
+
+Forces the source display to remain SDR while RTX HDR performs the SDR-to-HDR conversion.
+
+### rtx_hdr_sdr_brightness
+
+Sets the RTX HDR SDR brightness control.
+
+### rtx_hdr_contrast
+
+Sets the RTX HDR contrast control.
+
+### rtx_hdr_saturation
+
+Sets the RTX HDR saturation control.
+
+### rtx_hdr_middle_gray
+
+Sets the RTX HDR middle-gray control.
+
+### rtx_hdr_peak_brightness
+
+Sets the RTX HDR peak-brightness control.
+
+### session_history_enabled
+
+Enables persistent session-history recording.
+
+### session_history_ttl_days
+
+Sets the number of days to retain session-history records. Set `0` to retain records until another configured limit removes them.
+
+### session_history_db_size_limit_mb
+
+Sets the maximum on-disk size, in MiB, of the session-history database before older records are pruned.
+
+### vulkan_hdr_layer
+
+Enables the Vulkan HDR layer used by the display stack when HDR Vulkan capture support is available.
+
+### wgc_pacing_smoothing
+
+Enables WGC pacing smoothing so capture re-anchors to the pacing grid instead of raw frame-arrival timing.
+
+### auto_capture_sink
+
+Automatically selects the audio capture sink when no explicit virtual sink is configured.
+
+### enable_discovery
+
+Controls whether Vibepollo advertises itself for local-network discovery.
+
+### enable_input_only_mode
+
+Allows clients to connect in input-only mode without starting a video stream.
+
+### enable_pairing
+
+Controls whether new clients may pair with this host.
+
+### envvar_compatibility_mode
+
+Enables compatibility handling for legacy environment-variable based integrations.
+
+### fallback_mode
+
+Sets the display mode used when the requested streaming mode cannot be applied.
+
+### forward_rumble
+
+Forwards controller rumble events to the emulated host gamepad.
+
+### global_state_cmd
+
+Configures commands that run when any application changes streaming state.
+
+### hide_tray_controls
+
+Hides the interactive controls in the system-tray menu.
+
+### ignore_encoder_probe_failure
+
+Allows streaming to continue when the encoder capability probe cannot complete.
+
+### keep_sink_default
+
+Keeps the selected audio sink as the system default while streaming.
+
+### legacy_ordering
+
+Enables legacy application ordering for clients and integrations that require it.
+
+### limit_framerate
+
+Limits capture and encoding to the requested stream frame rate.
+
+### nvenc_intra_refresh
+
+Uses NVIDIA intra refresh instead of full keyframes when supported.
+
+### nvenc_temporal_aq
+
+Enables NVIDIA temporal adaptive quantization when supported.
+
+### pacing_max_bitrate_kbps
+
+Sets the maximum bitrate, in Kbps, considered by the network pacing policy. Set `0` to use the automatic default.
+
+### packetsize
+
+Sets the maximum network packet size used for streaming. Set `0` to use the default behavior.
 
 <div class="section_buttons">
 

@@ -3,15 +3,16 @@
 #include <chrono>
 
 namespace display_helper::v2::timing {
-  // A full staged APPLY may include the v1-compatible 0/750/2500/5500ms
-  // settling staircase, then policy retries. Each individual APPLY can spend
-  // two five-second topology windows and a staged rollback/positioning phase.
-  // Keep IPC acknowledgement and the capture gate alive for one deliberately
-  // conservative whole-operation envelope so capture never starts mid-repair.
-  inline constexpr auto kApplyOperationEnvelope = std::chrono::seconds(180);
+  // Preserve the full apply/verification envelope for WebRTC, recovery, and
+  // other callers that are not racing an RTSP client's first-video timeout.
+  inline constexpr auto kApplyStartupBudget = std::chrono::seconds(15);
 
-  // The producer owns the operation envelope. Consumers waiting on the
-  // producer's future get a small scheduling margin so they cannot proceed
-  // just before it publishes the final verification result.
-  inline constexpr auto kApplyGateConsumerSlack = std::chrono::seconds(5);
+  // Moonlight clients can abandon an RTSP session after roughly ten seconds
+  // without video. APPLY and its verification gate share this shorter budget,
+  // leaving time for capture initialization and the first encoded frame.
+  inline constexpr auto kStreamStartApplyBudget = std::chrono::seconds(8);
+
+  // The RTSP verification producer resolves its future at the stream-start
+  // deadline. Give the capture consumer only a small scheduling margin beyond it.
+  inline constexpr auto kApplyGateConsumerSlack = std::chrono::seconds(1);
 }  // namespace display_helper::v2::timing

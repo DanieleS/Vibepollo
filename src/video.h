@@ -7,6 +7,7 @@
 // local includes
 #include "input.h"
 #include "platform/common.h"
+#include "video_policy.h"
 #include "thread_safe.h"
 #include "video_colorspace.h"
 
@@ -64,6 +65,9 @@ namespace video {
 
     int encodingFramerate;  // Requested display framerate
     bool input_only;
+    // Opt into the smallest supported host-side queues for a launch-qualified VRR
+    // session. This remains false for clients that do not negotiate the mode.
+    bool vrr_low_latency = false;
     // Original client-requested wire-bandwidth budget in Kbps, before Sunshine
     // subtracts FEC/audio/control overhead from `bitrate` for the encoder.
     // Same as `bitrate` for clients that don't send maximumBitrateKbps.
@@ -147,6 +151,22 @@ namespace video {
     }
   };
 
+  struct encoder_platform_formats_amf: encoder_platform_formats_t {
+    encoder_platform_formats_amf(
+      const platf::mem_type_e &dev_type,
+      const platf::pix_fmt_e &pix_fmt_8bit,
+      const platf::pix_fmt_e &pix_fmt_10bit,
+      const platf::pix_fmt_e &pix_fmt_yuv444_8bit,
+      const platf::pix_fmt_e &pix_fmt_yuv444_10bit
+    ) {
+      encoder_platform_formats_t::dev_type = dev_type;
+      encoder_platform_formats_t::pix_fmt_8bit = pix_fmt_8bit;
+      encoder_platform_formats_t::pix_fmt_10bit = pix_fmt_10bit;
+      encoder_platform_formats_t::pix_fmt_yuv444_8bit = pix_fmt_yuv444_8bit;
+      encoder_platform_formats_t::pix_fmt_yuv444_10bit = pix_fmt_yuv444_10bit;
+    }
+  };
+
   struct encoder_t {
     std::string_view name;
 
@@ -181,7 +201,10 @@ namespace video {
       option_t(const option_t &) = default;
 
       std::string name;
-      std::variant<int, int *, std::optional<int> *, std::function<int()>, std::string, std::string *, std::function<const std::string(const config_t &)>> value;
+      struct optional_int_function_t {
+        std::function<std::optional<int>()> evaluate;
+      };
+      std::variant<int, int *, std::optional<int> *, std::function<int()>, optional_int_function_t, std::string, std::string *, std::function<const std::string(const config_t &)>> value;
 
       option_t(std::string &&name, decltype(value) &&value):
           name {std::move(name)},
@@ -270,6 +293,7 @@ namespace video {
 
 #ifdef _WIN32
   extern encoder_t amdvce;
+  extern encoder_t amdvce_legacy;
   extern encoder_t quicksync;
   extern encoder_t mediafoundation;
 #endif
@@ -393,15 +417,32 @@ namespace video {
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
   extern std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
 
+  bool has_attempted_encoder_probe();
+  bool has_successful_encoder_probe();
+  bool last_encoder_probe_failed();
+
   struct advertised_encoder_capabilities_t {
     int hevc_mode = 0;
     int av1_mode = 0;
     std::array<bool, 3> yuv444_for_codec {};
   };
 
-  bool has_attempted_encoder_probe();
-  bool has_successful_encoder_probe();
-  advertised_encoder_capabilities_t advertised_encoder_capabilities(bool probe_before_negative = false);
+  advertised_encoder_capabilities_t advertised_encoder_capabilities(
+    bool probe_before_negative = false,
+    bool *probe_complete = nullptr
+  );
+
+#ifdef _WIN32
+  // Bridge the interval between selecting a virtual-display render adapter and
+  // Windows publishing its replacement output. The lease prevents an older
+  // request from clearing a newer session's identity.
+  using encoder_probe_adapter_hint_lease_t = std::uint64_t;
+  encoder_probe_adapter_hint_lease_t set_pending_virtual_display_adapter_hint(const LUID &adapter_luid);
+  // Once the replacement output is published, capability identity must agree
+  // with its WGC/DXGI adapter before a successful probe can remain cached.
+  bool mark_pending_virtual_display_adapter_hint_ready_for_verification(encoder_probe_adapter_hint_lease_t lease);
+  bool clear_pending_virtual_display_adapter_hint(encoder_probe_adapter_hint_lease_t lease);
+#endif
 
   void capture(
     safe::mail_t mail,
@@ -409,7 +450,13 @@ namespace video {
     void *channel_data
   );
 
-  bool validate_encoder(encoder_t &encoder, bool expect_failure);
+  bool validate_encoder(
+    encoder_t &encoder,
+    bool expect_failure,
+    const std::optional<platf::adapter_id_t> &required_adapter = std::nullopt,
+    std::optional<platf::adapter_id_t> *actual_adapter = nullptr,
+    const std::string &probe_display_name = std::string {}
+  );
 
   /**
    * @brief Check if we can allow probing for the encoders.
@@ -433,18 +480,7 @@ namespace video {
   // support for 23.976 film in case someone wants to stream a film at the perfect
   // framerate.
   inline AVRational framerateX100_to_rational(const int framerateX100) {
-    if (framerateX100 % 2997 == 0) {
-      // Multiples of NTSC 29.97 e.g. 59.94, 119.88
-      return AVRational {(framerateX100 / 2997) * 30000, 1001};
-    }
-    switch (framerateX100) {
-      case 2397:  // the other weird NTSC framerate, assume these want 23.976 film
-      case 2398:
-        return AVRational {24000, 1001};
-      default:
-        // any other fractional rate can be reduced by ffmpeg. Max is set to 1 << 26 based on docs:
-        // "rational numbers with |num| <= 1<<26 && |den| <= 1<<26 can be recovered exactly from their double representation"
-        return av_d2q((double) framerateX100 / 100.0f, 1 << 26);
-    }
+    const auto rational = policy::framerate_x100_to_rational(framerateX100);
+    return AVRational {rational.numerator, rational.denominator};
   }
 }  // namespace video

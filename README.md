@@ -15,13 +15,10 @@ Vibepollo is an AI‑enhanced version of Apollo, a popular remote streaming appl
   Running Windows Graphics Capture (WGC) as a service improves performance and stability. It captures the full frame rate of frame‑generated titles, avoids crashes when VRAM is exceeded, and follows Microsoft’s recommended capture method going forward. Vibepollo auto‑switches capture methods on demand, so the login screen and UAC prompts are still captured even when using WGC.
 
 * **Native Virtualized Display**
-  Vibeshine uses its bundled virtual display driver by default and keeps SudoVDA installed as a rollback option. It can capture output from any GPU, including those in hybrid laptops, ensuring the virtual screen connects to the correct GPU when needed. It also provides simple virtual display options, allowing users to choose between a physical or virtual display. On headless setups, it enables automatically to prevent 503 errors and false encoder detections, such as incorrect HEVC support reports.
+  Vibepollo uses its bundled virtual display driver by default and keeps SudoVDA installed as a rollback option. It can capture output from any GPU, including those in hybrid laptops, ensuring the virtual screen connects to the correct GPU when needed. It also provides simple virtual display options, allowing users to choose between a physical or virtual display. On headless setups, it enables automatically to prevent 503 errors and false encoder detections, such as incorrect HEVC support reports.
 
-* **WebRTC Browser Streaming**
-  Vibeshine can stream straight to your web browser from the `/webrtc` page, so you can play without installing a separate client. It is designed for fast response and smooth audio/video, while still letting you use the regular Moonlight-compatible streaming path if you prefer.
-
-* **Redesigned Frontend with Full Mobile Support**
-  The new Web UI makes it easy to add games and change settings without restarting the program. It’s fully responsive, so you can manage your library and configuration from a phone or tablet.
+* **Focused Configuration Interface**
+  Vibepollo includes a responsive, dependency-light browser interface built around the tasks people perform most often: selecting a streaming display, tuning frame pacing, managing games and devices, checking sessions, and recovering the host. Less common controls remain organized by domain instead of competing with everyday setup.
 
 * **Playnite Integration**
   Deep integration with Playnite (a “launcher of launchers”) automatically syncs your recently played games with configurable expiration rules, per‑category sync, and exclusions. You can also add games manually from a Web UI dropdown; Vibepollo handles artwork, launching, and clean termination—emulators included. The goal is a seamless, GeForce Experience–style library experience—only better.
@@ -106,3 +103,30 @@ With **GPT‑5.3‑Codex**, there’s no real need to juggle a “fast but less 
 Claude was used more heavily earlier on. Older Claude models had a tendency to go off on their own path, even when the architectural plan was clear. That behavior has mostly been fixed in newer Claude releases, but GPT still ended up being the more useful engineering tool for me because it will challenge you and not simply agree with whatever you ask for.
 
 In general, GPT has felt more intelligent for the way I build and maintain this codebase. I may occasionally ask **Claude Opus 4.5** for a second opinion if GPT can’t resolve something cleanly end‑to‑end, but this is increasingly rare.
+
+---
+
+## Sponsors
+
+<p align="center">
+  <a href="https://signpath.io?utm_source=foundation&amp;utm_medium=github&amp;utm_campaign=vibepollo">
+    <img src="docs/images/signpath.svg" alt="SignPath" width="420">
+  </a>
+</p>
+
+Thank you to [SignPath.io](https://signpath.io?utm_source=foundation&utm_medium=github&utm_campaign=vibepollo)
+and the [SignPath Foundation](https://signpath.org?utm_source=foundation&utm_medium=github&utm_campaign=vibepollo)
+for sponsoring Vibepollo's Windows code signing.
+
+### Code signing policy
+
+Official Vibepollo Windows releases use free code signing provided by
+[SignPath.io](https://signpath.io?utm_source=foundation&utm_medium=github&utm_campaign=vibepollo), and a
+certificate by the [SignPath Foundation](https://signpath.org?utm_source=foundation&utm_medium=github&utm_campaign=vibepollo).
+
+* **Committer and reviewer:** [Nonary](https://github.com/Nonary)
+* **Approver:** [Nonary](https://github.com/Nonary)
+* **Privacy:** Vibepollo transfers information to networked systems only for functionality requested by the user or
+  operator; it does not transmit user or runtime data to SignPath. Separately, SignPath's GitHub integration receives
+  the build artifacts, signing-request details, and GitHub-provided build-origin metadata needed to sign official
+  releases.

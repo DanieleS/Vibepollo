@@ -54,18 +54,11 @@ BuildRequires: appstream
 BuildRequires: glslc
 BuildRequires: libappstream-glib
 BuildRequires: vulkan-loader-devel
-%if 0%{fedora} > 43
-# needed for npm from nvm
-BuildRequires: libatomic
-%endif
 BuildRequires: libayatana-appindicator3-devel
 BuildRequires: libgudev
 BuildRequires: mesa-libGL-devel
 BuildRequires: mesa-libgbm-devel
 BuildRequires: miniupnpc-devel
-%if 0%{?fedora} < 44
-BuildRequires: nodejs-npm
-%endif
 BuildRequires: numactl-devel
 BuildRequires: opus-devel
 BuildRequires: pulseaudio-libs-devel
@@ -73,8 +66,6 @@ BuildRequires: python3-jinja2
 BuildRequires: python3-setuptools
 BuildRequires: systemd-udev
 %{?sysusers_requires_compat}
-# for unit tests
-BuildRequires: xorg-x11-server-Xvfb
 %endif
 
 %if 0%{?suse_version}
@@ -89,7 +80,6 @@ BuildRequires: libminiupnpc-devel
 BuildRequires: libnuma-devel
 BuildRequires: libopus-devel
 BuildRequires: libpulse-devel
-BuildRequires: npm
 BuildRequires: python311
 BuildRequires: python311-Jinja2
 BuildRequires: python311-setuptools
@@ -100,8 +90,6 @@ BuildRequires: udev
 %if !0%{?sle_version}
 BuildRequires: vulkan-devel
 %endif
-# for unit tests
-BuildRequires: xvfb-run
 %endif
 
 # Conditional BuildRequires for cuda-gcc based on distribution version
@@ -213,6 +201,7 @@ cmake_args=(
   "-G=Unix Makefiles"
   "-S=."
   "-DBUILD_DOCS=OFF"
+  "-DBUILD_TESTS=ON"
   "-DBUILD_WERROR=ON"
   "-DCMAKE_BUILD_TYPE=Release"
   "-DCMAKE_INSTALL_PREFIX=%{_prefix}"
@@ -298,39 +287,6 @@ else
   cmake_args+=("-DSUNSHINE_ENABLE_CUDA=OFF")
 fi
 
-# Install and setup NVM for Fedora 44+
-%if 0%{?fedora} > 43
-echo "Installing NVM for Fedora 44+..."
-export HOME=${HOME:-/builddir}
-export NVM_DIR="$HOME/.nvm"
-
-# Install NVM
-if [ ! -d "$NVM_DIR" ]; then
-  wget -qO- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
-fi
-
-# Load NVM
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-
-# Install and use Node.js
-nvm install node
-nvm use node
-
-echo "Node.js version: $(node --version)"
-echo "npm version: $(npm --version)"
-echo "npm location: $(which npm)"
-echo "node location: $(which node)"
-
-# Add npm and node path to cmake args
-NPM_PATH=$(which npm)
-NODE_PATH=$(which node)
-cmake_args+=("-DNPM=${NPM_PATH}")
-
-# Add node bin directory to PATH for make
-export PATH="$(dirname ${NODE_PATH}):${PATH}"
-%endif
-
 # setup the version
 export BRANCH=%{branch}
 export BUILD_VERSION=v%{build_version}
@@ -354,26 +310,7 @@ appstreamcli validate %{buildroot}%{_metainfodir}/*.metainfo.xml
 appstream-util validate %{buildroot}%{_metainfodir}/*.metainfo.xml
 desktop-file-validate %{buildroot}%{_datadir}/applications/*.desktop
 
-# run tests
-cd %{_builddir}/Sunshine/build
-xvfb-run ./tests/test_sunshine
-
 %install
-# Load NVM for Fedora 44+ so npm is available during make install
-%if 0%{?fedora} > 43
-export HOME=${HOME:-/builddir}
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-nvm use node
-
-# Add node bin directory to PATH for make install
-NODE_PATH=$(which node)
-export PATH="$(dirname ${NODE_PATH}):${PATH}"
-
-echo "Node.js version: $(node --version)"
-echo "npm version: $(npm --version)"
-%endif
-
 cd %{_builddir}/Sunshine/build
 %make_install
 

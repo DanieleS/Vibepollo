@@ -1,6 +1,6 @@
 /**
  * @file src/confighttp.h
- * @brief Declarations for the Web UI Config HTTP server.
+ * @brief Declarations for the configuration HTTP server.
  */
 #pragma once
 
@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 
 // local includes
+#include "config_http_policy.h"
 #include "http_auth.h"
 #include "thread_safe.h"
 
@@ -32,16 +33,13 @@ namespace confighttp {
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request>;
 
-  constexpr auto PORT_HTTPS = 1;
+  constexpr auto PORT_HTTPS = policy::https_port_offset;
   constexpr auto SESSION_EXPIRE_DURATION = 24h * 15;
   std::string get_web_ui_url(std::string_view path = {});
   void start();
 
-  // Token scopes for API tokens used by tests and UI
-  enum class TokenScope {
-    Read,  ///< Read-only scope: allows GET/HEAD style operations
-    Write  ///< Read-write scope: allows modifying operations (POST/PUT/DELETE)
-  };
+  // Token scopes for API tokens used by clients.
+  using TokenScope = policy::TokenScope;
 
   // Authentication helpers
   AuthResult check_auth(const req_https_t &request);
@@ -51,7 +49,7 @@ namespace confighttp {
   bool validate_csrf_token(const resp_https_t &response, const req_https_t &request, const std::string &client_id);
 
   // Token scope helpers
-  TokenScope scope_from_string(std::string_view s);
+  TokenScope scope_from_string(std::string_view scope);
   std::string scope_to_string(TokenScope scope);
 
   // Web UI endpoints
@@ -63,7 +61,6 @@ namespace confighttp {
   void refreshSession(resp_https_t response, req_https_t request);
   void authStatus(resp_https_t response, req_https_t request);
   void logoutUser(resp_https_t response, req_https_t request);
-  void getSpaEntry(resp_https_t response, req_https_t request);
   void getCSRFToken(resp_https_t response, req_https_t request);
   void browseDirectory(resp_https_t response, req_https_t request);
   bool is_browsable_executable(const std::filesystem::directory_entry &entry, const std::filesystem::file_status &status);

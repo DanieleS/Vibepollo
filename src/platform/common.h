@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 // lib includes
@@ -22,6 +23,7 @@
 // local includes
 #include "src/boost_process_shim.h"
 #include "src/config.h"
+#include "src/host_stats_types.h"
 #include "src/logging.h"
 #include "src/thread_safe.h"
 #include "src/utility.h"
@@ -48,7 +50,20 @@ namespace nvenc {
   class nvenc_base;
 }
 
+namespace amf {
+  class amf_encoder;
+}
+
 namespace platf {
+  class display_t;
+
+  struct adapter_id_t {
+    std::int32_t high_part = 0;
+    std::uint32_t low_part = 0;
+
+    bool operator==(const adapter_id_t &) const = default;
+  };
+
   // Limited by bits in activeGamepadMask
   constexpr auto MAX_GAMEPADS = 16;
 
@@ -399,6 +414,24 @@ namespace platf {
     void *data {};
     AVFrame *frame {};
 
+    virtual bool initialize_hardware_device() {
+      return true;
+    }
+
+    virtual std::shared_ptr<display_t> release_display_lease_for_initialization() {
+      return {};
+    }
+
+    virtual void restore_display_lease_after_initialization(std::shared_ptr<display_t> display) {
+      (void) display;
+    }
+
+    virtual bool is_codec_supported(std::string_view name, const video::config_t &config) {
+      (void) name;
+      (void) config;
+      return true;
+    }
+
     int convert(platf::img_t &img) override {
       return -1;
     }
@@ -440,6 +473,32 @@ namespace platf {
     virtual bool init_encoder(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) = 0;
 
     nvenc::nvenc_base *nvenc = nullptr;
+  };
+
+  struct amf_encode_device_t: encode_device_t {
+    // Native backends prepare only non-driver state on the capture thread.
+    // D3D/AMF construction is invoked by the bounded initialization worker.
+    virtual bool initialize_hardware_device() {
+      return true;
+    }
+    virtual bool init_encoder(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) = 0;
+    virtual bool finish_encoder_initialization(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) {
+      (void) client_config;
+      (void) colorspace;
+      return true;
+    }
+
+    // Native AMF initialization is watchdog-bounded. A timed-out worker must not
+    // retain the capture display generation forever; Windows detaches this lease
+    // while Init runs and restores it only after successful ownership transfer.
+    virtual std::shared_ptr<display_t> release_display_lease_for_initialization() {
+      return {};
+    }
+    virtual void restore_display_lease_after_initialization(std::shared_ptr<display_t> display) {
+      (void) display;
+    }
+
+    amf::amf_encoder *amf = nullptr;
   };
 
   enum class capture_e : int {
@@ -505,7 +564,17 @@ namespace platf {
       return nullptr;
     }
 
+    // Windows legacy AMF alone needs D3D creation deferred into its watchdog.
+    // Other AVCodec backends retain their established synchronous behavior.
+    virtual std::unique_ptr<avcodec_encode_device_t> make_deferred_avcodec_encode_device(pix_fmt_e pix_fmt) {
+      return nullptr;
+    }
+
     virtual std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) {
+      return nullptr;
+    }
+
+    virtual std::unique_ptr<amf_encode_device_t> make_amf_encode_device(pix_fmt_e pix_fmt) {
       return nullptr;
     }
 
@@ -529,6 +598,15 @@ namespace platf {
      */
     virtual bool is_codec_supported(std::string_view name, const ::video::config_t &config) {
       return true;
+    }
+
+    /**
+     * @brief Return the adapter that owns this initialized capture display.
+     * @details Platforms without a stable adapter identity leave this empty;
+     * callers must preserve their established platform-level cache identity.
+     */
+    virtual std::optional<adapter_id_t> capture_adapter_id() const {
+      return std::nullopt;
     }
 
     virtual ~display_t() = default;
@@ -569,6 +647,15 @@ namespace platf {
     virtual std::optional<sink_t> sink_info() = 0;
 
     /**
+     * @brief Restores the host audio sink after streaming stops.
+     * @note Most platforms restore a single sink. Windows overrides this to
+     *       restore the endpoint captured for each audio role.
+     */
+    virtual int restore_sink(const std::string &sink) {
+      return set_sink(sink);
+    }
+
+    /**
      * @brief Resets the default audio device away from virtual streaming speakers.
      * Implementations may continue trying in the background to restore the
      * preferred device after moving the default away from virtual speakers.
@@ -606,7 +693,12 @@ namespace platf {
    * @param config Stream configuration
    * @return The display_t instance based on hwdevice_type.
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+  std::shared_ptr<display_t> display(
+    mem_type_e hwdevice_type,
+    const std::string &display_name,
+    const video::config_t &config,
+    const std::optional<adapter_id_t> &required_adapter = std::nullopt
+  );
 
   // A list of names of displays accepted as display_name with the mem_type_e
   std::vector<std::string> display_names(mem_type_e hwdevice_type);
@@ -900,63 +992,6 @@ namespace platf {
 
   bool
     set_clipboard(const std::string &content);
-
-  /**
-   * @brief Snapshot of host system performance counters.
-   *
-   * Any field that cannot be sampled on the current platform is left at the
-   * default sentinel (-1.f for percentages/temperatures, 0 for byte counts).
-   */
-  struct host_stats_t {
-    float cpu_percent = -1.f;
-    float cpu_temp_c = -1.f;
-    std::uint64_t ram_used_bytes = 0;
-    std::uint64_t ram_total_bytes = 0;
-    float gpu_percent = -1.f;
-    float gpu_encoder_percent = -1.f;
-    float gpu_temp_c = -1.f;
-    std::uint64_t vram_used_bytes = 0;
-    std::uint64_t vram_total_bytes = 0;
-    // Network throughput on the chosen primary interface, in bits/sec.
-    // -1 means "no measurement yet" (e.g. first sample after start, or
-    // platform without an implementation).
-    double net_rx_bps = -1.0;
-    double net_tx_bps = -1.0;
-  };
-
-  /**
-   * @brief Static information about the host (cached, sampled once at startup).
-   */
-  struct host_info_t {
-    std::string cpu_model;
-    std::string gpu_model;
-    int cpu_logical_cores = 0;
-    std::uint64_t ram_total_bytes = 0;
-    std::uint64_t vram_total_bytes = 0;
-    // Friendly name of the network interface used for throughput sampling
-    // (empty if none was selectable).
-    std::string net_interface;
-    // Reported link speed in Mbps (0 if unknown).
-    std::uint64_t net_link_speed_mbps = 0;
-  };
-
-  /**
-   * @brief Per-platform host stats provider.
-   *
-   * Implementations live in src/platform/<os>/host_stats.cpp and are
-   * instantiated through @ref create_host_stats_provider. The provider is
-   * polled from a single sampler thread owned by @ref host_stats.
-   */
-  class host_stats_provider_t {
-  public:
-    virtual ~host_stats_provider_t() = default;
-
-    /** @brief Sample the current host stats. */
-    virtual host_stats_t sample() = 0;
-
-    /** @brief Return the static host info (called once, may be cached). */
-    virtual host_info_t info() = 0;
-  };
 
   /**
    * @brief Factory for the platform-specific host stats provider.
