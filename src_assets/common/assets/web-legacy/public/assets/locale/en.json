@@ -2129,11 +2129,16 @@
     "clipboard_set": "Set clipboard",
     "clipboard_read": "Read clipboard",
     "server_cmd": "Run server commands",
+    "telemetry_read": "Receive game telemetry",
     "input_controller": "Controller input",
     "input_touch": "Touch input",
     "input_pen": "Pen input",
     "input_mouse": "Mouse input",
     "input_kbd": "Keyboard input"
+  },
+  "telemetry": {
+    "config_header": "Game telemetry",
+    "config_desc": "Values read live out of the running game and forwarded to clients that support a second screen. The helper is read-only — it can observe a game but not change it — and sends nothing until both this setting and a per-client permission are on."
   },
   "stats": {
     "title": "Statistics",
@@ -2198,7 +2203,8 @@
       "capture": "Capture",
       "network": "Network",
       "files": "Files",
-      "advanced": "Advanced"
+      "advanced": "Advanced",
+      "telemetry": "Game Telemetry"
     }
   }
 }

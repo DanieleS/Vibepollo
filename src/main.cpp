@@ -52,6 +52,7 @@
   #include "src/platform/windows/playnite_integration.h"
   #include "src/platform/windows/rtss_integration.h"
   #include "src/platform/windows/startup_encoder_probe_policy.h"
+  #include "src/platform/windows/scry_integration.h"
   #include "src/platform/windows/virtual_display.h"
   #include "src/platform/windows/virtual_display_cleanup.h"
 #elif defined(__linux__)
@@ -774,6 +775,10 @@ int main(int argc, char *argv[]) {
            rtsp_stream::session_count() != 0 ||
            webrtc_stream::has_active_or_pending_sessions();
   };
+  // Started unconditionally: the supervisor parks while the feature is off, so
+  // toggling it in the UI takes effect without a restart. It asks `proc` which
+  // app is running, hence the order.
+  auto scry_deinit_guard = platf::scry::start();
 #endif
 
 #ifdef _WIN32
