@@ -230,7 +230,11 @@ jobs:
       build_only: ${{ needs.release-candidate.outputs.should_release == 'true' }}
       build_tests: false
       release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
-      release_version: ${{ needs.release-candidate.outputs.release_version || '0.0.0' }}
+      # Not 0.0.0: build_version.cmake refuses that outright, because a package built from it
+      # sorts below every real release and installs over one as a downgrade. Passing it to a
+      # build that rejects it means no pull request can compile at all, so non-release builds
+      # get a version that says what they are and still sorts sanely.
+      release_version: ${{ needs.release-candidate.outputs.release_version || format('2.0.0-dev.{0}', github.run_number) }}
       release_tag: ${{ needs.release-candidate.outputs.tag_name }}
       release_artifact_retention_days: ${{ needs.release-candidate.outputs.should_release == 'true' && 14 || 1 }}
       symbol_product_name: Vibepollo
@@ -264,7 +268,8 @@ jobs:
       build_tests: ${{ needs.release-candidate.outputs.should_release != 'true' }}
       artifact_retention_days: ${{ needs.release-candidate.outputs.should_release == 'true' && 14 || 1 }}
       release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
-      release_version: ${{ needs.release-candidate.outputs.release_version || '0.0.0' }}
+      # Same reasoning as the Windows call above.
+      release_version: ${{ needs.release-candidate.outputs.release_version || format('2.0.0-dev.{0}', github.run_number) }}
 
   awaiting-signing:
     name: Awaiting manual signing
