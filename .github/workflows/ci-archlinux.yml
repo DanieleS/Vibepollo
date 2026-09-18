@@ -38,7 +38,12 @@ jobs:
     runs-on: ${{ github.repository == 'Nonary/Vibepollo' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && fromJSON('["self-hosted", "Linux", "X64", "linux-release"]') || fromJSON('["ubuntu-latest"]') }}
     container:
       image: archlinux/archlinux:base-devel
-      options: --cpus 8 --memory 16g
+      # Sized to the runner that actually gets picked. The self-hosted Linux runner has the
+      # cores for 8; a GitHub-hosted ubuntu-latest has four, and docker refuses to create the
+      # container at all when asked for more than the machine has ("range of CPUs is from 0.01
+      # to 4.00"). This fork never matches the self-hosted condition above, so the larger
+      # request would fail every single run.
+      options: ${{ github.repository == 'Nonary/Vibepollo' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && '--cpus 8 --memory 16g' || '--cpus 4 --memory 14g' }}
     steps:
 
       - name: Update keyring

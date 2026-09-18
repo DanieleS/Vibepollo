@@ -243,7 +243,12 @@ jobs:
       publish_symbols: false
       symbol_release_draft: true
       symbol_release_prefix: polo
-      require_truehdr_runtime: ${{ needs.release-candidate.outputs.should_release == 'true' }}
+      # Always, not just on a release: cmake/packaging/windows.cmake forces
+      # SUNSHINE_REQUIRE_TRUEHDR_RUNTIME on regardless of what is asked for here, so leaving
+      # this off skips the download step and then fails configure looking for the file it did
+      # not fetch. The runtime lives in a public repository and downloads with the default
+      # token, so requiring it costs a non-release build nothing.
+      require_truehdr_runtime: true
     secrets:
       symbol_token: ${{ secrets.SYMBOL_TOKEN }}
       truehdr_runtime_token: ${{ secrets.TRUEHDR_RUNTIME_TOKEN }}
