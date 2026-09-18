@@ -10,6 +10,7 @@
 #include "file_handler.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "platform/common.h"
 
 // standard includes
 #include <algorithm>
@@ -63,8 +64,17 @@ namespace igdb {
       return size * count;
     }
 
+    /// @brief Where the secret lives. Falls back to the default rather than giving up, so a
+    /// config that never had the key resolved is still usable instead of failing to save.
+    std::string secret_path() {
+      if (!config::igdb.secret_file.empty()) {
+        return config::igdb.secret_file;
+      }
+      return (platf::appdata() / "igdb_secret").string();
+    }
+
     std::string read_secret() {
-      const auto path = config::igdb.secret_file;
+      const auto path = secret_path();
       if (path.empty()) {
         return {};
       }
@@ -348,17 +358,18 @@ namespace igdb {
     return out;
   }
 
-  bool save_secret(const std::string &secret) {
-    const auto path = config::igdb.secret_file;
+  bool save_secret(const std::string &secret, std::string &error_out) {
+    const auto path = secret_path();
     if (path.empty()) {
+      error_out = "No location is configured for the IGDB secret";
       return false;
     }
-    if (!file_handler::make_directory(file_handler::get_parent_directory(path))) {
-      BOOST_LOG(error) << "IGDB: could not create the directory for the secret file";
-      return false;
-    }
+    // write_file creates the parent directory itself, so there is nothing to prepare here.
+    // The path is named in the error because it is the one piece of information that turns
+    // "could not save" into something actionable, and a path is not a secret.
     if (file_handler::write_file(path.c_str(), secret) != 0) {
-      BOOST_LOG(error) << "IGDB: could not write the secret file";
+      error_out = "Could not write the IGDB secret to " + path;
+      BOOST_LOG(error) << error_out;
       return false;
     }
     std::error_code permission_error;
@@ -366,7 +377,7 @@ namespace igdb {
                                  std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
                                  std::filesystem::perm_options::replace, permission_error);
     if (permission_error) {
-      BOOST_LOG(warning) << "IGDB: could not restrict permissions on the secret file: "
+      BOOST_LOG(warning) << "IGDB: could not restrict permissions on " << path << ": "
                          << permission_error.message();
     }
     auto &s = state();
@@ -378,8 +389,8 @@ namespace igdb {
     return true;
   }
 
-  bool clear_secret() {
-    const auto path = config::igdb.secret_file;
+  bool clear_secret(std::string &error_out) {
+    const auto path = secret_path();
     std::error_code remove_error;
     if (!path.empty()) {
       std::filesystem::remove(path, remove_error);
@@ -389,7 +400,11 @@ namespace igdb {
     s.access_token.clear();
     s.authenticated = false;
     s.last_error.clear();
-    return !remove_error;
+    if (remove_error) {
+      error_out = "Could not remove " + path + ": " + remove_error.message();
+      return false;
+    }
+    return true;
   }
 
   bool verify(std::string &error_out) {

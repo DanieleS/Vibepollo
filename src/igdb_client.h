@@ -36,10 +36,10 @@ namespace igdb {
    * handed to anything allowed to read settings. This writes it to its own owner-only file,
    * the same way host credentials are kept.
    */
-  bool save_secret(const std::string &secret);
+  bool save_secret(const std::string &secret, std::string &error_out);
 
   /// @brief Forget the stored secret. Leaves the client id alone; that one is not sensitive.
-  bool clear_secret();
+  bool clear_secret(std::string &error_out);
 
   /// @brief Exchange the stored credentials for a token now, to tell the user they work.
   bool verify(std::string &error_out);

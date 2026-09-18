@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/api/client';
-import { AppButton, InlineAlert, SettingRow, StatusBadge, UiIcon } from '@/components/ui';
+import { AppButton, InlineAlert, SettingRow, StatusBadge } from '@/components/ui';
 import { configBoolean } from '@/utils/settings';
 
 interface IgdbStatus {
@@ -30,7 +30,12 @@ const failed = ref(false);
 const message = ref('');
 const messageTone = ref<'success' | 'warning'>('success');
 
-const dirty = computed(() => JSON.stringify(values.value) !== JSON.stringify(original.value));
+// A typed secret is an unsaved change like any other. It travels to its own endpoint rather
+// than through the config, but that is where it is stored, not something to make the user
+// think about: one Save covers the whole credential.
+const dirty = computed(
+  () => JSON.stringify(values.value) !== JSON.stringify(original.value) || secret.value !== '',
+);
 const enabled = computed(() => values.value.igdb_enabled === true);
 const ready = computed(() => status.value?.configured === true);
 
@@ -83,6 +88,12 @@ async function save() {
   saving.value = true;
   const submitted = JSON.parse(JSON.stringify(values.value));
   try {
+    // The secret goes first: if it fails there is no point writing a client id that cannot be
+    // used, and the message says which half went wrong.
+    if (secret.value) {
+      await apiPost('/api/igdb/secret', { secret: secret.value });
+      secret.value = '';
+    }
     const result = await apiPatch<{ status?: boolean }>('/api/config', submitted);
     if (result.status === false) throw new Error('save-rejected');
     original.value = submitted;
@@ -92,21 +103,6 @@ async function save() {
     note(t('ui.settings.errors.save'), 'warning');
   } finally {
     saving.value = false;
-  }
-}
-
-async function saveSecret() {
-  busy.value = 'secret';
-  try {
-    await apiPost('/api/igdb/secret', { secret: secret.value });
-    // Cleared here as well as on the host: leaving it in a field invites a screenshot.
-    secret.value = '';
-    status.value = await apiGet<IgdbStatus>('/api/igdb/status');
-    note(t('ui.metadata.secretSaved'));
-  } catch {
-    note(t('ui.metadata.secretFailed'), 'warning');
-  } finally {
-    busy.value = '';
   }
 }
 
@@ -198,217 +194,215 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="integration-list" :aria-label="t('ui.metadata.title')">
-    <article class="integration-row" aria-labelledby="integration-metadata">
-      <span class="integration-row__icon" aria-hidden="true">
-        <UiIcon name="library" :size="20" />
+  <!-- Only the form lives here. The surrounding row, its icon and its heading belong to
+       IntegrationsView, whose styles for them are scoped to that file. -->
+  <div class="integration-settings metadata-settings">
+    <div class="metadata-settings__status">
+      <StatusBadge :label="statusLabel" :tone="statusTone" compact />
+      <span v-if="status?.resolving" class="metadata-settings__note">
+        {{ t('ui.metadata.resolving') }}
       </span>
-      <div class="integration-row__main">
-        <div class="integration-row__title">
-          <h2 id="integration-metadata">{{ t('ui.metadata.title') }}</h2>
-          <StatusBadge :label="statusLabel" :tone="statusTone" compact />
-        </div>
-        <p class="metadata-description">{{ t('ui.metadata.description') }}</p>
+    </div>
 
-        <InlineAlert v-if="failed" tone="warning" :title="t('ui.settings.errors.load')" />
-        <InlineAlert v-else-if="message" :tone="messageTone" :title="message" />
-        <InlineAlert
-          v-else-if="status?.last_error"
-          tone="warning"
-          :title="t('ui.metadata.status.failing')"
-        >
-          {{ status.last_error }}
-        </InlineAlert>
+    <InlineAlert v-if="failed" tone="warning" :title="t('ui.settings.errors.load')" />
+    <InlineAlert v-else-if="message" :tone="messageTone" :title="message" />
+    <InlineAlert
+      v-else-if="status?.last_error"
+      tone="warning"
+      :title="t('ui.metadata.status.failing')"
+    >
+      {{ status.last_error }}
+    </InlineAlert>
 
-        <form class="metadata-form" @submit.prevent="save">
-          <fieldset :disabled="loading || saving">
-            <div class="vs-settings-group">
-              <SettingRow :label="t('ui.metadata.fields.enabled')" control-id="igdb_enabled">
-                <input id="igdb_enabled" v-model="values.igdb_enabled" type="checkbox" />
-              </SettingRow>
-              <SettingRow
-                :label="t('ui.metadata.fields.clientId')"
-                :description="t('ui.metadata.fields.clientIdHint')"
-                control-id="igdb_client_id"
-              >
-                <input
-                  id="igdb_client_id"
-                  v-model="values.igdb_client_id"
-                  class="vs-input"
-                  type="text"
-                  autocomplete="off"
-                  spellcheck="false"
-                />
-              </SettingRow>
-              <SettingRow
-                v-if="enabled"
-                :label="t('ui.metadata.fields.autoResolve')"
-                :description="t('ui.metadata.fields.autoResolveHint')"
-                control-id="igdb_auto_resolve"
-              >
-                <input id="igdb_auto_resolve" v-model="values.igdb_auto_resolve" type="checkbox" />
-              </SettingRow>
-              <SettingRow
-                v-if="enabled"
-                :label="t('ui.metadata.fields.nameMatch')"
-                :description="t('ui.metadata.fields.nameMatchHint')"
-                control-id="igdb_allow_name_match"
-              >
-                <input
-                  id="igdb_allow_name_match"
-                  v-model="values.igdb_allow_name_match"
-                  type="checkbox"
-                />
-              </SettingRow>
-              <SettingRow
-                v-if="enabled"
-                :label="t('ui.metadata.fields.cacheTtl')"
-                :description="t('ui.metadata.fields.cacheTtlHint')"
-                control-id="igdb_cache_ttl_days"
-              >
-                <input
-                  id="igdb_cache_ttl_days"
-                  v-model.number="values.igdb_cache_ttl_days"
-                  class="vs-input"
-                  type="number"
-                  min="0"
-                  step="1"
-                />
-              </SettingRow>
-            </div>
-          </fieldset>
-          <div class="metadata-actions">
-            <button
-              class="button button--primary"
-              type="submit"
-              :disabled="loading || saving || !dirty"
-            >
-              {{ t(saving ? 'ui.settings.saving' : 'ui.settings.save') }}
-            </button>
-            <AppButton
-              :label="t('ui.settings.discard')"
-              variant="secondary"
-              :disabled="!dirty || saving"
-              @click="values = JSON.parse(JSON.stringify(original))"
+    <form @submit.prevent="save">
+      <fieldset :disabled="loading || saving">
+        <div class="vs-settings-group">
+          <SettingRow :label="t('ui.metadata.fields.enabled')" control-id="igdb_enabled">
+            <label class="vs-switch">
+              <input id="igdb_enabled" v-model="values.igdb_enabled" type="checkbox" />
+              <span class="vs-switch__track" aria-hidden="true" />
+            </label>
+          </SettingRow>
+
+          <SettingRow
+            :label="t('ui.metadata.fields.clientId')"
+            :description="t('ui.metadata.fields.clientIdHint')"
+            control-id="igdb_client_id"
+          >
+            <input
+              id="igdb_client_id"
+              v-model="values.igdb_client_id"
+              class="vs-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
             />
-          </div>
-        </form>
+          </SettingRow>
 
-        <div class="metadata-secret">
-          <label class="metadata-secret__label" for="igdb_secret">
-            {{ t('ui.metadata.fields.secret') }}
-          </label>
-          <p class="metadata-hint">
-            {{
+          <SettingRow
+            :label="t('ui.metadata.fields.secret')"
+            :description="
               status?.configured
                 ? t('ui.metadata.fields.secretStored')
                 : t('ui.metadata.fields.secretHint')
-            }}
-          </p>
-          <div class="metadata-secret__row">
+            "
+            control-id="igdb_secret"
+          >
+            <div class="metadata-settings__secret">
+              <input
+                id="igdb_secret"
+                v-model="secret"
+                class="vs-input"
+                type="password"
+                autocomplete="new-password"
+                spellcheck="false"
+                :placeholder="
+                  status?.configured
+                    ? t('ui.metadata.fields.secretReplace')
+                    : t('ui.metadata.fields.secretPlaceholder')
+                "
+              />
+              <AppButton
+                v-if="status?.configured"
+                :label="t('_common.remove')"
+                variant="tertiary"
+                :disabled="busy === 'secret'"
+                @click="clearSecret"
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            v-if="enabled"
+            :label="t('ui.metadata.fields.autoResolve')"
+            :description="t('ui.metadata.fields.autoResolveHint')"
+            control-id="igdb_auto_resolve"
+          >
+            <label class="vs-switch">
+              <input id="igdb_auto_resolve" v-model="values.igdb_auto_resolve" type="checkbox" />
+              <span class="vs-switch__track" aria-hidden="true" />
+            </label>
+          </SettingRow>
+
+          <SettingRow
+            v-if="enabled"
+            :label="t('ui.metadata.fields.nameMatch')"
+            :description="t('ui.metadata.fields.nameMatchHint')"
+            control-id="igdb_allow_name_match"
+          >
+            <label class="vs-switch">
+              <input
+                id="igdb_allow_name_match"
+                v-model="values.igdb_allow_name_match"
+                type="checkbox"
+              />
+              <span class="vs-switch__track" aria-hidden="true" />
+            </label>
+          </SettingRow>
+
+          <SettingRow
+            v-if="enabled"
+            :label="t('ui.metadata.fields.cacheTtl')"
+            :description="t('ui.metadata.fields.cacheTtlHint')"
+            control-id="igdb_cache_ttl_days"
+          >
             <input
-              id="igdb_secret"
-              v-model="secret"
+              id="igdb_cache_ttl_days"
+              v-model.number="values.igdb_cache_ttl_days"
               class="vs-input"
-              type="password"
-              autocomplete="new-password"
-              spellcheck="false"
-              :placeholder="t('ui.metadata.fields.secretPlaceholder')"
+              type="number"
+              min="0"
+              step="1"
             />
-            <AppButton
-              :label="t('_common.save')"
-              variant="secondary"
-              :disabled="!secret || busy === 'secret'"
-              @click="saveSecret"
-            />
-            <AppButton
-              :label="t('_common.remove')"
-              variant="tertiary"
-              :disabled="!status?.configured || busy === 'secret'"
-              @click="clearSecret"
-            />
-          </div>
-        </div>
+          </SettingRow>
 
-        <div class="metadata-actions">
-          <AppButton
-            :label="t('ui.metadata.actions.verify')"
-            variant="secondary"
-            :disabled="!ready || busy === 'verify'"
-            @click="verify"
-          />
-          <AppButton
-            :label="t('ui.metadata.actions.resolve')"
-            variant="secondary"
-            :disabled="!ready || !enabled || busy === 'resolve'"
-            @click="resolveLibrary(false)"
-          />
-          <AppButton
-            :label="t('ui.metadata.actions.refresh')"
-            variant="tertiary"
-            :disabled="!ready || !enabled || busy === 'resolve'"
-            @click="resolveLibrary(true)"
-          />
-          <AppButton
-            :label="t('ui.metadata.actions.clearCache')"
-            variant="tertiary"
-            :disabled="busy === 'cache'"
-            @click="clearCache"
-          />
         </div>
+      </fieldset>
 
-        <ul v-if="status?.resolving" class="integration-details">
-          <li>{{ t('ui.metadata.resolving') }}</li>
-        </ul>
+      <div class="metadata-settings__actions">
+        <AppButton
+          :label="t(saving ? 'ui.settings.saving' : 'ui.settings.save')"
+          variant="primary"
+          type="submit"
+          :disabled="loading || saving || !dirty"
+        />
+        <AppButton
+          :label="t('ui.settings.discard')"
+          variant="secondary"
+          :disabled="!dirty || saving"
+          @click="values = JSON.parse(JSON.stringify(original))"
+        />
+        <AppButton
+          :label="t('ui.metadata.actions.verify')"
+          variant="secondary"
+          :disabled="!ready || busy === 'verify'"
+          @click="verify"
+        />
+        <AppButton
+          :label="t('ui.metadata.actions.resolve')"
+          variant="secondary"
+          :disabled="!ready || !enabled || busy === 'resolve'"
+          @click="resolveLibrary(false)"
+        />
+        <AppButton
+          :label="t('ui.metadata.actions.refresh')"
+          variant="tertiary"
+          :disabled="!ready || !enabled || busy === 'resolve'"
+          @click="resolveLibrary(true)"
+        />
+        <AppButton
+          :label="t('ui.metadata.actions.clearCache')"
+          variant="tertiary"
+          :disabled="busy === 'cache'"
+          @click="clearCache"
+        />
       </div>
-    </article>
-  </section>
+    </form>
+  </div>
 </template>
 
 <style scoped>
-.metadata-description {
-  margin: 0;
+.metadata-settings {
+  display: grid;
+  gap: var(--vs-space-12);
+  padding-top: var(--vs-space-12);
+}
+
+.metadata-settings__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--vs-space-8);
+}
+
+.metadata-settings__note {
+  font-size: 0.875rem;
   color: var(--vs-color-text-muted);
 }
 
-.metadata-form fieldset {
+.metadata-settings fieldset {
   border: 0;
   padding: 0;
   margin: 0;
   min-width: 0;
 }
 
-.metadata-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--vs-space-8);
-  padding-top: var(--vs-space-12);
-}
-
-.metadata-secret {
-  padding-top: var(--vs-space-12);
-}
-
-.metadata-secret__label {
-  font-weight: 600;
-}
-
-.metadata-secret__row {
+.metadata-settings__secret {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--vs-space-8);
-  padding-top: var(--vs-space-8);
 }
 
-.metadata-secret__row input {
+.metadata-settings__secret input {
   flex: 1;
-  min-width: 14rem;
+  min-width: 12rem;
 }
 
-.metadata-hint {
-  margin: 0;
-  font-size: 0.875rem;
-  color: var(--vs-color-text-muted);
+.metadata-settings__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--vs-space-8);
+  padding-top: var(--vs-space-12);
 }
 </style>

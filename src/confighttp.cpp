@@ -4643,10 +4643,13 @@ namespace confighttp {
       const auto input = nlohmann::json::parse(request->content.string());
       std::string secret = input.value("secret", std::string {});
       nlohmann::json output;
-      const bool ok = secret.empty() ? igdb::clear_secret() : igdb::save_secret(secret);
+      std::string error;
+      const bool ok = secret.empty() ? igdb::clear_secret(error) : igdb::save_secret(secret, error);
       std::fill(secret.begin(), secret.end(), '\0');
       if (!ok) {
-        bad_request(response, request, "Could not store the IGDB secret");
+        // The detail matters here: every way this fails is about a path or a permission, and
+        // "could not store" on its own leaves nothing to act on.
+        bad_request(response, request, error.empty() ? "Could not store the IGDB secret" : error);
         return;
       }
       output["status"] = true;

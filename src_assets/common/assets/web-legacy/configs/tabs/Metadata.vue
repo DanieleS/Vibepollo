@@ -118,36 +118,38 @@ onMounted(() => {
       />
 
       <div class="mb-3">
-        <label class="form-label" for="igdb-secret">{{ $t('metadata.secret_label') }}</label>
-        <div class="flex flex-wrap items-center gap-2">
-          <input
-            id="igdb-secret"
-            v-model="secret"
-            class="form-control flex-1"
-            type="password"
-            autocomplete="new-password"
-            spellcheck="false"
-          />
-          <button
-            class="btn btn-secondary"
-            type="button"
-            :disabled="!secret || busy === 'secret'"
-            @click="saveSecret(secret)"
-          >
-            {{ $t('_common.save') }}
-          </button>
-          <button
-            class="btn btn-link"
-            type="button"
-            :disabled="!configured || busy === 'secret'"
-            @click="saveSecret('')"
-          >
-            {{ $t('_common.remove') }}
-          </button>
-        </div>
-        <div class="form-text">
+        <n-form-item :label="$t('metadata.secret_label')">
+          <div class="flex flex-wrap items-center gap-2 w-full">
+            <n-input
+              id="igdb-secret"
+              v-model:value="secret"
+              type="password"
+              show-password-on="click"
+              class="flex-1 min-w-[12rem]"
+              :placeholder="$t('metadata.secret_label')"
+            />
+            <n-button
+              size="small"
+              type="primary"
+              strong
+              :disabled="!secret || busy === 'secret'"
+              @click="saveSecret(secret)"
+            >
+              {{ $t('_common.save') }}
+            </n-button>
+            <n-button
+              size="small"
+              secondary
+              :disabled="!configured || busy === 'secret'"
+              @click="saveSecret('')"
+            >
+              {{ $t('_common.remove') }}
+            </n-button>
+          </div>
+        </n-form-item>
+        <n-text depth="3" class="text-xs">
           {{ configured ? $t('metadata.secret_stored') : $t('metadata.secret_desc') }}
-        </div>
+        </n-text>
       </div>
 
       <ConfigFieldRenderer
@@ -167,22 +169,23 @@ onMounted(() => {
       />
 
       <div class="flex flex-wrap items-center gap-2">
-        <button
-          class="btn btn-secondary"
-          type="button"
+        <n-button
+          size="small"
+          type="primary"
+          strong
           :disabled="!configured || busy === 'verify'"
           @click="verify"
         >
           {{ $t('metadata.verify') }}
-        </button>
-        <button
-          class="btn btn-secondary"
-          type="button"
+        </n-button>
+        <n-button
+          size="small"
+          secondary
           :disabled="!configured || busy === 'resolve'"
           @click="resolveLibrary"
         >
           {{ $t('metadata.resolve') }}
-        </button>
+        </n-button>
       </div>
 
       <div v-if="message" class="mt-3 text-sm" :class="failed ? 'text-danger' : 'opacity-70'">

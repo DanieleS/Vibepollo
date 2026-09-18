@@ -2190,8 +2190,23 @@ function libraryRequest(
     </section>
 
     <!-- Not a locally installed integration like the rows above: it is where game
-         descriptions come from, whichever launcher owns the library. -->
-    <MetadataSettings />
+         descriptions come from, whichever launcher owns the library. The row chrome lives
+         here rather than in the component, because the classes it needs are scoped to this
+         file and would style nothing from inside a child. -->
+    <section class="integration-list" :aria-label="t('ui.metadata.title')">
+      <article class="integration-row" aria-labelledby="integration-metadata">
+        <span class="integration-row__icon" aria-hidden="true">
+          <UiIcon name="library" :size="20" />
+        </span>
+        <div class="integration-row__main">
+          <div class="integration-row__title">
+            <h2 id="integration-metadata">{{ t('ui.metadata.title') }}</h2>
+          </div>
+          <p>{{ t('ui.metadata.description') }}</p>
+          <MetadataSettings />
+        </div>
+      </article>
+    </section>
 
     <ConfirmDialog
       :open="confirmOpen"

@@ -989,6 +989,7 @@
         "secretHint": "Kept in its own file rather than in the config, so reading the settings never hands it out. It is never shown again once stored.",
         "secretStored": "A secret is stored. Entering a new one replaces it.",
         "secretPlaceholder": "Paste the client secret",
+        "secretReplace": "Stored. Paste a new one to replace it",
         "autoResolve": "Describe new games automatically",
         "autoResolveHint": "Look up a game shortly after it appears in the library, instead of waiting to be asked.",
         "nameMatch": "Match by title when there is no store ID",
