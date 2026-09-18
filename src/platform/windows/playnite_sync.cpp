@@ -64,16 +64,16 @@ namespace platf::playnite::sync {
         if (convert_playnite_image_to_png(game.box_art_path, destination)) policy::apply_box_art_path(app, destination.generic_string());
       }
     } catch (...) {}
+    // The background is converted here but written through the shared metadata container
+    // below, so a node never ends up with an image the container did not put there.
+    std::string background;
     try {
-      bool stored = false;
       if (!game.background_path.empty()) {
         const auto destination = covers_root / ("playnite_bg_" + game.id + ".png");
         if (convert_playnite_image_to_png(game.background_path, destination)) {
-          app["playnite-background"] = destination.generic_string();
-          stored = true;
+          background = destination.generic_string();
         }
       }
-      if (!stored && app.contains("playnite-background")) app.erase("playnite-background");
     } catch (...) {}
     try {
       const auto destination = covers_root / ("playnite_icon_" + game.id + ".png");
@@ -90,45 +90,49 @@ namespace platf::playnite::sync {
         policy::apply_icon_path(app, {});
       }
     } catch (...) {}
-    // Metadata passthrough: mirror Playnite-enriched fields into the app node so they can be
-    // served to clients. Absent values are erased to keep apps.json tidy and idempotent.
+    // Store identity. Playnite's own game id is a local GUID, so the owning plugin's id for
+    // the game is the only thing that can be looked up in an external database later.
     try {
-      const auto set_or_erase_str = [&app](const char *key, const std::string &value) {
+      const auto set_or_erase = [&app](const char *key, const std::string &value) {
         if (!value.empty()) {
           app[key] = value;
-        } else if (app.contains(key)) {
+        } else {
           app.erase(key);
         }
       };
-      const auto set_or_erase_list = [&app](const char *key, const std::vector<std::string> &values) {
-        if (!values.empty()) {
-          app[key] = values;
-        } else if (app.contains(key)) {
-          app.erase(key);
+      set_or_erase("playnite-source", game.plugin_name);
+      set_or_erase("playnite-source-id", game.store_id);
+    } catch (...) {}
+    // Descriptive metadata. Playnite writes it unless something else already claimed the app:
+    // a game the user corrected by hand, or one the IGDB resolver described, must survive the
+    // next library sync or the correction would last until the following one.
+    try {
+      const auto existing = metadata::read_from_app(app);
+      const bool claimed_elsewhere = existing.locked || existing.source == "igdb";
+      metadata::game_metadata_t meta;
+      if (claimed_elsewhere) {
+        meta = existing;
+        if (meta.background_image_path.empty()) {
+          meta.background_image_path = background;
         }
-      };
-      const auto set_or_erase_score = [&app](const char *key, int score) {
-        if (score >= 0) {
-          app[key] = score;
-        } else if (app.contains(key)) {
-          app.erase(key);
-        }
-      };
-      set_or_erase_str("playnite-description", game.description);
-      set_or_erase_list("playnite-genres", game.genres);
-      set_or_erase_list("playnite-developers", game.developers);
-      set_or_erase_list("playnite-publishers", game.publishers);
-      set_or_erase_str("playnite-release-date", game.release_date);
-      set_or_erase_score("playnite-community-score", game.community_score);
-      set_or_erase_score("playnite-critic-score", game.critic_score);
-      set_or_erase_str("playnite-last-played", game.last_played);
-      // Zero playtime is the same as none for a client ordering a library, so it is erased
-      // rather than written, keeping apps.json free of a key on every never-played game.
-      if (game.playtime_minutes > 0) {
-        app["playnite-playtime-minutes"] = game.playtime_minutes;
-      } else if (app.contains("playnite-playtime-minutes")) {
-        app.erase("playnite-playtime-minutes");
+      } else {
+        meta.description = game.description;
+        meta.genres = game.genres;
+        meta.developers = game.developers;
+        meta.publishers = game.publishers;
+        meta.release_date = game.release_date;
+        meta.community_score = game.community_score;
+        meta.critic_score = game.critic_score;
+        meta.background_image_path = background;
+        meta.igdb_id = existing.igdb_id;
+        meta.source = "playnite";
       }
+      // Playtime and last-played are Playnite's either way: it is the thing that actually
+      // watched the game run, which no database and no manual edit can stand in for.
+      meta.last_played = game.last_played;
+      meta.playtime_minutes = game.playtime_minutes;
+      meta.present = metadata::has_any_value(meta);
+      metadata::write_to_app(app, meta);
     } catch (...) {}
   }
 

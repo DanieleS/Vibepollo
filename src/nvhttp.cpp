@@ -5762,7 +5762,7 @@ namespace nvhttp {
   }
 
   /**
-   * @brief Serve Playnite-enriched per-app metadata as JSON, keyed by app UUID.
+   * @brief Serve per-app descriptive metadata as JSON, keyed by app UUID.
    *
    * This is additive to the Moonlight protocol: only apps that carry metadata (Playnite games)
    * are listed, and clients that don't know the endpoint simply never call it. The applist
@@ -5789,7 +5789,7 @@ namespace nvhttp {
     nlohmann::json apps = nlohmann::json::array();
 
     for (const auto &app : proc::proc.get_apps()) {
-      const auto &meta = app.playnite_metadata;
+      const auto &meta = app.metadata;
       if (!meta.present) {
         continue;
       }
@@ -5830,6 +5830,14 @@ namespace nvhttp {
       if (!meta.background_image_path.empty()) {
         // The image itself is fetched separately via /appbackground?appid=<id>.
         node["has_background"] = true;
+      }
+      if (!meta.source.empty()) {
+        // Which database the description and scores came from. A client that wants to say
+        // where a summary is from, or to hide one it does not trust, needs to be told.
+        node["source"] = meta.source;
+      }
+      if (!meta.igdb_id.empty()) {
+        node["igdb_id"] = meta.igdb_id;
       }
       apps.push_back(std::move(node));
     }
@@ -5974,7 +5982,7 @@ namespace nvhttp {
     const auto appid = get_arg(args, "appid", "0");
     const auto appuuid = get_arg(args, "appuuid", "");
     auto app_ctx = proc::proc.resolve_app(appid, appuuid);
-    std::string bg = app_ctx ? app_ctx->playnite_metadata.background_image_path : std::string();
+    std::string bg = app_ctx ? app_ctx->metadata.background_image_path : std::string();
 
     fg.disable();
 

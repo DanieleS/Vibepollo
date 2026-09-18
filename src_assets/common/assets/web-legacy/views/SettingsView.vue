@@ -226,6 +226,7 @@ import Playnite from '@/configs/tabs/Playnite.vue';
 import AudioVideo from '@/configs/tabs/AudioVideo.vue';
 import Capture from '@/configs/tabs/Capture.vue';
 import RealtimeStats from '@/configs/tabs/RealtimeStats.vue';
+import Metadata from '@/configs/tabs/Metadata.vue';
 import Telemetry from '@/configs/tabs/Telemetry.vue';
 import { useConfigStore } from '@/stores/config';
 import { useAuthStore } from '@/stores/auth';
@@ -283,6 +284,7 @@ const tabs = [
   { id: 'advanced', name: 'settings.tabs.advanced', component: markRaw(Advanced) },
   { id: 'stats', name: 'navbar.stats', component: markRaw(RealtimeStats) },
   { id: 'playnite', name: 'navbar.playnite', component: markRaw(Playnite) },
+  { id: 'metadata', name: 'settings.tabs.metadata', component: markRaw(Metadata) },
   { id: 'telemetry', name: 'settings.tabs.telemetry', component: markRaw(Telemetry) },
 ];
 

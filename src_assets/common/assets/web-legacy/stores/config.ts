@@ -277,6 +277,17 @@ const defaultGroups = [
     },
   },
   {
+    id: 'metadata',
+    name: 'Game Metadata',
+    options: {
+      igdb_enabled: false,
+      igdb_client_id: '',
+      igdb_auto_resolve: true,
+      igdb_allow_name_match: true,
+      igdb_cache_ttl_days: 30,
+    },
+  },
+  {
     id: 'nv',
     name: 'NVIDIA NVENC Encoder',
     options: {

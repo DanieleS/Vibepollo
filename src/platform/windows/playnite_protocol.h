@@ -57,6 +57,7 @@ namespace platf::playnite {
     std::vector<std::string> categories;  ///< Category names attached to the game.
     std::string plugin_id;  ///< Library plugin identifier that owns the game.
     std::string plugin_name;  ///< Library plugin display name (best effort).
+    std::string store_id;  ///< Owning plugin's own id for the game, e.g. the Steam appid (gameId).
     uint64_t playtime_minutes = 0;  ///< Total playtime in minutes (playtimeMinutes).
     std::string last_played;  ///< Last played timestamp (ISO8601) (lastPlayed).
     std::string box_art_path;  ///< Path/URL to cover art (boxArtPath).

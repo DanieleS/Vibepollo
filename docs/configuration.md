@@ -3327,6 +3327,197 @@ granted the **Receive game telemetry** permission. Windows only.
     </tr>
 </table>
 
+## Game Metadata
+
+Descriptions, genres, release dates, scores and cover art shown by clients. These can come from
+whichever launcher owns a game — Playnite reports what its own metadata add-ons found — but that
+leaves every library uneven: a game outside any store has nothing at all, and two games from two
+stores are described in two different ways.
+
+Pointing Vibepollo at [IGDB](https://www.igdb.com/) instead describes every game from one source.
+IGDB belongs to Twitch and uses Twitch credentials, so it needs a free application registered at
+[dev.twitch.tv](https://dev.twitch.tv/console/apps). Both halves of that credential are yours: the
+client ID is kept in this configuration file, and the client secret in a file of its own, because
+reading the settings over the API returns this file as it stands.
+
+A game is matched on its store ID where it has one — Steam, GOG, Epic, the Microsoft Store and
+itch.io are all indexed by IGDB — which is exact and cannot pick the wrong game. Ubisoft Connect,
+the EA app and Battle.net have no IGDB IDs, so their games fall back to a title search that only
+accepts an exact match. Anything still unmatched can be linked by hand from the app's page, and
+anything edited by hand is left alone by every later automatic pass.
+
+Off by default: looking a library up means telling a third party what is in it.
+
+### igdb_enabled
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Fetch game metadata from IGDB.
+            <br><br>
+            <b>Notes</b>:
+            <ul>
+                <li>Requires @code{igdb_client_id} and a client secret stored in @code{igdb_secret_file}.</li>
+                <li>Metadata a user has edited by hand is never overwritten, whether this is on or off.</li>
+                <li>Playtime and last-played are not taken from IGDB. Those come from whatever actually launches the game, which is the only thing that can know them.</li>
+            </ul>
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}disabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_enabled = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_client_id
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Client ID of a Twitch application, from <a href="https://dev.twitch.tv/console/apps">dev.twitch.tv</a>.
+            <br><br>
+            This half of the credential is not sensitive and is kept here. The paired secret is not; see @code{igdb_secret_file}.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_client_id = abcdefghijklmnopqrstuvwxyz0123
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_secret_file
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            File holding the Twitch client secret: one line, nothing else.
+            <br><br>
+            The secret is deliberately not a configuration option. Reading the configuration over the API returns this file as it stands, so a secret in it would be handed to anything allowed to read settings. Setting it through the web UI writes this file with owner-only permissions and never reads it back.
+            <br><br>
+            If empty, defaults to an @code{igdb_secret} file alongside the other per-machine state.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_secret_file = "C:\\ProgramData\\Vibepollo\\igdb_secret"
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_auto_resolve
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Look up games shortly after they appear in the library, rather than waiting to be asked.
+            <br><br>
+            Games that already carry IGDB metadata, and games edited by hand, are skipped and cost no request.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}enabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_auto_resolve = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_allow_name_match
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Fall back to searching by title for games with no store ID that IGDB indexes.
+            <br><br>
+            A title has to match exactly once case, punctuation and edition suffixes are set aside. A near miss is left undescribed rather than guessed at, because the wrong summary and the wrong cover are worse than none. Turning this off restricts matching to store IDs only.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}enabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_allow_name_match = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_cache_dir
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Directory holding fetched IGDB records and downloaded art.
+            <br><br>
+            A cache hit costs no request, which is what keeps a library scan inside IGDB's limit of four requests a second on every run after the first.
+            <br><br>
+            If empty, defaults to an @code{igdb-cache} directory alongside the other per-machine state.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_cache_dir = "C:\\ProgramData\\Vibepollo\\igdb-cache"
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_cache_ttl_days
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            How long a cached record stays usable before it is fetched again, in days.
+            <br><br>
+            Summaries, genres and ratings drift slowly, so this can be generous. Zero disables the cache entirely, which means every lookup is a request.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}30@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_cache_ttl_days = 30
+            @endcode</td>
+    </tr>
+</table>
+
 ## NVIDIA NVENC Encoder
 
 The options in this section are shared by both NVENC implementations. On Linux, @code{nvenc} talks

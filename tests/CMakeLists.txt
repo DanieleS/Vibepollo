@@ -385,6 +385,13 @@ sunshine_register_component(NAME test_component_config_parse TEST_SOURCE unit/te
 sunshine_register_component(NAME test_component_config_playnite TEST_SOURCE test_config_playnite.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/config_playnite_parse.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_game_metadata TEST_SOURCE unit/test_game_metadata.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/game_metadata.cpp"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_igdb_policy TEST_SOURCE unit/test_igdb_policy.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/igdb_policy.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/game_metadata.cpp"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json)
 sunshine_register_component(NAME test_component_steam_integration TEST_SOURCE test_steam_integration.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/steam_integration.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/provider_scan_protocol.cpp"

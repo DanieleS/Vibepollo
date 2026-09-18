@@ -960,6 +960,92 @@
         "truncated": "Rendering the newest {limit} matches; exports include all filtered lines in the loaded window."
       }
     },
+    "metadata": {
+      "title": "Game metadata",
+      "description": "Fetch descriptions, genres, release dates and cover art from IGDB, so a game looks the same to a client whichever launcher it came from. Games are matched on their store id where there is one, and on their exact title otherwise.",
+      "saved": "Metadata settings saved.",
+      "secretSaved": "Client secret stored.",
+      "secretCleared": "Client secret removed.",
+      "secretFailed": "The client secret could not be stored.",
+      "verifyOk": "IGDB accepted these credentials.",
+      "verifyFailed": "IGDB rejected these credentials.",
+      "resolveDone": "Library pass finished.",
+      "resolveStarted": "Started. This runs in the background; large libraries take a few minutes.",
+      "resolving": "Still working through the library.",
+      "resolveFailed": "The library pass could not run.",
+      "cacheCleared": "Removed {count} cached files.",
+      "cacheFailed": "The cache could not be cleared.",
+      "status": {
+        "notConfigured": "Not configured",
+        "configured": "Credentials stored",
+        "connected": "Connected",
+        "failing": "Last request failed"
+      },
+      "fields": {
+        "enabled": "Use IGDB for metadata",
+        "clientId": "Twitch client ID",
+        "clientIdHint": "From a Twitch application registered at dev.twitch.tv. IGDB is Twitch's, and it uses the same credentials.",
+        "secret": "Twitch client secret",
+        "secretHint": "Kept in its own file rather than in the config, so reading the settings never hands it out. It is never shown again once stored.",
+        "secretStored": "A secret is stored. Entering a new one replaces it.",
+        "secretPlaceholder": "Paste the client secret",
+        "autoResolve": "Describe new games automatically",
+        "autoResolveHint": "Look up a game shortly after it appears in the library, instead of waiting to be asked.",
+        "nameMatch": "Match by title when there is no store ID",
+        "nameMatchHint": "Ubisoft Connect, the EA app and Battle.net have no IGDB IDs, so their games can only be found by name. A title has to match exactly; a near miss is left undescribed.",
+        "cacheTtl": "Keep fetched records for (days)",
+        "cacheTtlHint": "A cached record costs no request, which is what keeps a large library inside IGDB's rate limit. Zero disables the cache."
+      },
+      "actions": {
+        "verify": "Test credentials",
+        "resolve": "Describe missing games",
+        "refresh": "Re-fetch everything",
+        "clearCache": "Clear cache"
+      }
+    },
+    "appMetadata": {
+      "title": "Metadata",
+      "description": "What clients show about this game. Saved on its own, separately from the rest of this page.",
+      "locked": "Edited by hand",
+      "matchedOn": "Can be looked up by:",
+      "noStoreId": "This app carries no store ID, so it can only be matched by title or picked by hand.",
+      "saved": "Metadata saved. The library will not overwrite it.",
+      "unlocked": "Handed back to the library. The next sync may replace these fields.",
+      "matched": "Matched and updated from IGDB.",
+      "noMatch": "IGDB has nothing that matches this game. Pick a record by hand.",
+      "noResults": "No results for that search.",
+      "linked": "Linked to {name}.",
+      "unlinked": "Unlinked from IGDB.",
+      "searchPlaceholder": "Search IGDB by title",
+      "source": {
+        "none": "No metadata",
+        "igdb": "From IGDB",
+        "playnite": "From Playnite",
+        "manual": "Edited by hand"
+      },
+      "fields": {
+        "description": "Description",
+        "genres": "Genres (comma separated)",
+        "developers": "Developers (comma separated)",
+        "publishers": "Publishers (comma separated)",
+        "releaseDate": "Release date"
+      },
+      "actions": {
+        "save": "Save metadata",
+        "lookup": "Look up on IGDB",
+        "choose": "Pick a different game",
+        "unlink": "Unlink",
+        "unlock": "Let the library manage this",
+        "reload": "Reload"
+      },
+      "errors": {
+        "load": "Could not read this app's metadata.",
+        "save": "Could not save this app's metadata.",
+        "resolve": "The IGDB lookup failed.",
+        "search": "The IGDB search failed.",
+        "link": "Could not link this app to that record."
+      }
+    },
     "maintenance": {
       "actionCompleted": "Maintenance action completed",
       "actionFailed": "Action failed",

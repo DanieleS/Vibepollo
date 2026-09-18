@@ -28,6 +28,7 @@
 #include "logging.h"
 #include "main.h"
 #include "nvhttp.h"
+#include "metadata_resolver.h"
 #include "process.h"
 #include "rtsp.h"
 #include "system_tray.h"
@@ -780,6 +781,14 @@ int main(int argc, char *argv[]) {
   // app is running, hence the order.
   auto scry_deinit_guard = platf::scry::start();
 #endif
+
+  // Describe whatever the library already holds. Later changes come through the apps file
+  // write path; this covers the first run after the credentials are entered, when nothing has
+  // written apps.json since. Both the schedule and the pass are no-ops unless IGDB is on.
+  metadata::resolver::schedule_background_resolve();
+  auto metadata_resolver_guard = util::fail_guard([]() {
+    metadata::resolver::stop_background_resolve();
+  });
 
 #ifdef _WIN32
   bool startup_probe_succeeded = false;

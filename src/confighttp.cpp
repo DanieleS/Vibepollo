@@ -50,6 +50,10 @@
 #include "confighttp.h"
 #include "crypto.h"
 #include "file_handler.h"
+#include "game_metadata.h"
+#include "igdb_client.h"
+#include "igdb_policy.h"
+#include "metadata_resolver.h"
 #include "globals.h"
 #include "http_auth.h"
 #include "httpcommon.h"
@@ -244,6 +248,10 @@ namespace confighttp {
       }
       file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
       proc::refresh(config::stream.file_apps, false);
+      // Every path that changes the library ends up here, which makes this the one place a
+      // newly added game can be noticed without each sync remembering to ask. The call is
+      // debounced and does nothing unless IGDB is configured to resolve on its own.
+      metadata::resolver::schedule_background_resolve();
       return true;
     } catch (const std::exception &e) {
       BOOST_LOG(warning) << "refresh_client_apps_cache: failed: " << e.what();
@@ -4522,6 +4530,385 @@ namespace confighttp {
     }
   }
 
+  namespace {
+    /// @brief Locate an app node by uuid, or by the numeric id older clients still use.
+    nlohmann::json *find_app_node(nlohmann::json &file_tree, const std::string &key) {
+      if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+        return nullptr;
+      }
+      for (auto &app : file_tree["apps"]) {
+        if (!app.is_object()) {
+          continue;
+        }
+        if (app.contains("uuid") && app["uuid"].is_string() && app["uuid"].get<std::string>() == key) {
+          return &app;
+        }
+        if (app.contains("id") && app["id"].is_string() && app["id"].get<std::string>() == key) {
+          return &app;
+        }
+      }
+      return nullptr;
+    }
+
+    nlohmann::json igdb_candidate_json(const igdb::policy::game_t &game) {
+      nlohmann::json node = nlohmann::json::object();
+      node["igdb_id"] = game.igdb_id;
+      node["name"] = game.name;
+      node["summary"] = game.summary;
+      node["release_date"] = igdb::policy::release_date_from_timestamp(game.first_release_date);
+      node["genres"] = game.genres;
+      node["developers"] = game.developers;
+      node["publishers"] = game.publishers;
+      if (game.community_score >= 0) {
+        node["community_score"] = game.community_score;
+      }
+      if (game.critic_score >= 0) {
+        node["critic_score"] = game.critic_score;
+      }
+      // A thumbnail the picker can show directly. The full-size copy is only downloaded once
+      // the user actually picks the record.
+      node["cover_url"] = igdb::policy::image_url(game.cover_image_id, "t_cover_big");
+      return node;
+    }
+
+    nlohmann::json app_metadata_json(const nlohmann::json &app) {
+      const auto meta = metadata::read_from_app(app);
+      nlohmann::json node = nlohmann::json::object();
+      node["present"] = meta.present;
+      node["description"] = meta.description;
+      node["genres"] = meta.genres;
+      node["developers"] = meta.developers;
+      node["publishers"] = meta.publishers;
+      node["release_date"] = meta.release_date;
+      node["community_score"] = meta.community_score;
+      node["critic_score"] = meta.critic_score;
+      node["last_played"] = meta.last_played;
+      node["playtime_minutes"] = meta.playtime_minutes;
+      node["has_background"] = !meta.background_image_path.empty();
+      node["source"] = meta.source;
+      node["igdb_id"] = meta.igdb_id;
+      node["locked"] = meta.locked;
+      // What the resolver would have to work with. Shown in the editor so a game that cannot
+      // be matched automatically says why instead of just failing quietly.
+      nlohmann::json ids = nlohmann::json::array();
+      for (const auto &id : metadata::store_ids_of(app)) {
+        ids.push_back({{"store", id.store}, {"id", id.id}});
+      }
+      node["store_ids"] = std::move(ids);
+      return node;
+    }
+  }  // namespace
+
+  /**
+   * @brief Report whether IGDB lookups are configured, and how the last one went.
+   * @api_examples{/api/igdb/status| GET| null}
+   */
+  void getIgdbStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    const auto state = igdb::status();
+    nlohmann::json output;
+    output["status"] = true;
+    output["enabled"] = state.enabled;
+    output["configured"] = state.configured;
+    output["authenticated"] = state.authenticated;
+    output["last_error"] = state.last_error;
+    // The client id is not a secret and the settings page has to show which one is in use.
+    // The secret is never returned, only whether one is stored.
+    output["client_id"] = config::igdb.client_id;
+    output["auto_resolve"] = config::igdb.auto_resolve;
+    output["allow_name_match"] = config::igdb.allow_name_match;
+    output["resolving"] = metadata::resolver::background_pass_running();
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Store or clear the IGDB client secret.
+   *
+   * The secret goes to its own file rather than into sunshine.conf, because GET /api/config
+   * returns that file as it stands and would hand the secret to anything allowed to read
+   * settings.
+   * @api_examples{/api/igdb/secret| POST| {"secret":"abc123"}}
+   */
+  void postIgdbSecret(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      const auto input = nlohmann::json::parse(request->content.string());
+      std::string secret = input.value("secret", std::string {});
+      nlohmann::json output;
+      const bool ok = secret.empty() ? igdb::clear_secret() : igdb::save_secret(secret);
+      std::fill(secret.begin(), secret.end(), '\0');
+      if (!ok) {
+        bad_request(response, request, "Could not store the IGDB secret");
+        return;
+      }
+      output["status"] = true;
+      send_response(response, output);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "postIgdbSecret: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Exchange the stored credentials for a token, to tell the user whether they work.
+   * @api_examples{/api/igdb/verify| POST| null}
+   */
+  void postIgdbVerify(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    std::string error;
+    const bool ok = igdb::verify(error);
+    nlohmann::json output;
+    output["status"] = ok;
+    if (!ok) {
+      output["error"] = error;
+    }
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Search IGDB by name, for the manual picker.
+   * @api_examples{/api/igdb/search?q=Hades| GET| null}
+   */
+  void getIgdbSearch(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    const auto query = request->parse_query_string();
+    std::string term;
+    if (auto it = query.find("q"); it != query.end()) {
+      term = it->second;
+    }
+    int limit = 20;
+    if (auto it = query.find("limit"); it != query.end()) {
+      try {
+        limit = std::stoi(it->second);
+      } catch (...) {
+        limit = 20;
+      }
+    }
+    if (trim_copy(term).empty()) {
+      bad_request(response, request, "Missing search term");
+      return;
+    }
+
+    std::string error;
+    const auto hits = igdb::search(term, limit, error);
+    nlohmann::json output;
+    output["status"] = error.empty();
+    if (!error.empty()) {
+      output["error"] = error;
+    }
+    nlohmann::json results = nlohmann::json::array();
+    for (const auto &hit : hits) {
+      results.push_back(igdb_candidate_json(hit));
+    }
+    output["results"] = std::move(results);
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Resolve metadata for one app, or for the whole library.
+   *
+   * Without a uuid this walks every app, which is the first-setup case; with one it is the
+   * "try again for this game" button in the editor.
+   * @api_examples{/api/igdb/resolve| POST| {"uuid":"aaaa-bbbb","force":true}}
+   */
+  void postIgdbResolve(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      nlohmann::json input = nlohmann::json::object();
+      const auto body = request->content.string();
+      if (!body.empty()) {
+        input = nlohmann::json::parse(body);
+      }
+      const auto uuid = input.value("uuid", std::string {});
+      const bool force = input.value("force", false);
+
+      std::lock_guard apps_lock {apps_file_mutex()};
+      nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+
+      nlohmann::json output;
+      if (uuid.empty()) {
+        // Queued rather than run here: a few hundred games take minutes at IGDB's four
+        // requests a second, which is far longer than this request should stay open. The
+        // library reloads on its own once the pass writes.
+        metadata::resolver::request_library_pass(force);
+        output["status"] = true;
+        output["started"] = true;
+        send_response(response, output);
+        return;
+      }
+
+      auto *app = find_app_node(file_tree, uuid);
+      if (!app) {
+        not_found(response, request);
+        return;
+      }
+      const auto outcome = metadata::resolver::resolve_app(*app, force);
+      if (outcome.changed) {
+        confighttp::refresh_client_apps_cache(file_tree, false);
+      }
+      output["status"] = outcome.error.empty();
+      output["changed"] = outcome.changed;
+      output["igdb_id"] = outcome.igdb_id;
+      output["skipped_locked"] = outcome.skipped_locked;
+      if (!outcome.error.empty()) {
+        output["error"] = outcome.error;
+      }
+      output["metadata"] = app_metadata_json(*app);
+      send_response(response, output);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "postIgdbResolve: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Drop every cached IGDB record and downloaded image.
+   * @api_examples{/api/igdb/cache| DELETE| null}
+   */
+  void deleteIgdbCache(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["removed"] = igdb::clear_cache();
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Read one app's metadata, including what the resolver has to match on.
+   * @api_examples{/api/apps/@c uuid/metadata| GET| null}
+   */
+  void getAppMetadata(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      const auto uuid = request->path_match[1].str();
+      std::lock_guard apps_lock {apps_file_mutex()};
+      nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+      auto *app = find_app_node(file_tree, uuid);
+      if (!app) {
+        not_found(response, request);
+        return;
+      }
+      nlohmann::json output = app_metadata_json(*app);
+      output["status"] = true;
+      send_response(response, output);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "getAppMetadata: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Edit one app's metadata by hand, or link it to an IGDB record.
+   *
+   * A body carrying `igdb_id` re-fetches that record and adopts it; any other field is taken
+   * as the user's own wording. Either way the app is marked as edited, so the next library
+   * sync leaves the descriptive fields alone -- without that, a correction would last only
+   * until Playnite next reported the game.
+   * @api_examples{/api/apps/@c uuid/metadata| POST| {"igdb_id":"1020"}}
+   */
+  void postAppMetadata(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      const auto uuid = request->path_match[1].str();
+      const auto input = nlohmann::json::parse(request->content.string());
+
+      std::lock_guard apps_lock {apps_file_mutex()};
+      nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+      auto *app = find_app_node(file_tree, uuid);
+      if (!app) {
+        not_found(response, request);
+        return;
+      }
+
+      if (input.contains("igdb_id")) {
+        std::string igdb_id;
+        if (input["igdb_id"].is_string()) {
+          igdb_id = input["igdb_id"].get<std::string>();
+        } else if (input["igdb_id"].is_number_integer()) {
+          igdb_id = std::to_string(input["igdb_id"].get<std::int64_t>());
+        }
+        std::string error;
+        if (!metadata::resolver::apply_igdb_id(*app, igdb_id, error)) {
+          bad_request(response, request, error);
+          return;
+        }
+      } else {
+        auto meta = metadata::read_from_app(*app);
+        const auto read_list = [&input](const char *key, std::vector<std::string> &target) {
+          if (auto it = input.find(key); it != input.end() && it->is_array()) {
+            target.clear();
+            for (const auto &entry : *it) {
+              if (entry.is_string() && !entry.get<std::string>().empty()) {
+                target.push_back(entry.get<std::string>());
+              }
+            }
+          }
+        };
+        if (auto it = input.find("description"); it != input.end() && it->is_string()) {
+          meta.description = it->get<std::string>();
+        }
+        if (auto it = input.find("release_date"); it != input.end() && it->is_string()) {
+          meta.release_date = it->get<std::string>();
+        }
+        read_list("genres", meta.genres);
+        read_list("developers", meta.developers);
+        read_list("publishers", meta.publishers);
+        if (auto it = input.find("community_score"); it != input.end() && it->is_number_integer()) {
+          meta.community_score = std::clamp(it->get<int>(), -1, 100);
+        }
+        if (auto it = input.find("critic_score"); it != input.end() && it->is_number_integer()) {
+          meta.critic_score = std::clamp(it->get<int>(), -1, 100);
+        }
+        // Anything the user typed is theirs, so the app is marked as edited unless they
+        // explicitly hand it back to whichever provider owns the library.
+        meta.locked = input.value("locked", true);
+        meta.source = meta.locked ? "manual" : meta.source;
+        meta.present = metadata::has_any_value(meta);
+        metadata::write_to_app(*app, meta);
+      }
+
+      confighttp::refresh_client_apps_cache(file_tree, false);
+      nlohmann::json output = app_metadata_json(*app);
+      output["status"] = true;
+      send_response(response, output);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "postAppMetadata: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
   /**
    * @brief Purge all auto-synced Playnite applications (playnite-managed == "auto").
    * @api_examples{/api/apps/purge_autosync| POST| null}
@@ -6196,6 +6583,14 @@ namespace confighttp {
     register_api_route("^/api/vigembus/status$", "GET", getViGEmBusStatus);
     register_api_route("^/api/vigembus/install$", "POST", installViGEmBus);
     register_api_route("^/api/apps/purge_autosync$", "POST", purgeAutoSyncedApps);
+    register_api_route("^/api/igdb/status$", "GET", getIgdbStatus);
+    register_api_route("^/api/igdb/secret$", "POST", postIgdbSecret);
+    register_blocking_api_route("^/api/igdb/verify$", "POST", postIgdbVerify);
+    register_blocking_api_route("^/api/igdb/search$", "GET", getIgdbSearch);
+    register_blocking_api_route("^/api/igdb/resolve$", "POST", postIgdbResolve);
+    register_api_route("^/api/igdb/cache$", "DELETE", deleteIgdbCache);
+    register_api_route("^/api/apps/([^/]+)/metadata$", "GET", getAppMetadata);
+    register_blocking_api_route("^/api/apps/([^/]+)/metadata$", "POST", postAppMetadata);
 #if defined(_WIN32) || defined(__linux__)
     register_api_route("^/api/frame-limiter/status$", "GET", getFrameLimiterStatus);
 #endif

@@ -10,6 +10,7 @@ import { ApiError, apiGet, apiPost } from '@/api/client';
 import AppCompatibilitySettings from '@/components/app-edit/AppCompatibilitySettings.vue';
 import { parseAppExtras } from '@/utils/appCompatibility';
 import AppEditCoverModal from '@/components/app-edit/AppEditCoverModal.vue';
+import AppMetadataEditor from '@/components/app-edit/AppMetadataEditor.vue';
 import type { CoverCandidate } from '@/components/app-edit/AppEditCoverModal.types';
 import {
   AppButton,
@@ -3337,6 +3338,11 @@ onBeforeUnmount(() => {
           </label>
         </div>
       </section>
+
+      <!-- Metadata saves on its own, straight to the apps file, rather than riding along with
+           this form: the host rewrites the same fields from the library and from IGDB, so a
+           stale copy held in the form would undo whichever wrote last. -->
+      <AppMetadataEditor v-if="!isNew && form.uuid" :uuid="form.uuid" :name="form.name" />
 
       <section class="editor-section" aria-labelledby="execution-heading">
         <div class="editor-section__heading">

@@ -1070,6 +1070,18 @@ namespace config {
     50  // tick_ms
   };
 
+  // IGDB defaults. The secret file and cache directory are resolved at parse time because both
+  // are machine-dependent.
+  igdb_t igdb {
+    false,  // enabled
+    {},  // client_id
+    {},  // secret_file
+    true,  // auto_resolve
+    {},  // cache_dir
+    30,  // cache_ttl_days
+    true  // allow_name_match
+  };
+
   namespace {
     #ifdef __linux__
     constexpr std::string_view default_config_filename = "vibepollo.conf";
@@ -2094,6 +2106,23 @@ namespace config {
       // Alongside sunshine.conf and apps.json: the one directory that is both
       // per-machine and already writable by however Sunshine is installed.
       scry.profiles_dir = (platf::appdata() / "scry-profiles").string();
+    }
+
+    bool_f(vars, "igdb_enabled", igdb.enabled);
+    string_f(vars, "igdb_client_id", igdb.client_id);
+    path_f(vars, "igdb_secret_file", igdb.secret_file);
+    bool_f(vars, "igdb_auto_resolve", igdb.auto_resolve);
+    path_f(vars, "igdb_cache_dir", igdb.cache_dir);
+    int_f(vars, "igdb_cache_ttl_days", igdb.cache_ttl_days);
+    bool_f(vars, "igdb_allow_name_match", igdb.allow_name_match);
+    if (igdb.secret_file.empty()) {
+      igdb.secret_file = (platf::appdata() / "igdb_secret").string();
+    }
+    if (igdb.cache_dir.empty()) {
+      igdb.cache_dir = (platf::appdata() / "igdb-cache").string();
+    }
+    if (igdb.cache_ttl_days < 0) {
+      igdb.cache_ttl_days = 0;
     }
 
     path_f(vars, "pkey", nvhttp.pkey);

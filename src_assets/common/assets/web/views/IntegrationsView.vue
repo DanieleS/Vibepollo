@@ -6,6 +6,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 
+import MetadataSettings from '@/components/settings/MetadataSettings.vue';
 import PlaynitePolicySettings from '@/components/settings/PlaynitePolicySettings.vue';
 import { ApiError, apiGet, apiPatch, apiPost } from '@/api/client';
 import {
@@ -2187,6 +2188,10 @@ function libraryRequest(
         </div>
       </article>
     </section>
+
+    <!-- Not a locally installed integration like the rows above: it is where game
+         descriptions come from, whichever launcher owns the library. -->
+    <MetadataSettings />
 
     <ConfirmDialog
       :open="confirmOpen"

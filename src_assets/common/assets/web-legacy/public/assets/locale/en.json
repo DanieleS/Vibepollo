@@ -1008,6 +1008,16 @@
     "scry_profiles_dir_desc": "Folder of per-game profiles. Every profile in it is a candidate; the one that actually fits the running game is chosen by testing it against the game's memory, so a wrong profile is ignored rather than believed. Leave empty for the default next to the Vibepollo configuration.",
     "scry_tick_ms": "Polling interval (ms)",
     "scry_tick_ms_desc": "How often the helper reads the game. Every tick that changes something is sent; a tick that changes nothing costs nothing. Lower values mean more frequent, smaller updates rather than larger ones.",
+    "igdb_enabled": "Use IGDB for metadata",
+    "igdb_enabled_desc": "Fetch descriptions, genres, release dates and cover art from IGDB, so a game looks the same to a client whichever launcher it came from. Needs a free Twitch application, because IGDB is Twitch's and uses the same credentials. Off by default: looking a library up means telling a third party what is in it.",
+    "igdb_client_id": "Twitch client ID",
+    "igdb_client_id_desc": "The client ID of a Twitch application registered at dev.twitch.tv. Not a secret, unlike the paired client secret, which is stored in its own file.",
+    "igdb_auto_resolve": "Describe new games automatically",
+    "igdb_auto_resolve_desc": "Look a game up shortly after it appears in the library, instead of waiting to be asked. Games already described, and games edited by hand, are left alone.",
+    "igdb_allow_name_match": "Match by title when there is no store ID",
+    "igdb_allow_name_match_desc": "Steam, GOG, Epic, the Microsoft Store and itch.io games are matched on their store ID, which is exact. Ubisoft Connect, the EA app and Battle.net have no IGDB IDs, so their games can only be found by name; a title has to match exactly, and a near miss is left undescribed rather than guessed at.",
+    "igdb_cache_ttl_days": "Keep fetched records for (days)",
+    "igdb_cache_ttl_days_desc": "A cached record costs no request, which is what keeps a large library inside IGDB's four-requests-a-second limit on every run after the first. Zero disables the cache.",
     "virtual_display_status_hint": "Use the Vibepollo virtual display driver to automatically create a high-refresh virtual monitor. If the driver reports an error, reinstall Vibepollo or repair the driver before streaming.",
     "virtual_display_status_label": "Vibepollo virtual display driver:",
     "server_cmd_entry": "Command {index}",
@@ -2142,6 +2152,16 @@
     "input_mouse": "Mouse input",
     "input_kbd": "Keyboard input"
   },
+  "metadata": {
+    "config_header": "Game metadata",
+    "config_desc": "Where descriptions, genres, release dates and cover art come from. Pulling them from IGDB rather than from whichever launcher owns the game means every game is described the same way, including the ones no launcher knows anything about.",
+    "secret_label": "Twitch client secret",
+    "secret_desc": "Kept in its own file rather than in the configuration, so reading the settings never hands it out. It is never shown again once stored.",
+    "secret_stored": "A secret is stored. Entering a new one replaces it.",
+    "verify": "Test credentials",
+    "resolve": "Describe missing games",
+    "resolve_started": "Started. This runs in the background; large libraries take a few minutes."
+  },
   "telemetry": {
     "config_header": "Game telemetry",
     "config_desc": "Values read live out of the running game and forwarded to clients that support a second screen. The helper is read-only — it can observe a game but not change it — and sends nothing until both this setting and a per-client permission are on."
@@ -2210,7 +2230,8 @@
       "network": "Network",
       "files": "Files",
       "advanced": "Advanced",
-      "telemetry": "Game Telemetry"
+      "telemetry": "Game Telemetry",
+      "metadata": "Game Metadata"
     }
   }
 }

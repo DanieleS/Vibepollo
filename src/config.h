@@ -424,6 +424,39 @@ namespace config {
     int tick_ms {50};
   };
 
+  // Metadata pulled from IGDB instead of from whichever launcher happens to own the game.
+  // Off until the user supplies credentials, because IGDB is a third party and sending it a
+  // list of what someone owns is a decision they make, not one we make for them.
+  struct igdb_t {
+    bool enabled {false};
+
+    // Twitch application client id. This one is safe to keep in the config file; the paired
+    // secret is not, so it lives in its own file the config API never reads back.
+    std::string client_id;
+
+    // File holding the client secret, one line, nothing else. Defaults next to the other
+    // per-machine state. The same reasoning as credentials_file: GET /api/config returns
+    // sunshine.conf as it stands, so a secret stored there would be handed to every caller
+    // allowed to read settings.
+    std::string secret_file;
+
+    // Resolve metadata for newly discovered games as part of a library sync. When off, IGDB is
+    // only consulted for the app the user is looking at in the editor.
+    bool auto_resolve {true};
+
+    // Where resolved records and downloaded art are kept. A cache hit costs no request, which
+    // is what keeps a library scan inside IGDB's rate limit on every run after the first.
+    std::string cache_dir;
+
+    // How long a cached record stays usable. Summaries and ratings drift slowly.
+    int cache_ttl_days {30};
+
+    // Fall back to matching by name when a game has no store id IGDB indexes, or when the
+    // lookup by store id finds nothing. Name matches are only accepted on an exact normalized
+    // title, but a user who would rather have no metadata than a wrong one can turn them off.
+    bool allow_name_match {true};
+  };
+
   namespace flag {
     enum flag_e : std::size_t {
       PIN_STDIN = 0,  ///< Read PIN from stdin instead of http
@@ -518,6 +551,7 @@ namespace config {
   extern rtss_t rtss;
   extern lossless_scaling_t lossless_scaling;
   extern scry_t scry;
+  extern igdb_t igdb;
   extern sunshine_t sunshine;
 
   int parse(int argc, char *argv[]);
