@@ -256,6 +256,12 @@ jobs:
       contents: read
     uses: ./.github/workflows/ci-archlinux.yml
     with:
+      # Upstream skips the test graph in release artifact builds to save compile time, and says
+      # ordinary builds should keep it. Everything but the release tag counts as ordinary here,
+      # so a pull request runs ctest while the tag build stays lean. Arch carries this rather
+      # than Windows because the portable suites all build here and this runner is the cheaper
+      # of the two.
+      build_tests: ${{ needs.release-candidate.outputs.should_release != 'true' }}
       artifact_retention_days: ${{ needs.release-candidate.outputs.should_release == 'true' && 14 || 1 }}
       release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
       release_version: ${{ needs.release-candidate.outputs.release_version || '0.0.0' }}
