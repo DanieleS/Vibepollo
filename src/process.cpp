@@ -102,6 +102,7 @@
 #include "system_tray.h"
 #include "utility.h"
 #include "uuid.h"
+#include "version_compare.h"
 #include "video.h"
 #include "webrtc_stream.h"
 
@@ -2360,21 +2361,9 @@ namespace proc {
         bool have_packaged = platf::playnite::get_packaged_plugin_version(packaged_ver);
 
         if (have_installed && have_packaged) {
-          // Simple version comparison: compare as strings (works for semantic versioning)
-          auto normalize_ver = [](std::string s) -> std::string {
-            // Strip leading 'v' if present
-            if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) {
-              s = s.substr(1);
-            }
-            // Remove whitespace
-            s.erase(std::remove_if(s.begin(), s.end(), ::isspace), s.end());
-            return s;
-          };
-
-          std::string installed_normalized = normalize_ver(installed_ver);
-          std::string packaged_normalized = normalize_ver(packaged_ver);
-
-          if (installed_normalized < packaged_normalized) {
+          // Comparing the raw strings is wrong once a component reaches two digits:
+          // "0.4.8" sorts after "0.4.13" lexicographically, so the update never fires.
+          if (version_compare::compare_semver(installed_ver, packaged_ver) < 0) {
             BOOST_LOG(info) << "Playnite plugin update available (" << installed_ver
                             << " -> " << packaged_ver << "), auto-updating before launch";
             std::string install_error;
@@ -4393,6 +4382,57 @@ namespace proc {
           } catch (...) {
             ctx.playnite_id.clear();
           }
+        }
+
+        // Playnite-enriched metadata passthrough (written by the Playnite sync). Only the
+        // fields present are populated; `present` records whether the app carries any at all.
+        {
+          auto &meta = ctx.playnite_metadata;
+          meta = proc::playnite_metadata_t {};
+          auto read_string = [&](const char *key) -> std::string {
+            if (auto it = app_node.find(key); it != app_node.end() && it->is_string()) {
+              return it->get<std::string>();
+            }
+            return {};
+          };
+          auto read_list = [&](const char *key) -> std::vector<std::string> {
+            std::vector<std::string> out;
+            if (auto it = app_node.find(key); it != app_node.end() && it->is_array()) {
+              for (const auto &v : *it) {
+                if (v.is_string()) {
+                  out.push_back(v.get<std::string>());
+                }
+              }
+            }
+            return out;
+          };
+          auto read_score = [&](const char *key) -> int {
+            if (auto it = app_node.find(key); it != app_node.end() && it->is_number()) {
+              return it->get<int>();
+            }
+            return -1;
+          };
+          meta.description = read_string("playnite-description");
+          meta.genres = read_list("playnite-genres");
+          meta.developers = read_list("playnite-developers");
+          meta.publishers = read_list("playnite-publishers");
+          auto read_uint = [&](const char *key) -> uint64_t {
+            if (auto it = app_node.find(key); it != app_node.end() && it->is_number_unsigned()) {
+              return it->get<uint64_t>();
+            }
+            return 0;
+          };
+          meta.release_date = read_string("playnite-release-date");
+          meta.community_score = read_score("playnite-community-score");
+          meta.critic_score = read_score("playnite-critic-score");
+          meta.last_played = read_string("playnite-last-played");
+          meta.playtime_minutes = read_uint("playnite-playtime-minutes");
+          meta.background_image_path = parse_env_val(this_env, read_string("playnite-background"));
+          meta.present = !meta.description.empty() || !meta.genres.empty() ||
+                         !meta.developers.empty() || !meta.publishers.empty() ||
+                         !meta.release_date.empty() || meta.community_score >= 0 ||
+                         meta.critic_score >= 0 || !meta.last_played.empty() ||
+                         meta.playtime_minutes > 0 || !meta.background_image_path.empty();
         }
         ctx.playnite_fullscreen = false;
         if (app_node.contains("playnite-fullscreen")) {

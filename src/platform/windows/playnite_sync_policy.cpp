@@ -416,7 +416,7 @@ namespace platf::playnite::sync::policy {
     }));
   }
 
-  void purge_uninstalled_and_ttl(nlohmann::json &root, const std::unordered_set<std::string> &uninstalled, int delete_after_days, std::time_t now_time, const std::unordered_map<std::string, std::time_t> &last_played, bool recent_mode, bool require_replacement, bool remove_uninstalled, bool sync_all_installed, const std::unordered_set<std::string> &selected_ids, bool &changed) {
+  void purge_uninstalled_and_ttl(nlohmann::json &root, const std::unordered_set<std::string> &uninstalled, const std::unordered_set<std::string> &hidden, const std::unordered_set<std::string> &known_ids, bool library_complete, int delete_after_days, std::time_t now_time, const std::unordered_map<std::string, std::time_t> &last_played, bool recent_mode, bool require_replacement, bool remove_uninstalled, bool sync_all_installed, const std::unordered_set<std::string> &selected_ids, bool &changed) {
     if (!root.contains("apps") || !root["apps"].is_array()) {
       return;
     }
@@ -428,7 +428,13 @@ namespace platf::playnite::sync::policy {
         const auto auto_managed = app.value("playnite-managed", std::string {}) == "auto";
         const auto id = app.value("playnite-id", std::string {});
         if (auto_managed && !id.empty()) {
-          remove = (remove_uninstalled && contains_playnite_id(uninstalled, id)) || should_ttl_delete(app, delete_after_days, now_time, last_played);
+          remove = (remove_uninstalled && contains_playnite_id(uninstalled, id)) || contains_playnite_id(hidden, id) || should_ttl_delete(app, delete_after_days, now_time, last_played);
+          // Deleted from the Playnite library: the game is absent from the snapshot entirely, so it
+          // shows up in neither the uninstalled nor the hidden set. Such an entry can never launch
+          // again, so drop it regardless of remove_uninstalled -- but only against a full snapshot.
+          if (!remove && library_complete && !contains_playnite_id(known_ids, id)) {
+            remove = true;
+          }
           if (!remove && !sync_all_installed && !contains_playnite_id(selected_ids, id) && app.value("playnite-source", std::string {}) == "installed") {
             remove = true;
           }
@@ -492,6 +498,13 @@ namespace platf::playnite::sync::policy {
     installed.erase(std::remove_if(installed.begin(), installed.end(), [](const auto &game) { return !game.installed; }), installed.end());
   }
 
+  void snapshot_hidden(const std::vector<Game> &all, std::vector<Game> &installed, std::unordered_set<std::string> &hidden) {
+    for (const auto &game : all) {
+      if (game.hidden && !game.id.empty()) hidden.insert(playnite_id_key(game.id));
+    }
+    installed.erase(std::remove_if(installed.begin(), installed.end(), [](const auto &game) { return game.hidden; }), installed.end());
+  }
+
   std::unordered_map<std::string, std::time_t> build_last_played_map(const std::vector<Game> &installed) {
     std::unordered_map<std::string, std::time_t> last_played;
     for (const auto &game : installed) {
@@ -548,7 +561,7 @@ namespace platf::playnite::sync::policy {
     }
   }
 
-  void autosync_reconcile(nlohmann::json &root, const std::vector<Game> &all_games, int recent_count, int recent_age_days, int delete_after_days, bool require_replacement, bool sync_all_installed, const std::vector<std::string> &categories, const std::vector<std::string> &include_plugins, const std::vector<std::string> &exclude_categories, const std::vector<std::string> &exclude_ids, const std::vector<std::string> &exclude_plugins, bool remove_uninstalled, bool &changed, std::size_t &matched_out, bool manage_membership, MetadataUpdater metadata_updater) {
+  void autosync_reconcile(nlohmann::json &root, const std::vector<Game> &all_games, bool library_complete, int recent_count, int recent_age_days, int delete_after_days, bool require_replacement, bool sync_all_installed, const std::vector<std::string> &categories, const std::vector<std::string> &include_plugins, const std::vector<std::string> &exclude_categories, const std::vector<std::string> &exclude_ids, const std::vector<std::string> &exclude_plugins, bool remove_uninstalled, bool exclude_hidden, bool &changed, std::size_t &matched_out, bool manage_membership, MetadataUpdater metadata_updater) {
     if (!root.contains("apps") || !root["apps"].is_array()) root["apps"] = nlohmann::json::array();
     changed = false;
     matched_out = 0;
@@ -557,6 +570,18 @@ namespace platf::playnite::sync::policy {
     std::vector<Game> installed;
     std::unordered_set<std::string> uninstalled;
     snapshot_installed_and_uninstalled(all_games, installed, uninstalled);
+
+    // Every id Playnite still knows about, installed or not. Auto apps outside this set were
+    // removed from the library rather than merely uninstalled.
+    std::unordered_set<std::string> known_ids;
+    for (const auto &game : all_games) {
+      if (!game.id.empty()) known_ids.insert(playnite_id_key(game.id));
+    }
+
+    // Games hidden in Playnite are never selectable, and already-synced ones are purged below.
+    std::unordered_set<std::string> hidden;
+    if (exclude_hidden) snapshot_hidden(all_games, installed, hidden);
+
     const auto excluded_ids = build_exclusion_lower(exclude_ids);
     const auto excluded_categories = build_exclusion_lower(exclude_categories);
     const auto excluded_plugins = build_exclusion_lower(exclude_plugins);
@@ -597,7 +622,7 @@ namespace platf::playnite::sync::policy {
 
     std::unordered_set<std::string> selected_ids;
     for (const auto &game : selected) selected_ids.insert(playnite_id_key(game.id));
-    purge_uninstalled_and_ttl(root, uninstalled, delete_after_days, std::time(nullptr), build_last_played_map(installed), recent_count > 0, require_replacement, remove_uninstalled, sync_all_installed, selected_ids, changed);
+    purge_uninstalled_and_ttl(root, uninstalled, hidden, known_ids, library_complete, delete_after_days, std::time(nullptr), build_last_played_map(installed), recent_count > 0, require_replacement, remove_uninstalled, sync_all_installed, selected_ids, changed);
     add_missing_auto_entries(root, selected, matched_ids, source_flags, changed, metadata_updater);
   }
 }  // namespace platf::playnite::sync::policy

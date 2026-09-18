@@ -61,9 +61,19 @@ namespace platf::playnite {
     std::string last_played;  ///< Last played timestamp (ISO8601) (lastPlayed).
     std::string box_art_path;  ///< Path/URL to cover art (boxArtPath).
     std::string icon_path;  ///< Path/URL to game icon (iconPath).
+    std::string background_path;  ///< Path/URL to background/hero art (backgroundPath).
     std::string description;  ///< Optional description / notes.
     std::vector<std::string> tags;  ///< Tag list.
     bool installed = false;  ///< Installation state (installed / isInstalled).
+    bool hidden = false;  ///< Hidden in the Playnite library (hidden / isHidden).
+    // Metadata Playnite already enriched (e.g. via its IGDB add-on). Passed straight through
+    // so the client can display it; empty/-1 mean the game has no such value.
+    std::vector<std::string> genres;  ///< Genre names (genres).
+    std::vector<std::string> developers;  ///< Developer company names (developers).
+    std::vector<std::string> publishers;  ///< Publisher company names (publishers).
+    std::string release_date;  ///< Release date as Playnite formats it (releaseDate).
+    int community_score = -1;  ///< Community score 0-100, or -1 when absent (communityScore).
+    int critic_score = -1;  ///< Critic score 0-100, or -1 when absent (criticScore).
   };
 
   /**
@@ -74,6 +84,7 @@ namespace platf::playnite {
     std::vector<Category> categories;  ///< Categories payload (if type == Categories).
     std::vector<Plugin> plugins;  ///< Plugins payload (if type == Plugins).
     std::vector<Game> games;  ///< Games payload (if type == Games).
+    int snapshot_games_count = -1;  ///< Games the plugin says it sent (if type == SnapshotComplete); -1 when not reported.
     // Status payload (if type == Status)
     std::string status_name;  ///< Status event name (e.g. gameStarted, gameStopped).
     std::string status_game_id;  ///< Associated game id.

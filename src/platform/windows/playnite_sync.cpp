@@ -65,6 +65,17 @@ namespace platf::playnite::sync {
       }
     } catch (...) {}
     try {
+      bool stored = false;
+      if (!game.background_path.empty()) {
+        const auto destination = covers_root / ("playnite_bg_" + game.id + ".png");
+        if (convert_playnite_image_to_png(game.background_path, destination)) {
+          app["playnite-background"] = destination.generic_string();
+          stored = true;
+        }
+      }
+      if (!stored && app.contains("playnite-background")) app.erase("playnite-background");
+    } catch (...) {}
+    try {
       const auto destination = covers_root / ("playnite_icon_" + game.id + ".png");
       std::string install_dir = !game.install_dir.empty() ? game.install_dir : game.working_dir;
       if (install_dir.empty()) {
@@ -79,6 +90,46 @@ namespace platf::playnite::sync {
         policy::apply_icon_path(app, {});
       }
     } catch (...) {}
+    // Metadata passthrough: mirror Playnite-enriched fields into the app node so they can be
+    // served to clients. Absent values are erased to keep apps.json tidy and idempotent.
+    try {
+      const auto set_or_erase_str = [&app](const char *key, const std::string &value) {
+        if (!value.empty()) {
+          app[key] = value;
+        } else if (app.contains(key)) {
+          app.erase(key);
+        }
+      };
+      const auto set_or_erase_list = [&app](const char *key, const std::vector<std::string> &values) {
+        if (!values.empty()) {
+          app[key] = values;
+        } else if (app.contains(key)) {
+          app.erase(key);
+        }
+      };
+      const auto set_or_erase_score = [&app](const char *key, int score) {
+        if (score >= 0) {
+          app[key] = score;
+        } else if (app.contains(key)) {
+          app.erase(key);
+        }
+      };
+      set_or_erase_str("playnite-description", game.description);
+      set_or_erase_list("playnite-genres", game.genres);
+      set_or_erase_list("playnite-developers", game.developers);
+      set_or_erase_list("playnite-publishers", game.publishers);
+      set_or_erase_str("playnite-release-date", game.release_date);
+      set_or_erase_score("playnite-community-score", game.community_score);
+      set_or_erase_score("playnite-critic-score", game.critic_score);
+      set_or_erase_str("playnite-last-played", game.last_played);
+      // Zero playtime is the same as none for a client ordering a library, so it is erased
+      // rather than written, keeping apps.json free of a key on every never-played game.
+      if (game.playtime_minutes > 0) {
+        app["playnite-playtime-minutes"] = game.playtime_minutes;
+      } else if (app.contains("playnite-playtime-minutes")) {
+        app.erase("playnite-playtime-minutes");
+      }
+    } catch (...) {}
   }
 
   void apply_game_metadata_to_app(const Game &game, nlohmann::json &app) {
@@ -90,12 +141,12 @@ namespace platf::playnite::sync {
     confighttp::refresh_client_apps_cache(root, false);
   }
 
-  void autosync_reconcile(nlohmann::json &root, const std::vector<Game> &all_games, int recent_count, int recent_age_days, int delete_after_days, bool require_replacement, bool sync_all_installed, const std::vector<std::string> &categories, const std::vector<std::string> &include_plugins, const std::vector<std::string> &exclude_categories, const std::vector<std::string> &exclude_ids, const std::vector<std::string> &exclude_plugins, bool remove_uninstalled, bool &changed, std::size_t &matched_out, bool manage_membership) {
+  void autosync_reconcile(nlohmann::json &root, const std::vector<Game> &all_games, bool library_complete, int recent_count, int recent_age_days, int delete_after_days, bool require_replacement, bool sync_all_installed, const std::vector<std::string> &categories, const std::vector<std::string> &include_plugins, const std::vector<std::string> &exclude_categories, const std::vector<std::string> &exclude_ids, const std::vector<std::string> &exclude_plugins, bool remove_uninstalled, bool exclude_hidden, bool &changed, std::size_t &matched_out, bool manage_membership) {
     bool runtime_changed = false;
     if (root.contains("apps") && root["apps"].is_array()) {
       for (auto &app : root["apps"]) runtime_changed = ensure_runtime_app_uuid(app) || runtime_changed;
     }
-    policy::autosync_reconcile(root, all_games, recent_count, recent_age_days, delete_after_days, require_replacement, sync_all_installed, categories, include_plugins, exclude_categories, exclude_ids, exclude_plugins, remove_uninstalled, changed, matched_out, manage_membership, static_cast<policy::MetadataUpdater>(&apply_game_metadata_to_app));
+    policy::autosync_reconcile(root, all_games, library_complete, recent_count, recent_age_days, delete_after_days, require_replacement, sync_all_installed, categories, include_plugins, exclude_categories, exclude_ids, exclude_plugins, remove_uninstalled, exclude_hidden, changed, matched_out, manage_membership, static_cast<policy::MetadataUpdater>(&apply_game_metadata_to_app));
     changed = changed || runtime_changed;
   }
 }  // namespace platf::playnite::sync

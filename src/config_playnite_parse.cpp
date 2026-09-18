@@ -122,6 +122,7 @@ namespace config {
     consume_bool(vars, "playnite_sync_all_installed", result.sync_all_installed);
     consume_bool(vars, "playnite_autosync_require_replacement", result.autosync_require_replacement);
     consume_bool(vars, "playnite_autosync_remove_uninstalled", result.autosync_remove_uninstalled);
+    consume_bool(vars, "playnite_exclude_hidden_games", result.exclude_hidden_games);
     consume_bool(vars, "playnite_focus_exit_on_first", result.focus_exit_on_first);
     consume_bool(vars, "playnite_fullscreen_entry_enabled", result.fullscreen_entry_enabled);
 

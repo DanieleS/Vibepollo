@@ -113,12 +113,16 @@ TEST(PlayniteSync_Purge, RemovesUninstalledAndOptionallyNonSelectedWhenReplaceme
     root["apps"].push_back(a);
   }
   std::unordered_set<std::string> uninstalled_lower {policy::to_lower_copy(std::string("B"))};
+  std::unordered_set<std::string> no_hidden;
+  // These cases exercise the uninstall/TTL/replacement paths, not library deletion, so the
+  // library-complete criterion is switched off and the known-id set is left empty.
+  std::unordered_set<std::string> no_known;
   auto now = std::time(nullptr);
   std::unordered_map<std::string, std::time_t> last_played;
   // selected set contains only A, so B is candidate for purge by uninstall and A remains
   std::unordered_set<std::string> selected_ids {"A"};
   bool changed = false;
-  policy::purge_uninstalled_and_ttl(root, uninstalled_lower, 0, now, last_played, true /*recent*/, true /*require repl*/, true /*remove uninstalled*/, true /*sync all*/, selected_ids, changed);
+  policy::purge_uninstalled_and_ttl(root, uninstalled_lower, no_hidden, no_known, false /*library complete*/, 0, now, last_played, true /*recent*/, true /*require repl*/, true /*remove uninstalled*/, true /*sync all*/, selected_ids, changed);
   EXPECT_TRUE(changed);
   ASSERT_EQ(root["apps"].size(), 1u);
   EXPECT_EQ(root["apps"][0]["playnite-id"], "A");
@@ -134,7 +138,7 @@ TEST(PlayniteSync_Purge, RemovesUninstalledAndOptionallyNonSelectedWhenReplaceme
   std::unordered_set<std::string> none;
   std::unordered_set<std::string> selected {"Y"};  // Y not present currently, so 1 replacement available
   changed = false;
-  policy::purge_uninstalled_and_ttl(root2, none, 0, now, last_played, true, true, false /*remove uninstalled*/, true /*sync all*/, selected, changed);
+  policy::purge_uninstalled_and_ttl(root2, none, no_hidden, no_known, false /*library complete*/, 0, now, last_played, true, true, false /*remove uninstalled*/, true /*sync all*/, selected, changed);
   EXPECT_TRUE(changed);
   EXPECT_EQ(root2["apps"].size(), 0u);  // removed because replacement exists and require_repl=true
 
@@ -146,7 +150,7 @@ TEST(PlayniteSync_Purge, RemovesUninstalledAndOptionallyNonSelectedWhenReplaceme
   x2["playnite-managed"] = "auto";
   root3["apps"].push_back(x2);
   changed = false;
-  policy::purge_uninstalled_and_ttl(root3, none, 0, now, last_played, true, false, false /*remove uninstalled*/, true /*sync all*/, selected, changed);
+  policy::purge_uninstalled_and_ttl(root3, none, no_hidden, no_known, false /*library complete*/, 0, now, last_played, true, false, false /*remove uninstalled*/, true /*sync all*/, selected, changed);
   EXPECT_FALSE(changed);
   EXPECT_EQ(root3["apps"].size(), 1u);
 }

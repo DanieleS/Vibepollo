@@ -107,8 +107,24 @@ namespace platf::playnite {
           game.last_played = g.value("lastPlayed", "");
           game.box_art_path = g.value("boxArtPath", "");
           game.icon_path = g.value("iconPath", "");
+          game.background_path = g.value("backgroundPath", "");
           game.description = g.value("description", "");
           game.tags = to_string_list(g.value("tags", json::array()));
+          // Metadata passthrough (Playnite-enriched). Lists default to empty, scores to -1.
+          game.genres = to_string_list(g.value("genres", json::array()));
+          game.developers = to_string_list(g.value("developers", json::array()));
+          game.publishers = to_string_list(g.value("publishers", json::array()));
+          game.release_date = g.value("releaseDate", "");
+          try {
+            if (g.contains("communityScore") && g["communityScore"].is_number()) {
+              game.community_score = g["communityScore"].get<int>();
+            }
+          } catch (...) {}
+          try {
+            if (g.contains("criticScore") && g["criticScore"].is_number()) {
+              game.critic_score = g["criticScore"].get<int>();
+            }
+          } catch (...) {}
           // Installed flag may be provided as 'installed' or 'isInstalled'.
           // If neither field is present, assume installed=true to avoid filtering out everything.
           bool has1 = g.contains("installed");
@@ -124,6 +140,9 @@ namespace platf::playnite {
             inst = true;
           }
           game.installed = inst;
+          // Hidden flag may be provided as 'hidden' or 'isHidden'; older plugins send neither,
+          // in which case no game is treated as hidden.
+          game.hidden = g.value("hidden", false) || g.value("isHidden", false);
           if (!game.id.empty()) {
             m.games.emplace_back(std::move(game));
           }
@@ -132,6 +151,8 @@ namespace platf::playnite {
         m.type = MessageType::SnapshotStart;
       } else if (type == "snapshotComplete") {
         m.type = MessageType::SnapshotComplete;
+        // Older plugins omit the count; -1 keeps "unknown" distinct from a genuinely empty library.
+        m.snapshot_games_count = j.value("games", -1);
       } else if (type == "commandResult") {
         m.type = MessageType::CommandResult;
         m.command_name = j.value("command", "");
