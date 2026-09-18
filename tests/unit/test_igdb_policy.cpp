@@ -2,21 +2,54 @@
 
 #include <gtest/gtest.h>
 
+TEST(IgdbPolicy, ReadsTheSourceNumberingFromIgdbRatherThanAssumingIt) {
+  const std::string body = R"([{"id": 1, "name": "Steam"}, {"id": 5, "name": "GOG"},
+                               {"id": 26, "name": "Epic Games Store"},
+                               {"id": 82, "name": "Some Console Store"}])";
+  const auto sources = igdb::policy::parse_external_sources(body);
+  EXPECT_EQ(sources.at("steam"), 1);
+  EXPECT_EQ(sources.at("gog"), 5);
+  EXPECT_EQ(sources.at("epic"), 26);
+  // A source that is not a PC storefront we can produce an id for is dropped rather than
+  // guessed into a slug.
+  EXPECT_EQ(sources.size(), 3u);
+}
+
+TEST(IgdbPolicy, TheLowestIdWinsWhenTwoSourcesNormalizeTheSame) {
+  const auto sources = igdb::policy::parse_external_sources(
+    R"([{"id": 1, "name": "Steam"}, {"id": 54, "name": "Steam China"}])");
+  EXPECT_EQ(sources.at("steam"), 1);
+}
+
 TEST(IgdbPolicy, ExternalLookupOnlyAsksAboutStoresIgdbIndexes) {
-  const auto query = igdb::policy::external_lookup_query({
-    {"steam", "570"},
-    {"ubisoft", "anno-1800"},
-    {"gog", "1207658924"},
-  });
-  EXPECT_NE(query.find("uid = \"570\" & category = 1"), std::string::npos);
-  EXPECT_NE(query.find("uid = \"1207658924\" & category = 5"), std::string::npos);
-  // Ubisoft Connect has no IGDB category, so asking about it would only return nothing.
+  const auto sources = igdb::policy::parse_external_sources(
+    R"([{"id": 1, "name": "Steam"}, {"id": 5, "name": "GOG"}])");
+  const auto query = igdb::policy::external_lookup_query(
+    {
+      {"steam", "570"},
+      {"ubisoft", "anno-1800"},
+      {"gog", "1207658924"},
+    },
+    sources);
+  EXPECT_NE(query.find("uid = \"570\" & external_game_source = 1"), std::string::npos);
+  EXPECT_NE(query.find("uid = \"1207658924\" & external_game_source = 5"), std::string::npos);
+  // Ubisoft Connect is in no source list, so asking about it would only return nothing.
   EXPECT_EQ(query.find("anno-1800"), std::string::npos);
 }
 
+TEST(IgdbPolicy, TheLegacyFieldIsStillReachableForAnOlderIgdb) {
+  const auto query = igdb::policy::external_lookup_query(
+    {{"steam", "570"}}, igdb::policy::legacy_source_map(), true);
+  EXPECT_NE(query.find("uid = \"570\" & category = 1"), std::string::npos);
+  EXPECT_EQ(query.find("external_game_source"), std::string::npos);
+}
+
 TEST(IgdbPolicy, NoIndexedStoreMeansNoQueryAtAll) {
-  EXPECT_TRUE(igdb::policy::external_lookup_query({{"ubisoft", "x"}, {"battlenet", "y"}}).empty());
-  EXPECT_TRUE(igdb::policy::external_lookup_query({}).empty());
+  const auto sources = igdb::policy::legacy_source_map();
+  EXPECT_TRUE(igdb::policy::external_lookup_query({{"ubisoft", "x"}, {"battlenet", "y"}}, sources).empty());
+  EXPECT_TRUE(igdb::policy::external_lookup_query({}, sources).empty());
+  // No sources at all: everything falls through to a title search rather than a broken query.
+  EXPECT_TRUE(igdb::policy::external_lookup_query({{"steam", "570"}}, {}).empty());
 }
 
 TEST(IgdbPolicy, QuotesInATitleCannotEndTheQueryString) {
@@ -82,9 +115,9 @@ TEST(IgdbPolicy, ParsesExternalMatches) {
   const auto matches = igdb::policy::parse_external_matches(body);
   ASSERT_EQ(matches.size(), 2u);
   EXPECT_EQ(matches[0].igdb_id, "1020");
-  EXPECT_EQ(matches[0].store, "steam");
+  EXPECT_EQ(matches[0].store_id, "271590");
   EXPECT_EQ(matches[1].igdb_id, "7");
-  EXPECT_EQ(matches[1].store, "gog");
+  EXPECT_EQ(matches[1].store_id, "1207658924");
 }
 
 TEST(IgdbPolicy, ScoresOutsideZeroToOneHundredAreNotReported) {

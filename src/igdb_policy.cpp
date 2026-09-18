@@ -18,16 +18,17 @@
 
 namespace igdb::policy {
   namespace {
-    // IGDB's external_games.category enum. Only the stores a PC library actually draws from
-    // are listed; the rest of the enum is consoles and video sites we would never match.
-    // Ubisoft Connect, the EA app and Battle.net are absent from the enum entirely, which is
-    // why games from those stores fall through to a name search.
+    // The retired external_games.category numbering, kept only as a fallback for a host that
+    // cannot reach the sources endpoint. Only the stores a PC library actually draws from are
+    // listed; the rest of the enum was consoles and video sites. Ubisoft Connect, the EA app
+    // and Battle.net were never in it at all, which is why their games fall back to a title
+    // search however the source ids are obtained.
     struct category_t {
       const char *store;
       int category;
     };
 
-    constexpr std::array k_categories {
+    constexpr std::array k_legacy_categories {
       category_t {"steam", 1},
       category_t {"gog", 5},
       category_t {"microsoft", 11},
@@ -133,43 +134,70 @@ namespace igdb::policy {
     }
   }  // namespace
 
-  int external_category_for_store(std::string_view store) {
-    for (const auto &entry : k_categories) {
-      if (store == entry.store) {
-        return entry.category;
-      }
-    }
-    return -1;
+  std::string external_sources_query() {
+    // The list is short and fully enumerable; taking it whole means one request covers every
+    // store a library might draw from, now and after IGDB adds another.
+    return "fields id,name; limit 500;";
   }
 
-  std::string store_for_external_category(int category) {
-    for (const auto &entry : k_categories) {
-      if (category == entry.category) {
-        return entry.store;
-      }
+  source_map_t parse_external_sources(const std::string &body) {
+    source_map_t sources;
+    const auto parsed = nlohmann::json::parse(body, nullptr, false);
+    if (!parsed.is_array()) {
+      return sources;
     }
-    return {};
+    for (const auto &entry : parsed) {
+      if (!entry.is_object()) {
+        continue;
+      }
+      const auto name = json_string(entry, "name");
+      auto id = entry.find("id");
+      if (name.empty() || id == entry.end() || !id->is_number_integer()) {
+        continue;
+      }
+      // The same normalizer the providers go through, so "Epic Games Store" from IGDB and
+      // "egs" from Lutris end up as the same slug without a second table to keep in step.
+      const auto store = metadata::normalize_store_name(name);
+      if (store.empty()) {
+        continue;
+      }
+      // First wins: IGDB lists regional storefronts under similar names, and the lowest id is
+      // the general one.
+      sources.emplace(store, id->get<int>());
+    }
+    return sources;
   }
 
-  std::string external_lookup_query(const std::vector<metadata::store_id_t> &ids) {
+  source_map_t legacy_source_map() {
+    source_map_t sources;
+    for (const auto &entry : k_legacy_categories) {
+      sources.emplace(entry.store, entry.category);
+    }
+    return sources;
+  }
+
+  std::string external_lookup_query(const std::vector<metadata::store_id_t> &ids,
+                                    const source_map_t &sources,
+                                    bool legacy_field) {
     std::ostringstream clauses;
     bool first = true;
     for (const auto &id : ids) {
-      const auto category = external_category_for_store(id.store);
-      if (category < 0 || id.id.empty()) {
+      const auto source = sources.find(id.store);
+      if (source == sources.end() || id.id.empty()) {
         continue;
       }
       if (!first) {
         clauses << " | ";
       }
       first = false;
-      clauses << "(uid = \"" << escape_apicalypse(id.id) << "\" & category = " << category << ")";
+      clauses << "(uid = \"" << escape_apicalypse(id.id) << "\" & "
+              << (legacy_field ? "category" : "external_game_source") << " = " << source->second << ")";
     }
     if (first) {
       return {};
     }
     std::ostringstream query;
-    query << "fields game,uid,category; where " << clauses.str() << "; limit 50;";
+    query << "fields game,uid; where " << clauses.str() << "; limit 50;";
     return query.str();
   }
 
@@ -226,9 +254,6 @@ namespace igdb::policy {
       match_t match;
       match.igdb_id = json_id(entry, "game");
       match.store_id = json_string(entry, "uid");
-      if (auto it = entry.find("category"); it != entry.end() && it->is_number_integer()) {
-        match.store = store_for_external_category(it->get<int>());
-      }
       if (match.igdb_id.empty()) {
         continue;
       }

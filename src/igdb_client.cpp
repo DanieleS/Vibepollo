@@ -14,6 +14,7 @@
 // standard includes
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <system_error>
@@ -40,9 +41,14 @@ namespace igdb {
       std::deque<std::chrono::steady_clock::time_point> recent_requests;
       bool authenticated {false};
       std::string last_error;
-      // IGDB retired external_games.category in favour of a separate source table on some
-      // deployments. One 400 from that query is enough to stop asking; name matching still
-      // works and a failed query per game would be a lot of wasted requests.
+      // Which numeric id IGDB gives each store, asked of IGDB rather than hardcoded. Empty
+      // until the first lookup needs it.
+      policy::source_map_t sources;
+      bool sources_loaded {false};
+      // The sources endpoint could not be reached and the retired category numbering is in
+      // use instead. Kept so a 400 on that field can turn store-id matching off for good
+      // rather than spending a failed request per game.
+      bool sources_legacy {false};
       bool external_lookup_supported {true};
     };
 
@@ -456,6 +462,49 @@ namespace igdb {
     return games;
   }
 
+  namespace {
+    /**
+     * @brief The store-id numbering IGDB is using, asked of IGDB once per run.
+     *
+     * Not hardcoded, because the enum this integration was first written against has since
+     * been retired, and a stale table does not announce itself: every lookup just stops
+     * matching, which is indistinguishable from a library IGDB has never heard of.
+     */
+    policy::source_map_t ensure_sources(bool &legacy_out, std::string &error_out) {
+      auto &s = state();
+      {
+        std::scoped_lock lock {s.mutex};
+        if (s.sources_loaded) {
+          legacy_out = s.sources_legacy;
+          return s.sources;
+        }
+      }
+      // request() takes the lock itself, so it is called with nothing held. Two callers
+      // racing here cost one extra request and agree on the answer.
+      auto sources = policy::source_map_t {};
+      bool legacy = false;
+      if (const auto body = request("external_game_sources", policy::external_sources_query(), error_out)) {
+        sources = policy::parse_external_sources(*body);
+      }
+      if (sources.empty()) {
+        // An older or mirrored IGDB. Matching on the retired numbering is still better than
+        // giving up on store ids and matching every game by title.
+        sources = policy::legacy_source_map();
+        legacy = true;
+        BOOST_LOG(warning) << "IGDB: could not read the external game sources, falling back to the "
+                              "retired category numbering";
+      } else {
+        BOOST_LOG(info) << "IGDB: matched " << sources.size() << " store sources";
+      }
+      std::scoped_lock lock {s.mutex};
+      s.sources = sources;
+      s.sources_legacy = legacy;
+      s.sources_loaded = true;
+      legacy_out = legacy;
+      return sources;
+    }
+  }  // namespace
+
   std::string resolve_store_ids(const std::vector<metadata::store_id_t> &ids, std::string &error_out) {
     auto &s = state();
     {
@@ -464,7 +513,14 @@ namespace igdb {
         return {};
       }
     }
-    const auto query = policy::external_lookup_query(ids);
+    bool legacy = false;
+    const auto sources = ensure_sources(legacy, error_out);
+    // A failure to read the sources is not itself a failure to match: the fallback map is in
+    // hand either way, so the error from that request must not reach the caller as this
+    // game's error.
+    error_out.clear();
+
+    const auto query = policy::external_lookup_query(ids, sources, legacy);
     if (query.empty()) {
       // No store IGDB indexes. Not an error: the caller falls back to a name search.
       return {};
@@ -479,10 +535,12 @@ namespace igdb {
       return {};
     }
     const auto matches = policy::parse_external_matches(*body);
-    // Ids are handed over most specific first, so the first match is the best one we asked for.
+    // Ids are handed over most specific first, so the first one IGDB answered for is the best
+    // match. The query already constrained which source could answer for each uid, so
+    // comparing the uid alone cannot pick up another store's game.
     for (const auto &id : ids) {
       for (const auto &match : matches) {
-        if (match.store == id.store && match.store_id == id.id) {
+        if (match.store_id == id.id) {
           return match.igdb_id;
         }
       }
@@ -515,6 +573,9 @@ namespace igdb {
     auto &s = state();
     std::scoped_lock lock {s.mutex};
     s.external_lookup_supported = true;
+    s.sources_loaded = false;
+    s.sources.clear();
+    s.sources_legacy = false;
     return removed;
   }
 

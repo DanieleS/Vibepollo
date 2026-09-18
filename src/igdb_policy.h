@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 // local includes
@@ -20,19 +21,42 @@
 
 namespace igdb::policy {
 
-  /// @brief IGDB's own external_games category for one of our store slugs, or -1 when it has none.
-  int external_category_for_store(std::string_view store);
+  /// @brief Which numeric id IGDB gives each of our store slugs, e.g. {"steam", 1}.
+  using source_map_t = std::unordered_map<std::string, int>;
 
-  /// @brief Our store slug for an IGDB external_games category, or empty when unknown.
-  std::string store_for_external_category(int category);
+  /**
+   * @brief APIcalypse body listing IGDB's external game sources.
+   *
+   * These ids are discovered rather than hardcoded. IGDB retired the external_games.category
+   * enum this integration was first written against, and a hardcoded table gives no sign of
+   * having gone stale: every lookup simply stops matching, which looks like a library IGDB
+   * has never heard of. Asking IGDB what its own sources are cannot go stale that way.
+   */
+  std::string external_sources_query();
+
+  /// @brief Map an external_game_sources response onto our store slugs. Unknown sources drop out.
+  source_map_t parse_external_sources(const std::string &body);
+
+  /**
+   * @brief The retired external_games.category numbering, kept as a fallback.
+   *
+   * Used only when the sources endpoint cannot be reached, so a host talking to an older or
+   * mirrored IGDB still matches on store ids rather than falling all the way back to titles.
+   */
+  source_map_t legacy_source_map();
 
   /**
    * @brief APIcalypse body asking which IGDB games these store ids belong to.
    *
-   * Returns empty when none of the ids belong to a store IGDB indexes -- Ubisoft Connect,
-   * the EA app and Battle.net have no category, so their games can only be found by name.
+   * Returns empty when none of the ids belong to a store in `sources` -- Ubisoft Connect, the
+   * EA app and Battle.net are in no such list, so their games can only be found by name.
+   *
+   * `legacy_field` filters on the retired `category` field instead of `external_game_source`,
+   * and pairs with legacy_source_map().
    */
-  std::string external_lookup_query(const std::vector<metadata::store_id_t> &ids);
+  std::string external_lookup_query(const std::vector<metadata::store_id_t> &ids,
+                                    const source_map_t &sources,
+                                    bool legacy_field = false);
 
   /// @brief APIcalypse body fetching the full record for one or more IGDB game ids.
   std::string games_by_id_query(const std::vector<std::string> &igdb_ids);
@@ -43,7 +67,9 @@ namespace igdb::policy {
   /// @brief One store id resolved to the IGDB game that owns it.
   struct match_t {
     std::string igdb_id;
-    std::string store;
+    // The store's own id for the game, as IGDB spells it back. The source is not carried:
+    // the query already constrained which sources could answer, so a row that comes back
+    // for a given uid is necessarily the one that was asked for.
     std::string store_id;
   };
 
