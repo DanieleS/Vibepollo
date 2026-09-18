@@ -999,6 +999,22 @@ export const settingsCategories: SettingsCategory[] = [
           }),
         ],
       },
+      {
+        id: 'host_telemetry',
+        collapsed: true,
+        platform: 'windows',
+        fields: [
+          boolean('scry_enabled'),
+          text('scry_profiles_dir', {
+            visibleWhen: { key: 'scry_enabled', equals: true },
+          }),
+          number('scry_tick_ms', {
+            min: 1,
+            step: 1,
+            visibleWhen: { key: 'scry_enabled', equals: true },
+          }),
+        ],
+      },
     ],
   },
   {

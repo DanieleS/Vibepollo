@@ -141,6 +141,7 @@ const permissionOptions = [
   { key: 'clipboard_set', mask: 0x00010000 },
   { key: 'clipboard_read', mask: 0x00020000 },
   { key: 'server_cmd', mask: 0x00100000 },
+  { key: 'telemetry_read', mask: 0x00200000 },
   { key: 'input_controller', mask: 0x00000100 },
   { key: 'input_touch', mask: 0x00000200 },
   { key: 'input_pen', mask: 0x00000400 },

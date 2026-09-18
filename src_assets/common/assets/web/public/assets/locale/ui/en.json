@@ -1901,6 +1901,10 @@
         "host_identity": {
           "title": "Identity and local behavior"
         },
+        "host_telemetry": {
+          "title": "Game telemetry",
+          "description": "Read live values out of the running game with the bundled read-only helper and send them to clients that ask for them. Each client also needs the telemetry permission."
+        },
         "input_devices": {
           "title": "Client input"
         },
