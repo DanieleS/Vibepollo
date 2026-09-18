@@ -76,12 +76,6 @@ namespace igdb {
       return secret;
     }
 
-    void remember_error(const std::string &message) {
-      auto &s = state();
-      s.last_error = message;
-      BOOST_LOG(warning) << "IGDB: " << message;
-    }
-
     /// @brief Hold back until sending now stays inside IGDB's four-per-second limit.
     void pace_locked(std::unique_lock<std::mutex> &lock) {
       auto &s = state();

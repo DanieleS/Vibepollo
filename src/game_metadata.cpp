@@ -88,11 +88,6 @@ namespace metadata {
       return 0;
     }
 
-    void erase_both(nlohmann::json &app, const key_pair_t &keys) {
-      app.erase(keys.current);
-      app.erase(keys.legacy);
-    }
-
     template<class T>
     void set_or_erase(nlohmann::json &app, const key_pair_t &keys, const T &value, bool keep) {
       // The legacy key goes either way: keeping it would leave two spellings of one value, and
