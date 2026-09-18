@@ -10,6 +10,7 @@ interface IgdbStatus {
   configured?: boolean;
   authenticated?: boolean;
   last_error?: string;
+  secret_file?: string;
 }
 
 const { t } = useI18n();
@@ -150,6 +151,11 @@ onMounted(() => {
         <n-text depth="3" class="text-xs">
           {{ configured ? $t('metadata.secret_stored') : $t('metadata.secret_desc') }}
         </n-text>
+        <!-- The resolved path, so a secret that is not being picked up is a fact rather than
+             a guess about a location nothing on this page reveals. -->
+        <div v-if="status?.secret_file" class="text-xs font-mono opacity-60 break-all mt-1">
+          {{ status.secret_file }}
+        </div>
       </div>
 
       <ConfigFieldRenderer

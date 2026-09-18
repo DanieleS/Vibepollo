@@ -4619,6 +4619,7 @@ namespace confighttp {
     // The client id is not a secret and the settings page has to show which one is in use.
     // The secret is never returned, only whether one is stored.
     output["client_id"] = config::igdb.client_id;
+    output["secret_file"] = state.secret_file;
     output["auto_resolve"] = config::igdb.auto_resolve;
     output["allow_name_match"] = config::igdb.allow_name_match;
     output["resolving"] = metadata::resolver::background_pass_running();

@@ -25,6 +25,10 @@ namespace igdb {
     bool authenticated {false};
     // Why the last request or token exchange failed, for the settings page to show verbatim.
     std::string last_error;
+    // Where the secret is read from and written to, after every default and fallback has been
+    // applied. Shown in the settings, because "it is not picking up my secret" is otherwise a
+    // guess about a path nobody can see.
+    std::string secret_file;
   };
 
   status_t status();

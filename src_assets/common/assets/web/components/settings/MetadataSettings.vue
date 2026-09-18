@@ -12,6 +12,7 @@ interface IgdbStatus {
   last_error?: string;
   client_id?: string;
   resolving?: boolean;
+  secret_file?: string;
 }
 
 
@@ -239,15 +240,19 @@ onUnmounted(() => {
             />
           </SettingRow>
 
-          <SettingRow
-            :label="t('ui.metadata.fields.secret')"
-            :description="
-              status?.configured
-                ? t('ui.metadata.fields.secretStored')
-                : t('ui.metadata.fields.secretHint')
-            "
-            control-id="igdb_secret"
-          >
+          <SettingRow :label="t('ui.metadata.fields.secret')" control-id="igdb_secret">
+            <template #description>
+              {{
+                status?.configured
+                  ? t('ui.metadata.fields.secretStored')
+                  : t('ui.metadata.fields.secretHint')
+              }}
+              <!-- The path is shown because "it is not picking up my secret" is otherwise a
+                   guess about a location nobody can see from here. -->
+              <code v-if="status?.secret_file" class="metadata-settings__path">{{
+                status.secret_file
+              }}</code>
+            </template>
             <div class="metadata-settings__secret">
               <input
                 id="igdb_secret"
@@ -392,6 +397,15 @@ onUnmounted(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--vs-space-8);
+}
+
+.metadata-settings__path {
+  display: block;
+  margin-top: var(--vs-space-4, 4px);
+  font-family: var(--vs-font-mono, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+  color: var(--vs-color-text-muted);
 }
 
 .metadata-settings__secret input {

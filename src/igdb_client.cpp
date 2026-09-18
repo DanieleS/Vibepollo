@@ -67,10 +67,18 @@ namespace igdb {
     /// @brief Where the secret lives. Falls back to the default rather than giving up, so a
     /// config that never had the key resolved is still usable instead of failing to save.
     std::string secret_path() {
-      if (!config::igdb.secret_file.empty()) {
-        return config::igdb.secret_file;
+      const auto configured = std::filesystem::path {config::igdb.secret_file};
+      std::error_code error;
+      if (configured.empty()) {
+        return (platf::appdata() / "igdb_secret").string();
       }
-      return (platf::appdata() / "igdb_secret").string();
+      // A path that names a directory is a configuration that cannot work: writing the secret
+      // would fail and reading it would silently return nothing. Put the file inside it rather
+      // than failing, which is what someone pointing at a folder meant anyway.
+      if (std::filesystem::is_directory(configured, error)) {
+        return (configured / "igdb_secret").string();
+      }
+      return configured.string();
     }
 
     std::string read_secret() {
@@ -355,6 +363,7 @@ namespace igdb {
     out.configured = !config::igdb.client_id.empty() && !read_secret().empty();
     out.authenticated = s.authenticated;
     out.last_error = s.last_error;
+    out.secret_file = secret_path();
     return out;
   }
 

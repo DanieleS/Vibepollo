@@ -2110,9 +2110,13 @@ namespace config {
 
     bool_f(vars, "igdb_enabled", igdb.enabled);
     string_f(vars, "igdb_client_id", igdb.client_id);
-    path_f(vars, "igdb_secret_file", igdb.secret_file);
+    // string_f, not path_f: path_f resolves a relative path against appdata, and an absent key
+    // leaves an empty path, which counts as relative. The key would come back as the appdata
+    // directory itself rather than unset, the default below would never apply, and the secret
+    // would be written to a directory. scry_profiles_dir reads the same way for the same reason.
+    string_f(vars, "igdb_secret_file", igdb.secret_file);
     bool_f(vars, "igdb_auto_resolve", igdb.auto_resolve);
-    path_f(vars, "igdb_cache_dir", igdb.cache_dir);
+    string_f(vars, "igdb_cache_dir", igdb.cache_dir);
     int_f(vars, "igdb_cache_ttl_days", igdb.cache_ttl_days);
     bool_f(vars, "igdb_allow_name_match", igdb.allow_name_match);
     if (igdb.secret_file.empty()) {
