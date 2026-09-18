@@ -356,10 +356,15 @@ jobs:
       release_version: ${{ needs.resolve_release.outputs.release_version }}
       release_tag: ${{ needs.resolve_release.outputs.tag_name }}
       symbol_product_name: Vibepollo
-      publish_symbols: true
+      # This fork has neither a SignPath subscription nor a symbol-server token, and both gates
+      # hard-fail the build when required but unconfigured. The signing steps themselves are
+      # already gated on an available token and have a working unsigned path, so turning the
+      # requirements off lets the release complete and publish an unsigned installer. Same
+      # reasoning as the publish_symbols setting in ci.yml.
+      publish_symbols: false
       symbol_release_draft: true
       symbol_release_prefix: polo
-      require_signpath_signing: true
+      require_signpath_signing: false
       signpath_signing_policy_slug: release-signing
       signpath_wait_for_completion_timeout_in_seconds: 3600
       require_truehdr_runtime: true
