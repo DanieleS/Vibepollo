@@ -1489,6 +1489,8 @@
     "remove_uninstalled_desc": "Ha engedélyezve van, a Vibepollo eltávolítja az automatikusan szinkronizált játékokat, amint eltávolítják őket a Playnite-ban.",
     "exclude_hidden_games": "A Playnite-ban elrejtett játékok kihagyása",
     "exclude_hidden_games_desc": "Ha be van kapcsolva, a Playnite-ban rejtettként megjelölt játékok soha nem szinkronizálódnak automatikusan, a már szinkronizált játékok pedig eltávolításra kerülnek, amint elrejti őket.",
+    "sync_metadata": "Játékok metaadatainak átvétele a Playnite-ból",
+    "sync_metadata_desc": "Ha engedélyezve van, a Playnite-ban tárolt leírás, műfajok, cégek, megjelenési dátum, pontszámok és háttérkép a szinkronizált alkalmazásra íródnak, hacsak az IGDB vagy egy kézi szerkesztés már nem írta le. Kapcsolja ki, hogy a Playnite ne nyúljon ezekhez a mezőkhöz, és az IGDB írja le a játékot; az utolsó játék ideje és a játékidő mindig a Playnite-ból származik.",
     "extensions_dir": "Bővítmények könyvtára",
     "install_dir": "Telepítési útvonal felülbírálás",
     "save_success": "Beállítások mentve.",

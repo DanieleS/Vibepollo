@@ -1489,6 +1489,8 @@
     "remove_uninstalled_desc": "有効にすると、Playnite でアンインストールされた自動同期ゲームを Vibepollo がすぐに削除します。",
     "exclude_hidden_games": "Playnite で非表示のゲームをスキップする",
     "exclude_hidden_games_desc": "有効にすると、Playnite で非表示に設定されたゲームは自動同期されず、すでに自動同期されたゲームも非表示にした時点で削除されます。",
+    "sync_metadata": "ゲームのメタデータを Playnite から取得する",
+    "sync_metadata_desc": "有効にすると、Playnite が保持している説明、ジャンル、会社、発売日、スコア、背景画像が同期されたアプリケーションに書き込まれます。ただし IGDB や手動編集ですでに記述されている場合は上書きしません。無効にすると Playnite はこれらの項目を書き込まず、IGDB がゲームを記述します。最終プレイ日時とプレイ時間は常に Playnite から取得されます。",
     "extensions_dir": "Extensions ディレクトリ",
     "install_dir": "インストール パスの上書き",
     "save_success": "設定を保存しました。",

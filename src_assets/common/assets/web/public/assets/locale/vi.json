@@ -1481,6 +1481,8 @@
     "remove_uninstalled_desc": "Khi được bật, Vibepollo sẽ xóa các trò chơi được tự động đồng bộ hóa ngay khi chúng được gỡ cài đặt trong Playnite.",
     "exclude_hidden_games": "Bỏ qua các trò chơi bị ẩn trong Playnite",
     "exclude_hidden_games_desc": "Khi được bật, các trò chơi được đánh dấu là ẩn trong Playnite sẽ không bao giờ được đồng bộ tự động, và những trò chơi đã đồng bộ sẽ bị xóa ngay khi bạn ẩn chúng.",
+    "sync_metadata": "Lấy siêu dữ liệu trò chơi từ Playnite",
+    "sync_metadata_desc": "Khi bật, mô tả, thể loại, công ty, ngày phát hành, điểm số và ảnh nền mà Playnite lưu cho trò chơi sẽ được ghi vào ứng dụng đã đồng bộ, trừ khi IGDB hoặc chỉnh sửa thủ công đã mô tả nó. Tắt tùy chọn này để Playnite không ghi vào các trường đó và IGDB sẽ mô tả trò chơi; lần chơi gần nhất và thời gian chơi luôn được lấy từ Playnite.",
     "extensions_dir": "Thư mục tiện ích mở rộng",
     "install_dir": "Ghi đè đường dẫn cài đặt",
     "save_success": "Đã lưu cài đặt.",

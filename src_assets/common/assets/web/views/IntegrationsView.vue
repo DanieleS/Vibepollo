@@ -2203,7 +2203,7 @@ function libraryRequest(
             <h2 id="integration-metadata">{{ t('ui.metadata.title') }}</h2>
           </div>
           <p>{{ t('ui.metadata.description') }}</p>
-          <MetadataSettings />
+          <MetadataSettings :platform="system.metadata?.platform || ''" />
         </div>
       </article>
     </section>

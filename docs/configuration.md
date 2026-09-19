@@ -4885,6 +4885,32 @@ Default: `true` on Windows
     </tr>
 </table>
 
+### playnite_sync_metadata
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td>
+            Controls whether the descriptive metadata Playnite holds for a game (description, genres,
+            developers and publishers, release date, community and critic scores, background art) is
+            written onto the synced application. When <code>true</code>, Playnite describes a game
+            unless IGDB or a manual edit already claimed it. Set it to <code>false</code> to keep
+            Playnite out of those fields entirely, so new games stay undescribed until IGDB
+            (see <a href="#igdb_enabled">igdb_enabled</a>) fills them in; games Playnite already
+            described keep their current metadata until an IGDB pass with "Re-fetch everything" replaces it.
+            Activity data (last played, playtime) is always synced, since only Playnite knows it.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td>@code{}true@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td>@code{}playnite_sync_metadata = false@endcode</td>
+    </tr>
+</table>
+
 ### playnite_sync_plugins
 
 <table>

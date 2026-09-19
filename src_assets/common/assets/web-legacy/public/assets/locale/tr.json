@@ -1489,6 +1489,8 @@
     "remove_uninstalled_desc": "Etkin olduğunda Vibepollo, Playnite'ta kaldırılan otomatik eşitlenmiş oyunları hemen kaldırır.",
     "exclude_hidden_games": "Playnite'ta gizlenen oyunları atla",
     "exclude_hidden_games_desc": "Etkinleştirildiğinde, Playnite'ta gizli olarak işaretlenen oyunlar hiçbir zaman otomatik eşitlenmez ve otomatik eşitlenmiş oyunlar, onları gizlediğiniz anda kaldırılır.",
+    "sync_metadata": "Oyun meta verilerini Playnite'tan al",
+    "sync_metadata_desc": "Etkinleştirildiğinde, Playnite'ın bir oyun için tuttuğu açıklama, türler, şirketler, çıkış tarihi, puanlar ve arka plan görseli, IGDB veya elle yapılan bir düzenleme tarafından zaten açıklanmamışsa eşitlenen uygulamaya yazılır. Playnite'ın bu alanlara dokunmaması ve oyunu IGDB'nin açıklaması için devre dışı bırakın; son oynama ve oyun süresi her zaman Playnite'tan alınır.",
     "extensions_dir": "Uzantılar dizini",
     "install_dir": "Kurulum yolu geçersiz kılma",
     "save_success": "Ayarlar kaydedildi.",

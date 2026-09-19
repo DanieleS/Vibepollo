@@ -76,6 +76,7 @@ export const extendedDefaults: Record<string, unknown> = {
   playnite_autosync_require_replacement: true,
   playnite_autosync_remove_uninstalled: true,
   playnite_exclude_hidden_games: true,
+  playnite_sync_metadata: true,
   playnite_focus_attempts: 3,
   playnite_focus_timeout_secs: 15,
   playnite_focus_exit_on_first: false,

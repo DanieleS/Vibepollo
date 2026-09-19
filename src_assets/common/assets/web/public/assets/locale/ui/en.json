@@ -995,7 +995,9 @@
         "nameMatch": "Match by title when there is no store ID",
         "nameMatchHint": "Ubisoft Connect, the EA app and Battle.net have no IGDB IDs, so their games can only be found by name. A title has to match exactly; a near miss is left undescribed.",
         "cacheTtl": "Keep fetched records for (days)",
-        "cacheTtlHint": "A cached record costs no request, which is what keeps a large library inside IGDB's rate limit. Zero disables the cache."
+        "cacheTtlHint": "A cached record costs no request, which is what keeps a large library inside IGDB's rate limit. Zero disables the cache.",
+        "playniteSync": "Let Playnite describe games",
+        "playniteSyncHint": "Playnite writes description, genres, companies, release date, scores and background art for the games it syncs, unless IGDB or a manual edit already did. Turn it off to leave those fields to IGDB; last played and playtime still come from Playnite."
       },
       "actions": {
         "verify": "Test credentials",

@@ -15,6 +15,9 @@ interface IgdbStatus {
   secret_file?: string;
 }
 
+// Playnite only exists on Windows; the switch that governs what it writes is meaningless elsewhere.
+const props = withDefaults(defineProps<{ platform?: string }>(), { platform: '' });
+const isWindows = computed(() => props.platform.toLocaleLowerCase().includes('windows'));
 
 const { t } = useI18n();
 
@@ -74,6 +77,9 @@ async function load() {
       igdb_allow_name_match: configBoolean(config.igdb_allow_name_match ?? true),
       igdb_cache_ttl_days: Number(config.igdb_cache_ttl_days ?? 30),
     };
+    if (isWindows.value) {
+      next.playnite_sync_metadata = configBoolean(config.playnite_sync_metadata ?? true, true);
+    }
     values.value = next;
     original.value = JSON.parse(JSON.stringify(next));
     status.value = igdb;
@@ -151,7 +157,10 @@ function pollUntilIdle() {
       if (next.resolving) {
         pollUntilIdle();
       } else {
-        note(next.last_error || t('ui.metadata.resolveDone'), next.last_error ? 'warning' : 'success');
+        note(
+          next.last_error || t('ui.metadata.resolveDone'),
+          next.last_error ? 'warning' : 'success',
+        );
       }
     } catch {
       /* A failed poll is not worth reporting; the next action will show the real state. */
@@ -306,6 +315,22 @@ onUnmounted(() => {
           </SettingRow>
 
           <SettingRow
+            v-if="isWindows"
+            :label="t('ui.metadata.fields.playniteSync')"
+            :description="t('ui.metadata.fields.playniteSyncHint')"
+            control-id="playnite_sync_metadata"
+          >
+            <label class="vs-switch">
+              <input
+                id="playnite_sync_metadata"
+                v-model="values.playnite_sync_metadata"
+                type="checkbox"
+              />
+              <span class="vs-switch__track" aria-hidden="true" />
+            </label>
+          </SettingRow>
+
+          <SettingRow
             v-if="enabled"
             :label="t('ui.metadata.fields.cacheTtl')"
             :description="t('ui.metadata.fields.cacheTtlHint')"
@@ -320,7 +345,6 @@ onUnmounted(() => {
               step="1"
             />
           </SettingRow>
-
         </div>
       </fieldset>
 

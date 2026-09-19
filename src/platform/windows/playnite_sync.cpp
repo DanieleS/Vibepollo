@@ -5,6 +5,7 @@
 
 #include "playnite_sync.h"
 
+#include "src/config_playnite.h"
 #include "src/logging.h"
 #include "src/platform/windows/playnite_integration.h"
 #include "src/uuid.h"
@@ -105,10 +106,12 @@ namespace platf::playnite::sync {
     } catch (...) {}
     // Descriptive metadata. Playnite writes it unless something else already claimed the app:
     // a game the user corrected by hand, or one the IGDB resolver described, must survive the
-    // next library sync or the correction would last until the following one.
+    // next library sync or the correction would last until the following one. With
+    // playnite_sync_metadata off the user has said Playnite is never the source, so whatever
+    // the app carries is kept as is and a new app is left for IGDB to describe.
     try {
       const auto existing = metadata::read_from_app(app);
-      const bool claimed_elsewhere = existing.locked || existing.source == "igdb";
+      const bool claimed_elsewhere = existing.locked || existing.source == "igdb" || !config::playnite.sync_metadata;
       metadata::game_metadata_t meta;
       if (claimed_elsewhere) {
         meta = existing;
