@@ -115,7 +115,11 @@ namespace platf::playnite::sync {
       metadata::game_metadata_t meta;
       if (claimed_elsewhere) {
         meta = existing;
-        if (meta.background_image_path.empty()) {
+        // A game IGDB describes, or one the user edited, still takes Playnite's hero art when
+        // it has none of its own: art from somewhere beats no art, and neither of those cases
+        // said anything about images. Turning playnite_sync_metadata off did, so there the
+        // field is left alone like the rest.
+        if (meta.background_image_path.empty() && config::playnite.sync_metadata) {
           meta.background_image_path = background;
         }
       } else {
