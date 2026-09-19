@@ -9,7 +9,8 @@ TEST(PlayniteConfig, Booleans_ParseCaseInsensitiveTruths) {
     {"playnite_autosync_require_replacement", "0"},
     {"playnite_sync_all_installed", "YES"},
     {"playnite_autosync_remove_uninstalled", "off"},
-    {"playnite_exclude_hidden_games", "false"}
+    {"playnite_exclude_hidden_games", "false"},
+    {"playnite_sync_metadata", "Disabled"}
   };
   const auto parsed = config::parse_playnite(vars);
   EXPECT_TRUE(parsed.auto_sync);
@@ -17,7 +18,13 @@ TEST(PlayniteConfig, Booleans_ParseCaseInsensitiveTruths) {
   EXPECT_TRUE(parsed.sync_all_installed);
   EXPECT_FALSE(parsed.autosync_remove_uninstalled);
   EXPECT_FALSE(parsed.exclude_hidden_games);
+  EXPECT_FALSE(parsed.sync_metadata);
   EXPECT_TRUE(vars.empty());
+}
+
+TEST(PlayniteConfig, SyncMetadata_DefaultsOn) {
+  std::unordered_map<std::string, std::string> vars;
+  EXPECT_TRUE(config::parse_playnite(vars).sync_metadata);
 }
 
 TEST(PlayniteConfig, Integers_ValidAndClampNegatives) {

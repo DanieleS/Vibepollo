@@ -5,6 +5,8 @@
 
 #include "playnite_sync.h"
 
+#include "src/config_playnite.h"
+#include "src/game_metadata_policy.h"
 #include "src/logging.h"
 #include "src/platform/windows/playnite_integration.h"
 #include "src/uuid.h"
@@ -57,23 +59,12 @@ namespace platf::playnite::sync {
     return true;
   }
 
-  void apply_game_metadata_to_app(const Game &game, nlohmann::json &app, const std::filesystem::path &covers_root) {
+  void apply_game_metadata_to_app(const Game &game, nlohmann::json &app, const std::filesystem::path &covers_root, bool include_metadata) {
     try {
       if (!game.box_art_path.empty()) {
         const auto destination = covers_root / ("playnite_" + game.id + ".png");
         if (convert_playnite_image_to_png(game.box_art_path, destination)) policy::apply_box_art_path(app, destination.generic_string());
       }
-    } catch (...) {}
-    try {
-      bool stored = false;
-      if (!game.background_path.empty()) {
-        const auto destination = covers_root / ("playnite_bg_" + game.id + ".png");
-        if (convert_playnite_image_to_png(game.background_path, destination)) {
-          app["playnite-background"] = destination.generic_string();
-          stored = true;
-        }
-      }
-      if (!stored && app.contains("playnite-background")) app.erase("playnite-background");
     } catch (...) {}
     try {
       const auto destination = covers_root / ("playnite_icon_" + game.id + ".png");
@@ -90,46 +81,37 @@ namespace platf::playnite::sync {
         policy::apply_icon_path(app, {});
       }
     } catch (...) {}
-    // Metadata passthrough: mirror Playnite-enriched fields into the app node so they can be
-    // served to clients. Absent values are erased to keep apps.json tidy and idempotent.
+    // Descriptive metadata: mirror the fields Playnite enriched (description, genres, companies,
+    // release date, scores, background art) onto the app so they can be served to clients.
+    // Skipped when the user sources them elsewhere (playnite_sync_metadata = false), in which
+    // case whatever another provider wrote is left untouched.
+    if (include_metadata) {
+      try {
+        std::string background_path;
+        if (!game.background_path.empty()) {
+          const auto destination = covers_root / ("playnite_bg_" + game.id + ".png");
+          if (convert_playnite_image_to_png(game.background_path, destination)) background_path = destination.generic_string();
+        }
+        game_metadata::descriptive_t fields;
+        fields.description = game.description;
+        fields.genres = game.genres;
+        fields.developers = game.developers;
+        fields.publishers = game.publishers;
+        fields.release_date = game.release_date;
+        fields.community_score = game.community_score;
+        fields.critic_score = game.critic_score;
+        fields.background_path = std::move(background_path);
+        game_metadata::write_descriptive(app, fields, game_metadata::source_playnite);
+      } catch (...) {}
+    }
+    // Activity data only Playnite knows; always kept current.
     try {
-      const auto set_or_erase_str = [&app](const char *key, const std::string &value) {
-        if (!value.empty()) {
-          app[key] = value;
-        } else if (app.contains(key)) {
-          app.erase(key);
-        }
-      };
-      const auto set_or_erase_list = [&app](const char *key, const std::vector<std::string> &values) {
-        if (!values.empty()) {
-          app[key] = values;
-        } else if (app.contains(key)) {
-          app.erase(key);
-        }
-      };
-      const auto set_or_erase_score = [&app](const char *key, int score) {
-        if (score >= 0) {
-          app[key] = score;
-        } else if (app.contains(key)) {
-          app.erase(key);
-        }
-      };
-      set_or_erase_str("playnite-description", game.description);
-      set_or_erase_list("playnite-genres", game.genres);
-      set_or_erase_list("playnite-developers", game.developers);
-      set_or_erase_list("playnite-publishers", game.publishers);
-      set_or_erase_str("playnite-release-date", game.release_date);
-      set_or_erase_score("playnite-community-score", game.community_score);
-      set_or_erase_score("playnite-critic-score", game.critic_score);
-      set_or_erase_str("playnite-last-played", game.last_played);
-      // Zero playtime is the same as none for a client ordering a library, so it is erased
-      // rather than written, keeping apps.json free of a key on every never-played game.
-      if (game.playtime_minutes > 0) {
-        app["playnite-playtime-minutes"] = game.playtime_minutes;
-      } else if (app.contains("playnite-playtime-minutes")) {
-        app.erase("playnite-playtime-minutes");
-      }
+      game_metadata::write_activity(app, game.last_played, game.playtime_minutes);
     } catch (...) {}
+  }
+
+  void apply_game_metadata_to_app(const Game &game, nlohmann::json &app, const std::filesystem::path &covers_root) {
+    apply_game_metadata_to_app(game, app, covers_root, config::playnite.sync_metadata);
   }
 
   void apply_game_metadata_to_app(const Game &game, nlohmann::json &app) {

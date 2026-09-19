@@ -1481,6 +1481,8 @@
     "remove_uninstalled_desc": "启用后，只要游戏在 Playnite 中被卸载，Vibepollo 就会移除对应的自动同步游戏。",
     "exclude_hidden_games": "跳过在 Playnite 中隐藏的游戏",
     "exclude_hidden_games_desc": "启用后，在 Playnite 中标记为隐藏的游戏永远不会自动同步；已自动同步的游戏在你隐藏它们后会被移除。",
+    "sync_metadata": "从 Playnite 获取游戏元数据",
+    "sync_metadata_desc": "启用后，Playnite 为游戏保存的简介、类型、公司、发行日期、评分和背景图会在每次同步时复制到已同步的应用中，并覆盖任何其他来源。若要改为从 IGDB 填充这些字段（库，“获取元数据”），请禁用此选项；最近游玩时间和游玩时长始终来自 Playnite。",
     "extensions_dir": "扩展目录",
     "install_dir": "安装路径覆盖",
     "save_success": "设置已保存。",

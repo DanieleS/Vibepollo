@@ -62,6 +62,13 @@ namespace config {
     // auto-synced apps whose games become hidden are removed.
     bool exclude_hidden_games = true;
 
+    // When true, the descriptive metadata Playnite holds for a game (description, genres,
+    // companies, release date, scores, background art) is copied onto the synced app and
+    // overwrites whatever another provider wrote. When false, those fields are left alone so
+    // they can come from the IGDB fetch instead. Activity data (last played, playtime) is
+    // always synced, since only Playnite knows it.
+    bool sync_metadata = true;
+
     // When true, only purge auto-synced games that no longer qualify
     // if there is a qualifying replacement to fill the slot. When false,
     // always purge games that no longer qualify, even if it leaves fewer

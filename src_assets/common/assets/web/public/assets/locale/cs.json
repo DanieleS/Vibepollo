@@ -1481,6 +1481,8 @@
     "remove_uninstalled_desc": "Když je tato možnost povolena, Vibepollo odebere automaticky synchronizované hry, jakmile jsou v Playnite odinstalovány.",
     "exclude_hidden_games": "Přeskakovat hry skryté v Playnite",
     "exclude_hidden_games_desc": "Když je tato možnost zapnutá, hry označené v Playnite jako skryté se nikdy automaticky nesynchronizují a již synchronizované hry se odeberou, jakmile je skryjete.",
+    "sync_metadata": "Přebírat metadata her z Playnite",
+    "sync_metadata_desc": "Pokud je povoleno, popis, žánry, společnosti, datum vydání, hodnocení a pozadí, které Playnite u hry eviduje, se při každé synchronizaci zkopírují na synchronizovanou aplikaci a přepíší jakýkoli jiný zdroj. Vypněte to, pokud chcete tato pole plnit z IGDB (Knihovna, „Načíst metadata“); poslední hraní a herní čas se vždy berou z Playnite.",
     "extensions_dir": "Adresář rozšíření",
     "install_dir": "Přepsání instalační cesty",
     "save_success": "Nastavení uloženo.",

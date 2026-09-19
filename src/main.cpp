@@ -18,6 +18,7 @@
 // local includes
 #include "confighttp.h"
 #include "entry_handler.h"
+#include "game_metadata_bulk.h"
 #include "globals.h"
 #include "host_stats.h"
 #include "httpcommon.h"
@@ -868,6 +869,9 @@ int main(int argc, char *argv[]) {
   VDISPLAY::cleanup_retained_ensure_display();
   VDISPLAY::closeVDisplayDevice();
 #endif
+
+  // Stop any metadata fetch before the pools go away; it writes apps.json and refreshes the catalog.
+  game_metadata::bulk::shutdown();
 
   task_pool.stop();
   task_pool.join();

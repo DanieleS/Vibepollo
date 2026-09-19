@@ -1481,6 +1481,8 @@
     "remove_uninstalled_desc": "활성화되면 Vibepollo은(는) Playnite에서 제거되는 즉시 자동 동기화된 게임을 제거합니다.",
     "exclude_hidden_games": "Playnite에서 숨긴 게임 건너뛰기",
     "exclude_hidden_games_desc": "활성화하면 Playnite에서 숨김으로 표시된 게임은 자동 동기화되지 않으며, 이미 자동 동기화된 게임도 숨기는 즉시 제거됩니다.",
+    "sync_metadata": "게임 메타데이터를 Playnite에서 가져오기",
+    "sync_metadata_desc": "활성화하면 Playnite가 보유한 설명, 장르, 회사, 출시일, 점수, 배경 이미지가 동기화된 애플리케이션에 복사되며 동기화할 때마다 다른 출처를 덮어씁니다. 해당 항목을 IGDB에서 채우려면 비활성화하세요(라이브러리, \"메타데이터 가져오기\"). 마지막 플레이와 플레이 시간은 항상 Playnite에서 가져옵니다.",
     "extensions_dir": "확장 디렉토리",
     "install_dir": "설치 경로 재정의",
     "save_success": "설정이 저장되었습니다.",

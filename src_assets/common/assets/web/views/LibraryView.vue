@@ -23,6 +23,13 @@ import {
   fetchApps,
   type AppRecord,
 } from '@/services/apps';
+import {
+  cancelMetadataBulk,
+  fetchMetadataBulkStatus,
+  startMetadataBulk,
+  type MetadataBulkResult,
+  type MetadataBulkStatus,
+} from '@/services/metadata';
 
 type ViewMode = 'grid' | 'list';
 type SortMode = 'name' | 'name-desc' | 'source';
@@ -53,8 +60,19 @@ const deleteTarget = ref<AppRecord | null>(null);
 const deleteOpen = ref(false);
 const deleteBusy = ref(false);
 const deleteError = ref('');
+const metadataOpen = ref(false);
+const metadataStatus = ref<MetadataBulkStatus | null>(null);
+const metadataBusy = ref(false);
+const metadataError = ref('');
+const metadataRefresh = ref(false);
+const metadataBackground = ref(true);
+const metadataCover = ref(true);
+const metadataSelectionOnly = ref(false);
+let metadataTimer: number | undefined;
 let queryTimer: number | undefined;
 let observer: IntersectionObserver | undefined;
+
+const METADATA_POLL_MS = 1500;
 
 const collator = computed(
   () => new Intl.Collator(locale.value || undefined, { numeric: true, sensitivity: 'base' }),
@@ -349,6 +367,98 @@ async function confirmDelete(): Promise<void> {
   }
 }
 
+const metadataRunning = computed(() => metadataStatus.value?.running === true);
+const metadataProgressPercent = computed(() => {
+  const status = metadataStatus.value;
+  if (!status || !status.total) return 0;
+  return Math.min(100, Math.round((status.processed / status.total) * 100));
+});
+const metadataReview = computed<MetadataBulkResult[]>(
+  () => metadataStatus.value?.results.filter((entry) => entry.status === 'matched_ambiguous') ?? [],
+);
+const metadataUnmatched = computed<MetadataBulkResult[]>(
+  () => metadataStatus.value?.results.filter((entry) => entry.status === 'unmatched') ?? [],
+);
+const metadataFailed = computed<MetadataBulkResult[]>(
+  () => metadataStatus.value?.results.filter((entry) => entry.status === 'failed') ?? [],
+);
+const metadataHasResults = computed(() =>
+  Boolean(metadataStatus.value && (metadataStatus.value.total || metadataStatus.value.error)),
+);
+
+function metadataReasonLabel(entry: MetadataBulkResult): string {
+  if (!entry.reason) return '';
+  const key = `ui.library.metadata.results.reason.${entry.reason}`;
+  const label = t(key);
+  return label === key ? entry.reason : label;
+}
+
+function stopMetadataPolling(): void {
+  window.clearTimeout(metadataTimer);
+  metadataTimer = undefined;
+}
+
+async function refreshMetadataStatus(): Promise<void> {
+  try {
+    const previous = metadataStatus.value;
+    const status = await fetchMetadataBulkStatus();
+    metadataStatus.value = status;
+    metadataError.value = '';
+    if (status.running) {
+      metadataOpen.value = true;
+      stopMetadataPolling();
+      metadataTimer = window.setTimeout(() => void refreshMetadataStatus(), METADATA_POLL_MS);
+    } else if (previous?.running) {
+      // A run just finished: covers and metadata may have changed on disk.
+      await load();
+    }
+  } catch (cause) {
+    metadataError.value = serviceError(cause, 'ui.library.metadata.errors.status');
+    stopMetadataPolling();
+  }
+}
+
+function toggleMetadataPanel(): void {
+  metadataOpen.value = !metadataOpen.value;
+  if (metadataOpen.value) void refreshMetadataStatus();
+}
+
+async function startMetadata(): Promise<void> {
+  if (metadataBusy.value || metadataRunning.value) return;
+  metadataBusy.value = true;
+  metadataError.value = '';
+  try {
+    metadataStatus.value = await startMetadataBulk({
+      refresh_existing: metadataRefresh.value,
+      download_background: metadataBackground.value,
+      download_cover: metadataCover.value,
+      uuids: metadataSelectionOnly.value ? [...selectedUuids.value] : [],
+    });
+    stopMetadataPolling();
+    metadataTimer = window.setTimeout(() => void refreshMetadataStatus(), METADATA_POLL_MS);
+  } catch (cause) {
+    metadataError.value =
+      cause instanceof Error && cause.message && cause.message !== 'metadata-bulk-start-failed'
+        ? cause.message
+        : t('ui.library.metadata.errors.start');
+  } finally {
+    metadataBusy.value = false;
+  }
+}
+
+async function cancelMetadata(): Promise<void> {
+  if (metadataBusy.value) return;
+  metadataBusy.value = true;
+  try {
+    const status = await cancelMetadataBulk();
+    if (status) metadataStatus.value = status;
+  } catch (cause) {
+    metadataError.value = serviceError(cause, 'ui.library.metadata.errors.status');
+  } finally {
+    metadataBusy.value = false;
+  }
+}
+
 function loadMore(): void {
   renderLimit.value = Math.min(renderLimit.value + PAGE_SIZE, filteredApps.value.length);
 }
@@ -396,10 +506,13 @@ onMounted(() => {
   }
   document.addEventListener('pointerdown', onDocumentPointerDown);
   void load();
+  // Reopen the panel when a fetch started earlier is still running.
+  void refreshMetadataStatus();
 });
 
 onBeforeUnmount(() => {
   window.clearTimeout(queryTimer);
+  stopMetadataPolling();
   observer?.disconnect();
   document.removeEventListener('pointerdown', onDocumentPointerDown);
 });
@@ -410,6 +523,14 @@ onBeforeUnmount(() => {
     <PageHeader :title="t('ui.library.page.title')" :description="t('ui.library.page.description')">
       <template #actions>
         <AppButton
+          icon="download"
+          variant="secondary"
+          :label="t('ui.library.metadata.action')"
+          :aria-expanded="metadataOpen"
+          aria-controls="library-metadata-panel"
+          @click="toggleMetadataPanel"
+        />
+        <AppButton
           icon="plus"
           variant="primary"
           :label="t('ui.library.actions.add')"
@@ -417,6 +538,180 @@ onBeforeUnmount(() => {
         />
       </template>
     </PageHeader>
+
+    <section
+      v-if="metadataOpen"
+      id="library-metadata-panel"
+      class="library-metadata vs-card"
+      :aria-label="t('ui.library.metadata.title')"
+    >
+      <div class="library-metadata__intro">
+        <h2 class="library-metadata__title">{{ t('ui.library.metadata.title') }}</h2>
+        <p>{{ t('ui.library.metadata.description') }}</p>
+        <p class="library-metadata__source">{{ t('ui.library.metadata.source') }}</p>
+      </div>
+
+      <div class="library-metadata__options">
+        <label class="vs-checkbox">
+          <input v-model="metadataRefresh" type="checkbox" :disabled="metadataRunning" />
+          <span>{{ t('ui.library.metadata.options.refresh') }}</span>
+        </label>
+        <p class="library-metadata__hint">{{ t('ui.library.metadata.options.refreshHint') }}</p>
+        <label class="vs-checkbox">
+          <input v-model="metadataBackground" type="checkbox" :disabled="metadataRunning" />
+          <span>{{ t('ui.library.metadata.options.background') }}</span>
+        </label>
+        <label class="vs-checkbox">
+          <input v-model="metadataCover" type="checkbox" :disabled="metadataRunning" />
+          <span>{{ t('ui.library.metadata.options.cover') }}</span>
+        </label>
+        <label v-if="selectedUuids.size" class="vs-checkbox">
+          <input v-model="metadataSelectionOnly" type="checkbox" :disabled="metadataRunning" />
+          <span>
+            {{ t('ui.library.metadata.options.selectionOnly', { count: selectedUuids.size }) }}
+          </span>
+        </label>
+      </div>
+
+      <div class="library-metadata__actions">
+        <AppButton
+          v-if="!metadataRunning"
+          icon="download"
+          variant="primary"
+          :label="t('ui.library.metadata.start')"
+          :busy="metadataBusy"
+          :busy-label="t('ui.library.metadata.starting')"
+          @click="startMetadata"
+        />
+        <AppButton
+          v-else
+          icon="stop"
+          variant="secondary"
+          :label="t('ui.library.metadata.cancel')"
+          :busy="metadataBusy"
+          :busy-label="t('ui.library.metadata.cancelling')"
+          @click="cancelMetadata"
+        />
+        <AppButton
+          variant="tertiary"
+          :label="t('ui.library.metadata.close')"
+          :disabled="metadataRunning"
+          @click="metadataOpen = false"
+        />
+      </div>
+
+      <InlineAlert v-if="metadataError" tone="danger" announce="assertive">
+        {{ metadataError }}
+      </InlineAlert>
+
+      <div
+        v-if="metadataStatus && metadataRunning"
+        class="library-metadata__progress"
+        role="status"
+      >
+        <div class="library-metadata__progress-head">
+          <StatusBadge tone="info">{{ t('ui.library.metadata.running') }}</StatusBadge>
+          <span>
+            {{
+              t('ui.library.metadata.progress', {
+                processed: metadataStatus.processed,
+                total: metadataStatus.total,
+              })
+            }}
+          </span>
+        </div>
+        <div
+          class="library-metadata__bar"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-valuenow="metadataProgressPercent"
+        >
+          <span :style="{ inlineSize: `${metadataProgressPercent}%` }" />
+        </div>
+        <p v-if="metadataStatus.current" class="library-metadata__current">
+          {{ t('ui.library.metadata.current', { name: metadataStatus.current }) }}
+        </p>
+      </div>
+
+      <template v-else-if="metadataStatus && metadataHasResults">
+        <InlineAlert
+          :tone="metadataStatus.error ? 'danger' : 'success'"
+          :title="
+            metadataStatus.cancelled
+              ? t('ui.library.metadata.finishedCancelled')
+              : t('ui.library.metadata.finished')
+          "
+        >
+          <template v-if="metadataStatus.error">{{ metadataStatus.error }}</template>
+          <template v-else>
+            {{
+              t('ui.library.metadata.summary', {
+                matched: metadataStatus.matched,
+                unmatched: metadataStatus.unmatched,
+                skipped: metadataStatus.skipped,
+                failed: metadataStatus.failed,
+              })
+            }}
+          </template>
+        </InlineAlert>
+
+        <div v-if="metadataReview.length" class="library-metadata__group">
+          <h3>{{ t('ui.library.metadata.results.reviewTitle') }}</h3>
+          <p class="library-metadata__hint">
+            {{ t('ui.library.metadata.results.reviewDescription') }}
+          </p>
+          <ul class="library-metadata__list">
+            <li v-for="entry in metadataReview" :key="entry.uuid">
+              <StatusBadge tone="warning">
+                {{ t(`ui.library.metadata.results.status.${entry.status}`) }}
+              </StatusBadge>
+              <RouterLink :to="{ name: 'application', params: { id: entry.uuid } }">
+                {{ entry.name }}
+              </RouterLink>
+              <span v-if="entry.igdb_name" class="library-metadata__detail">
+                {{ t('ui.library.metadata.results.matchedAs', { name: entry.igdb_name }) }}
+              </span>
+              <span v-if="entry.reason" class="library-metadata__detail">
+                {{ metadataReasonLabel(entry) }}
+              </span>
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="metadataUnmatched.length" class="library-metadata__group">
+          <h3>{{ t('ui.library.metadata.results.unmatchedTitle') }}</h3>
+          <p class="library-metadata__hint">
+            {{ t('ui.library.metadata.results.unmatchedDescription') }}
+          </p>
+          <ul class="library-metadata__list">
+            <li v-for="entry in metadataUnmatched" :key="entry.uuid">
+              <StatusBadge tone="neutral">
+                {{ t('ui.library.metadata.results.status.unmatched') }}
+              </StatusBadge>
+              <RouterLink :to="{ name: 'application', params: { id: entry.uuid } }">
+                {{ entry.name }}
+              </RouterLink>
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="metadataFailed.length" class="library-metadata__group">
+          <h3>{{ t('ui.library.metadata.results.failedTitle') }}</h3>
+          <ul class="library-metadata__list">
+            <li v-for="entry in metadataFailed" :key="entry.uuid">
+              <StatusBadge tone="danger">
+                {{ t('ui.library.metadata.results.status.failed') }}
+              </StatusBadge>
+              <span>{{ entry.name }}</span>
+              <span v-if="entry.reason" class="library-metadata__detail">
+                {{ metadataReasonLabel(entry) }}
+              </span>
+            </li>
+          </ul>
+        </div>
+      </template>
+    </section>
 
     <InlineAlert
       v-if="error"
@@ -723,6 +1018,83 @@ onBeforeUnmount(() => {
   border-radius: var(--vs-radius-card);
   background: color-mix(in srgb, var(--vs-color-bg-canvas) 92%, transparent);
   backdrop-filter: blur(10px);
+}
+
+.library-metadata {
+  display: grid;
+  gap: var(--vs-space-16);
+}
+
+.library-metadata__intro,
+.library-metadata__group {
+  display: grid;
+  gap: var(--vs-space-4);
+}
+
+.library-metadata__title {
+  margin: 0;
+  font-size: var(--vs-type-size-heading-3, 1.125rem);
+}
+
+.library-metadata__intro p,
+.library-metadata__group h3 {
+  margin: 0;
+}
+
+.library-metadata__source,
+.library-metadata__hint,
+.library-metadata__current,
+.library-metadata__detail {
+  margin: 0;
+  color: var(--vs-color-text-secondary);
+  font-size: var(--vs-type-size-metadata);
+}
+
+.library-metadata__options {
+  display: grid;
+  gap: var(--vs-space-8);
+}
+
+.library-metadata__actions,
+.library-metadata__progress-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--vs-space-8);
+}
+
+.library-metadata__progress {
+  display: grid;
+  gap: var(--vs-space-8);
+}
+
+.library-metadata__bar {
+  block-size: 0.5rem;
+  overflow: hidden;
+  border-radius: var(--vs-radius-control);
+  background: var(--vs-color-border-subtle);
+}
+
+.library-metadata__bar > span {
+  display: block;
+  block-size: 100%;
+  background: var(--vs-color-accent-default);
+  transition: inline-size 300ms ease;
+}
+
+.library-metadata__list {
+  display: grid;
+  gap: var(--vs-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.library-metadata__list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--vs-space-8);
 }
 
 .library-search {

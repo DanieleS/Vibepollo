@@ -4174,6 +4174,31 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
     </tr>
 </table>
 
+### playnite_sync_metadata
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td>
+            Controls whether the descriptive metadata Playnite holds for a game (description, genres,
+            developers and publishers, release date, community and critic scores, background art) is
+            copied onto the synced application. When <code>true</code>, Playnite is the source of truth
+            and overwrites metadata written by any other provider on every sync.
+            Set it to <code>false</code> to source those fields from the IGDB fetch in the Web UI
+            (Library, "Fetch metadata") instead; the sync then leaves them untouched.
+            Activity data (last played, playtime) is always synced, since only Playnite knows it.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td>@code{}true@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td>@code{}playnite_sync_metadata = false@endcode</td>
+    </tr>
+</table>
+
 ### playnite_sync_plugins
 
 <table>

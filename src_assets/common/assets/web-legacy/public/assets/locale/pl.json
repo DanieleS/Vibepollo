@@ -1481,6 +1481,8 @@
     "remove_uninstalled_desc": "Gdy opcja jest włączona, Vibepollo usuwa automatycznie zsynchronizowane gry zaraz po odinstalowaniu ich w Playnite.",
     "exclude_hidden_games": "Pomijaj gry ukryte w Playnite",
     "exclude_hidden_games_desc": "Gdy ta opcja jest włączona, gry oznaczone w Playnite jako ukryte nigdy nie są synchronizowane automatycznie, a już zsynchronizowane gry są usuwane, gdy tylko je ukryjesz.",
+    "sync_metadata": "Pobieraj metadane gier z Playnite",
+    "sync_metadata_desc": "Gdy opcja jest włączona, opis, gatunki, firmy, data wydania, oceny i grafika tła przechowywane przez Playnite są kopiowane do zsynchronizowanej aplikacji i przy każdej synchronizacji zastępują każde inne źródło. Wyłącz ją, aby wypełniać te pola z IGDB (Biblioteka, „Pobierz metadane”); ostatnia gra i czas gry zawsze pochodzą z Playnite.",
     "extensions_dir": "Katalog rozszerzeń",
     "install_dir": "Nadpisanie ścieżki instalacji",
     "save_success": "Ustawienia zapisane.",

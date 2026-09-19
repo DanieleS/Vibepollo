@@ -85,6 +85,19 @@ See below for details on token endpoints and usage examples.
 ## POST /api/covers/upload
 @copydoc confighttp::uploadCover()
 
+## POST /api/metadata/igdb/bulk
+@copydoc confighttp::startMetadataBulk()
+
+- Looks every application (or the `uuids` given) up by name in the LizardByte GameDB mirror of IGDB and writes the `metadata-*` keys on the matching apps, plus background art and a missing cover when requested.
+- Applications that already carry descriptive metadata (from Playnite or an earlier fetch) are skipped unless `refresh_existing` is true.
+- Outbound requests are paced to four per second. The call returns immediately; poll the status endpoint for progress.
+
+## GET /api/metadata/igdb/bulk
+@copydoc confighttp::getMetadataBulkStatus()
+
+## POST /api/metadata/igdb/bulk/cancel
+@copydoc confighttp::cancelMetadataBulk()
+
 ## GET /api/logs
 @copydoc confighttp::getLogs()
 

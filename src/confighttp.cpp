@@ -50,6 +50,7 @@
 #include "confighttp.h"
 #include "crypto.h"
 #include "file_handler.h"
+#include "game_metadata_bulk.h"
 #include "globals.h"
 #include "http_auth.h"
 #include "httpcommon.h"
@@ -4257,6 +4258,89 @@ namespace confighttp {
   }
 
   /**
+   * @brief Start a background fetch of app metadata from the IGDB mirror (LizardByte GameDB).
+   *        Apps are looked up by name; matches fill the `metadata-*` keys, and optionally the
+   *        background art and a missing cover. Requests are paced to four per second.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/metadata/igdb/bulk| POST| {"refresh_existing":false,"download_background":true,"download_cover":true,"uuids":[]}}
+   */
+  void startMetadataBulk(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    try {
+      nlohmann::json input_tree = ss.str().empty() ? nlohmann::json::object() : nlohmann::json::parse(ss.str());
+      game_metadata::bulk::options_t options;
+      options.refresh_existing = util::get_non_string_json_value<bool>(input_tree, "refresh_existing", false);
+      options.download_background = util::get_non_string_json_value<bool>(input_tree, "download_background", true);
+      options.download_cover = util::get_non_string_json_value<bool>(input_tree, "download_cover", true);
+      if (input_tree.contains("uuids") && input_tree["uuids"].is_array()) {
+        for (const auto &uuid : input_tree["uuids"]) {
+          if (uuid.is_string() && !uuid.get<std::string>().empty()) {
+            options.uuids.push_back(uuid.get<std::string>());
+          }
+        }
+      }
+
+      nlohmann::json output_tree;
+      const bool started = game_metadata::bulk::start(std::move(options));
+      output_tree["status"] = started;
+      if (!started) {
+        output_tree["error"] = "A metadata fetch is already running";
+      }
+      output_tree["job"] = game_metadata::bulk::status();
+      send_response(response, output_tree);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "StartMetadataBulk: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Report the progress and per-app results of the current or last metadata fetch.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/metadata/igdb/bulk| GET| null}
+   */
+  void getMetadataBulkStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    send_response(response, game_metadata::bulk::status());
+  }
+
+  /**
+   * @brief Ask the running metadata fetch to stop after the app it is working on.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/metadata/igdb/bulk/cancel| POST| null}
+   */
+  void cancelMetadataBulk(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = game_metadata::bulk::cancel();
+    output_tree["job"] = game_metadata::bulk::status();
+    send_response(response, output_tree);
+  }
+
+  /**
    * @brief Purge all auto-synced Playnite applications (playnite-managed == "auto").
    * @api_examples{/api/apps/purge_autosync| POST| null}
    */
@@ -5825,6 +5909,9 @@ namespace confighttp {
     register_api_route("^/api/webrtc/cert$", "GET", getWebRTCCert);
     // Keep legacy cover upload endpoint present in upstream master
     register_api_route("^/api/covers/upload$", "POST", uploadCover);
+    register_api_route("^/api/metadata/igdb/bulk$", "POST", startMetadataBulk);
+    register_api_route("^/api/metadata/igdb/bulk$", "GET", getMetadataBulkStatus);
+    register_api_route("^/api/metadata/igdb/bulk/cancel$", "POST", cancelMetadataBulk);
     register_api_route("^/api/covers/([0-9]+)$", "GET", getCover);
     register_api_route("^/api/vigembus/status$", "GET", getViGEmBusStatus);
     register_api_route("^/api/vigembus/install$", "POST", installViGEmBus);

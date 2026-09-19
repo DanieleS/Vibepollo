@@ -647,6 +647,61 @@
         "grid": "Grid",
         "label": "Library view",
         "list": "List"
+      },
+      "metadata": {
+        "action": "Fetch metadata",
+        "title": "Fetch metadata from IGDB",
+        "description": "Looks every application up by name in the IGDB game database and fills in its description, genres, companies, release date and scores. Requests are paced to four per second, so a large library takes a few minutes.",
+        "source": "Data comes from the LizardByte GameDB mirror of IGDB; artwork is downloaded from images.igdb.com.",
+        "options": {
+          "refresh": "Refresh applications that already have metadata",
+          "refreshHint": "Off by default so metadata synced from Playnite, or fetched earlier, is left alone.",
+          "background": "Download background art",
+          "cover": "Download a cover for applications without one",
+          "selectionOnly": "Only the {count} selected applications"
+        },
+        "start": "Start",
+        "starting": "Starting",
+        "cancel": "Stop after the current application",
+        "cancelling": "Stopping",
+        "close": "Hide results",
+        "running": "Fetching metadata",
+        "current": "Looking up {name}",
+        "progress": "{processed} of {total} processed",
+        "finished": "Metadata fetch finished",
+        "finishedCancelled": "Metadata fetch stopped",
+        "summary": "{matched} matched, {unmatched} not found, {skipped} skipped, {failed} failed",
+        "errors": {
+          "start": "Unable to start the metadata fetch.",
+          "busy": "A metadata fetch is already running.",
+          "status": "Unable to read the metadata fetch status."
+        },
+        "results": {
+          "label": "Results",
+          "empty": "No applications were processed.",
+          "reviewTitle": "Worth a look",
+          "reviewDescription": "These applications matched only after a tie-break or a prefix guess. Open one to check the result or pick a different cover.",
+          "unmatchedTitle": "Not found",
+          "unmatchedDescription": "No IGDB entry has this exact name. Rename the application to the title IGDB uses, or leave it as is.",
+          "failedTitle": "Failed",
+          "matchedAs": "matched as {name}",
+          "status": {
+            "matched": "Matched",
+            "matched_ambiguous": "Check",
+            "unmatched": "Not found",
+            "skipped": "Skipped",
+            "failed": "Failed"
+          },
+          "reason": {
+            "playnite": "metadata comes from Playnite",
+            "existing": "already has metadata",
+            "prefix": "matched by name prefix",
+            "multiple_exact": "several IGDB entries share this name",
+            "bucket_unavailable": "the game database could not be reached",
+            "game_missing": "the IGDB entry is missing from the database",
+            "game_unavailable": "the IGDB entry could not be downloaded"
+          }
+        }
       }
     },
     "logs": {

@@ -1491,6 +1491,8 @@
     "remove_uninstalled_desc": "When enabled, Vibepollo removes auto-synced games as soon as they are uninstalled in Playnite.",
     "exclude_hidden_games": "Skip games hidden in Playnite",
     "exclude_hidden_games_desc": "When enabled, games flagged as hidden in Playnite are never auto-synced, and auto-synced games are removed once you hide them.",
+    "sync_metadata": "Take game metadata from Playnite",
+    "sync_metadata_desc": "When enabled, the description, genres, companies, release date, scores and background art Playnite holds for a game are copied onto the synced application and overwrite any other source on every sync. Disable it to fill those fields from IGDB (Library, \"Fetch metadata\") instead; last played and playtime are always taken from Playnite.",
     "extensions_dir": "Extensions directory",
     "install_dir": "Installation path override",
     "save_success": "Settings saved.",

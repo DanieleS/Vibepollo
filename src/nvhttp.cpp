@@ -4217,11 +4217,11 @@ namespace nvhttp {
   }
 
   /**
-   * @brief Serve Playnite-enriched per-app metadata as JSON, keyed by app UUID.
+   * @brief Serve per-app metadata as JSON, keyed by app UUID.
    *
-   * This is additive to the Moonlight protocol: only apps that carry metadata (Playnite games)
-   * are listed, and clients that don't know the endpoint simply never call it. The applist
-   * hot-path is left untouched.
+   * This is additive to the Moonlight protocol: only apps that carry metadata (written by the
+   * Playnite sync or the IGDB fetch; `source` says which) are listed, and clients that don't
+   * know the endpoint simply never call it. The applist hot-path is left untouched.
    */
   void appmetadata(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
@@ -4244,7 +4244,7 @@ namespace nvhttp {
     nlohmann::json apps = nlohmann::json::array();
 
     for (const auto &app : proc::proc.get_apps()) {
-      const auto &meta = app.playnite_metadata;
+      const auto &meta = app.metadata;
       if (!meta.present) {
         continue;
       }
@@ -4254,6 +4254,12 @@ namespace nvhttp {
       node["name"] = app.name;
       if (!app.playnite_id.empty()) {
         node["playnite_id"] = app.playnite_id;
+      }
+      if (!meta.source.empty()) {
+        node["source"] = meta.source;
+      }
+      if (!meta.igdb_id.empty()) {
+        node["igdb_id"] = meta.igdb_id;
       }
       if (!meta.description.empty()) {
         node["description"] = meta.description;
@@ -4327,7 +4333,7 @@ namespace nvhttp {
     const auto appid = get_arg(args, "appid", "0");
     const auto appuuid = get_arg(args, "appuuid", "");
     auto app_ctx = proc::proc.resolve_app(appid, appuuid);
-    std::string bg = app_ctx ? app_ctx->playnite_metadata.background_image_path : std::string();
+    std::string bg = app_ctx ? app_ctx->metadata.background_image_path : std::string();
 
     fg.disable();
 

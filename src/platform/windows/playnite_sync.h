@@ -22,6 +22,9 @@ namespace platf::playnite::sync {
   // Art conversion cache: identity of the source image (path+size+mtime) that produced a converted PNG.
   std::string image_source_signature(const std::filesystem::path &src);
   bool convert_playnite_image_to_png(const std::string &src_path, const std::filesystem::path &dst);
+  // Refreshes the box art, icon, activity data and, when include_metadata is set, the descriptive
+  // metadata of a synced app. The overloads without the flag read config::playnite.sync_metadata.
+  void apply_game_metadata_to_app(const Game &g, nlohmann::json &app, const std::filesystem::path &covers_root, bool include_metadata);
   void apply_game_metadata_to_app(const Game &g, nlohmann::json &app, const std::filesystem::path &covers_root);
   void apply_game_metadata_to_app(const Game &g, nlohmann::json &app);
   void write_and_refresh_apps(nlohmann::json &root, const std::string &apps_path);
