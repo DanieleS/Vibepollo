@@ -50,6 +50,10 @@
 #include "confighttp.h"
 #include "crypto.h"
 #include "file_handler.h"
+#include "game_metadata.h"
+#include "igdb_client.h"
+#include "igdb_policy.h"
+#include "metadata_resolver.h"
 #include "globals.h"
 #include "http_auth.h"
 #include "httpcommon.h"
@@ -59,8 +63,11 @@
 
 #endif
 #include "logging.h"
+#include "log_export.h"
 #include "network.h"
 #include "nvhttp.h"
+#include "remote_display_topology.h"
+#include "remote_session.h"
 #include "platform/common.h"
 #include "rtsp.h"
 #include "session_history.h"
@@ -71,6 +78,11 @@
 
 #ifdef _WIN32
   #include "platform/windows/virtual_display_cleanup.h"
+  #include "platform/windows/virtual_display.h"
+#elif defined(__linux__)
+  #include "platform/linux/capture_status.h"
+  #include "platform/linux/private_display.h"
+  #include "src/platform/linux/display_backend.h"
 #endif
 
 #include <nlohmann/json.hpp>
@@ -158,6 +170,52 @@ namespace confighttp {
     return std::nullopt;
   }
 
+  remote_session::control_e configurable_remote_session(std::string_view uuid) {
+    const auto control = remote_session::identify(0, uuid);
+    return control == remote_session::control_e::input || control == remote_session::control_e::monitor
+             ? control
+             : remote_session::control_e::none;
+  }
+
+  bool ensure_remote_session_apps(nlohmann::json &file_tree) {
+    if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+      file_tree["apps"] = nlohmann::json::array();
+    }
+
+    bool changed = false;
+    for (const auto control : {remote_session::control_e::input, remote_session::control_e::monitor}) {
+      const auto synthetic = remote_session::synthetic(control);
+      const auto artwork = remote_session::synthetic_artwork_filename(control);
+      if (!artwork) {
+        continue;
+      }
+
+      const auto default_image = std::string {"remote-session/"} + std::string {*artwork};
+      const auto configured_name = control == remote_session::control_e::input ? "Remote Input" : "Remote Monitor";
+      const auto index = find_app_index_by_uuid(file_tree["apps"], synthetic.uuid);
+      if (!index) {
+        file_tree["apps"].push_back({
+          {"name", configured_name},
+          {"uuid", synthetic.uuid},
+          {"image-path", default_image},
+        });
+        changed = true;
+        continue;
+      }
+
+      auto &app = file_tree["apps"][*index];
+      if (app.value("name", std::string {}) != configured_name) {
+        app["name"] = configured_name;
+        changed = true;
+      }
+      if (!app.contains("image-path") || !app["image-path"].is_string() || app["image-path"].get<std::string>().empty()) {
+        app["image-path"] = default_image;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   std::optional<size_t> resolve_app_index_token(const nlohmann::json &apps_node, const std::string &token) {
     if (auto uuid_index = find_app_index_by_uuid(apps_node, token)) {
       return uuid_index;
@@ -177,13 +235,23 @@ namespace confighttp {
     return std::nullopt;
   }
 
+  std::recursive_mutex &apps_file_mutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+  }
+
   bool refresh_client_apps_cache(nlohmann::json &file_tree, bool sort_by_name) {
+    std::lock_guard lock {apps_file_mutex()};
     try {
       if (sort_by_name) {
         sort_apps_by_name(file_tree);
       }
       file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
       proc::refresh(config::stream.file_apps, false);
+      // Every path that changes the library ends up here, which makes this the one place a
+      // newly added game can be noticed without each sync remembering to ask. The call is
+      // debounced and does nothing unless IGDB is configured to resolve on its own.
+      metadata::resolver::schedule_background_resolve();
       return true;
     } catch (const std::exception &e) {
       BOOST_LOG(warning) << "refresh_client_apps_cache: failed: " << e.what();
@@ -221,6 +289,7 @@ namespace confighttp {
     }
 
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
       if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
@@ -411,12 +480,14 @@ namespace confighttp {
              key == "rtx_hdr_peak_brightness";
     }
 
+#ifdef _WIN32
     std::string encode_config_override_value(const nlohmann::json &value) {
       if (value.is_string()) {
         return value.get<std::string>();
       }
       return value.dump();
     }
+#endif
 
     void normalize_adapter_config_pair(nlohmann::json &config_object) {
       if (!config_object.is_object()) {
@@ -473,6 +544,10 @@ namespace confighttp {
 
       for (const auto &key : keys) {
         if (key.rfind("playnite_", 0) == 0) {
+          continue;
+        }
+
+        if (key.rfind("steam_", 0) == 0) {
           continue;
         }
 
@@ -533,6 +608,23 @@ namespace confighttp {
   // Forward declaration for error helper implemented later
   void bad_request(resp_https_t response, req_https_t request, const std::string &error_message);
   void getAppCover(resp_https_t response, req_https_t request);
+
+#if defined(_WIN32) || defined(__linux__)
+  // Platform-neutral frame limiter status (RTSS/NVCP on Windows, MangoHUD on Linux).
+  void getFrameLimiterStatus(resp_https_t response, req_https_t request);
+#endif
+
+  void getSteamStatus(resp_https_t response, req_https_t request);
+  void getSteamGames(resp_https_t response, req_https_t request);
+  void postSteamForceSync(resp_https_t response, req_https_t request);
+  void postSteamLaunch(resp_https_t response, req_https_t request);
+
+#ifdef __linux__
+  void getLutrisStatus(resp_https_t response, req_https_t request);
+  void getLutrisGames(resp_https_t response, req_https_t request);
+  void postLutrisForceSync(resp_https_t response, req_https_t request);
+  void postLutrisLaunch(resp_https_t response, req_https_t request);
+#endif
 
 #ifdef _WIN32
   // Forward declarations for Playnite handlers implemented in confighttp_playnite.cpp
@@ -1164,6 +1256,8 @@ namespace confighttp {
       bool installed = platf::is_vigem_installed(&version);
       nlohmann::json out;
       out["installed"] = installed;
+      // ViGEmBus is only a requirement when nothing else can provide a virtual controller.
+      out["required"] = !platf::is_virtual_gamepad_driver_available();
       if (!version.empty()) {
         out["version"] = version;
       }
@@ -1468,7 +1562,7 @@ namespace confighttp {
       headers.emplace("Content-Type", std::string {content_type});
       headers.emplace("Cache-Control", cache_immutable ? "public, max-age=31536000, immutable" : "no-cache");
       headers.emplace("Content-Security-Policy",
-                      "default-src 'self'; base-uri 'self'; connect-src 'self' https://raw.githubusercontent.com wss:; font-src 'self'; "
+                      "default-src 'self'; base-uri 'self'; connect-src 'self' https://api.github.com https://raw.githubusercontent.com wss:; font-src 'self'; "
                       "form-action 'self'; frame-ancestors 'none'; img-src 'self' https://images.igdb.com data: blob:; media-src 'self' blob:; "
                       "object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:");
       headers.emplace("Referrer-Policy", "no-referrer");
@@ -1661,6 +1755,7 @@ namespace confighttp {
     print_req(request);
 
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
 
@@ -1684,6 +1779,7 @@ namespace confighttp {
         "allow-client-commands",
         "use-app-identity",
         "per-client-app-identity",
+        "prefer-10bit-sdr",
         "gen1-framegen-fix",
         "gen2-framegen-fix",
         "dlss-framegen-capture-fix",  // backward compatibility
@@ -1701,7 +1797,7 @@ namespace confighttp {
         "lossless-scaling-launch-delay"
       };
 
-      bool mutated = false;
+      bool mutated = ensure_remote_session_apps(file_tree);
       auto normalize_lossless_profile_overrides = [](nlohmann::json &node) -> bool {
         if (!node.is_object()) {
           return false;
@@ -1816,6 +1912,7 @@ namespace confighttp {
       if (mutated) {
         try {
           file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+          proc::refresh(config::stream.file_apps, false);
         } catch (std::exception &e) {
           BOOST_LOG(warning) << "GetApps persist normalization failed: "sv << e.what();
         }
@@ -1846,6 +1943,10 @@ namespace confighttp {
               if (v) {
                 app["image-version"] = v;
               }
+            }
+            const auto control = configurable_remote_session(app.value("uuid", ""));
+            if (control != remote_session::control_e::none) {
+              app["remote-session"] = control == remote_session::control_e::input ? "input" : "monitor";
             }
           } catch (...) {
           }
@@ -1903,6 +2004,7 @@ namespace confighttp {
 
     BOOST_LOG(info) << config::stream.file_apps;
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       // TODO: Input Validation
 
       // Read the input JSON from the request body.
@@ -1957,6 +2059,14 @@ namespace confighttp {
       // Remove old field to avoid duplication
       input_tree.erase("dlss-framegen-capture-fix");
 #endif
+
+      const auto remote_control = configurable_remote_session(input_tree.value("uuid", ""));
+      input_tree.erase("remote-session");
+      if (remote_control != remote_session::control_e::none) {
+        const auto synthetic = remote_session::synthetic(remote_control);
+        input_tree["uuid"] = synthetic.uuid;
+        input_tree["name"] = synthetic.title;
+      }
 
       auto &apps_node = file_tree["apps"];
       if (!apps_node.is_array()) {
@@ -2395,6 +2505,7 @@ namespace confighttp {
 
     std::optional<size_t> target_index = index_from_body ? index_from_body : index_from_path;
 
+#ifdef _WIN32
     // Detect if the app being removed is the Playnite fullscreen launcher
     auto is_playnite_fullscreen = [](const nlohmann::json &app) -> bool {
       try {
@@ -2413,6 +2524,7 @@ namespace confighttp {
       } catch (...) {}
       return false;
     };
+#endif
 
     try {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
@@ -2434,6 +2546,18 @@ namespace confighttp {
           bad_request(response, request, std::format("Application '{}' not found", *token_from_path));
           return;
         }
+      }
+
+      std::optional<size_t> protected_index;
+      if (uuid && !uuid->empty()) {
+        protected_index = find_app_index_by_uuid(apps_node, *uuid);
+      } else if (target_index && *target_index < apps_node.size()) {
+        protected_index = *target_index;
+      }
+      if (protected_index &&
+          configurable_remote_session(apps_node[*protected_index].value("uuid", "")) != remote_session::control_e::none) {
+        bad_request(response, request, "Remote session applications cannot be deleted");
+        return;
       }
 
       nlohmann::json::array_t new_apps;
@@ -2527,6 +2651,72 @@ namespace confighttp {
     // The list changes immediately after pair/unpair. Avoid serving an old empty
     // list from an HTTP cache after the client state has changed.
     send_response(response, output_tree, "no-store");
+  }
+
+  void refresh_remote_display_physical_baseline() {
+    try {
+      const auto devices = nlohmann::json::parse(display_helper_integration::enumerate_devices_json(display_device::DeviceEnumerationDetail::Full));
+      if (!devices.is_array()) return;
+      std::vector<remote_display_topology::node_t> nodes;
+      for (const auto &device : devices) {
+        const auto id = device.value("device_id", "");
+        const auto label = device.value("friendly_name", device.value("display_name", id));
+        if (id.empty()) continue;
+#ifdef __linux__
+        if (platf::linux_private_display::is_private_output(id)) continue;
+#else
+        if (boost::algorithm::icontains(label, "virtual display")) continue;
+#endif
+        remote_display_topology::node_t node;
+        node.id = id;
+        node.label = label;
+        node.physical = true;
+        const auto info = device.value("info", nlohmann::json::object());
+        node.active = info.value("active", true);
+        node.primary = info.value("primary", false);
+        nodes.push_back(std::move(node));
+      }
+      remote_display_topology::instance().set_physical_baseline(std::move(nodes));
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "Remote display layout could not refresh physical monitor baseline: " << e.what();
+    }
+  }
+
+  void getClientDisplayLayout(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    print_req(request);
+    refresh_remote_display_physical_baseline();
+    const auto clients = nvhttp::get_all_clients();
+    std::vector<nlohmann::json> client_nodes;
+    for (const auto &client : clients) client_nodes.push_back(client);
+    auto output = remote_display_topology::instance().snapshot(client_nodes);
+    output["layout"] = nvhttp::get_remote_display_layout();
+    send_response(response, output, "no-store");
+  }
+
+  void putClientDisplayLayout(resp_https_t response, req_https_t request) {
+    if (!check_content_type(response, request, "application/json") || !authenticate(response, request)) return;
+    print_req(request);
+    refresh_remote_display_physical_baseline();
+    try {
+      std::stringstream body;
+      body << request->content.rdbuf();
+      const auto layout = nlohmann::json::parse(body);
+      std::string error;
+      if (!nvhttp::set_remote_display_layout(layout, error)) {
+        bad_request(response, request, error);
+        return;
+      }
+      const auto clients = nvhttp::get_all_clients();
+      std::vector<nlohmann::json> client_nodes;
+      for (const auto &client : clients) client_nodes.push_back(client);
+      auto output = remote_display_topology::instance().snapshot(client_nodes);
+      output["layout"] = nvhttp::get_remote_display_layout();
+      output["applies_on_next_activation"] = true;
+      send_response(response, output, "no-store");
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+    }
   }
 
 #ifdef _WIN32
@@ -2851,10 +3041,10 @@ namespace confighttp {
 
     print_req(request);
 
-    nvhttp::erase_all_clients();
+    const bool persisted = nvhttp::erase_all_clients();
     proc::proc.terminate();
     nlohmann::json output_tree;
-    output_tree["status"] = true;
+    output_tree["status"] = persisted;
     send_response(response, output_tree);
   }
 
@@ -2915,7 +3105,91 @@ namespace confighttp {
 #endif
     // Build/release date provided by CMake (ISO 8601 when available)
     output_tree["release_date"] = PROJECT_RELEASE_DATE;
+    // UI status reads must never start a capture or probe an encoder.
+    bool probe_complete = false;
+    const auto encoder_caps = video::advertised_encoder_capabilities(false, &probe_complete);
+    output_tree["encoder_status"] = {
+      {"state", probe_complete ? "ready" : video::has_attempted_encoder_probe() ? "failed" : "unknown"},
+      {"h264", probe_complete},
+      {"hevc", probe_complete && encoder_caps.hevc_mode >= 2},
+      {"av1", probe_complete && encoder_caps.av1_mode >= 2},
+    };
+    output_tree["providers"]["steam"] = true;
+#if defined(__linux__)
+    output_tree["providers"]["lutris"] = true;
+    output_tree["providers"]["mangohud"] = true;
+    const char *session_role = std::getenv("VIBEPOLLO_SESSION_ROLE");
+    const std::string role = session_role ? session_role : "unknown";
+    output_tree["linux"] = {{"session_role", role == "desktop" || role == "greeter" ? role : "unknown"}};
+    const bool managed_active = platf::linux_capture_status::managed_event_capture_active();
+    output_tree["capture_status"] = {
+      {"configured_backend", config::video.capture},
+      {"observed_backend", managed_active ? "kms" : "unknown"},
+      {"managed_event_driven", managed_active},
+      {"virtual_display_configured", config::video.virtual_display_mode != config::video_t::virtual_display_mode_e::disabled},
+    };
+    const auto display_capabilities = platf::linux_display::backend().capabilities();
+    const bool virtual_capable = display_capabilities.independent_outputs;
+    const bool virtual_ready = display_capabilities.independent_outputs_ready;
+    output_tree["virtual_display"] = {
+      {"capable", virtual_capable},
+      {"ready", virtual_ready},
+      {"reason", virtual_ready ? "" : virtual_capable ? "session_or_output_unavailable" : "driver_or_outputs_unavailable"},
+      {"backend", display_capabilities.backend_name},
+      {"modes", {"per_client", "shared"}},
+      {"layouts", {"exclusive", "extended", "extended_primary", "extended_isolated", "extended_primary_isolated"}},
+      {"display_enumeration", true},
+      {"dynamic_modes", true},
+      {"hdr", "per_output"},
+      {"scale", true},
+      {"reset_persistence", true},
+    };
+#endif
 #if defined(_WIN32)
+    output_tree["providers"]["playnite_toggle"] = true;
+    const auto driver_snapshot = proc::vDisplayDriverStatusSnapshot();
+    const auto driver_status = driver_snapshot.status;
+    const auto active_driver = driver_snapshot.selection;
+    const auto driver_status_name = [](const VDISPLAY::DRIVER_STATUS status) {
+      switch (status) {
+        case VDISPLAY::DRIVER_STATUS::OK:
+          return "ready";
+        case VDISPLAY::DRIVER_STATUS::FAILED:
+          return "failed";
+        case VDISPLAY::DRIVER_STATUS::VERSION_INCOMPATIBLE:
+          return "version_incompatible";
+        case VDISPLAY::DRIVER_STATUS::WATCHDOG_FAILED:
+          return "watchdog_failed";
+        case VDISPLAY::DRIVER_STATUS::UNKNOWN:
+        default:
+          return "unknown";
+      }
+    };
+    const auto driver_selection_name = [](const VDISPLAY::DRIVER_SELECTION selection) -> const char * {
+      switch (selection) {
+        case VDISPLAY::DRIVER_SELECTION::VIBESHINE:
+          return "vibeshine";
+        case VDISPLAY::DRIVER_SELECTION::SUDOVDA:
+          return "sudovda";
+        case VDISPLAY::DRIVER_SELECTION::UNKNOWN:
+        default:
+          return nullptr;
+      }
+    };
+    const auto configured_driver = config::video.dd.use_sunshine_virtual_display_driver
+                                     ? "vibeshine"
+                                     : "sudovda";
+    nlohmann::json driver_metadata = {
+      {"configured", configured_driver},
+      {"status", driver_status_name(driver_status)},
+      {"status_code", static_cast<int>(driver_status)},
+    };
+    if (const auto active_name = driver_selection_name(active_driver)) {
+      driver_metadata["active"] = active_name;
+    } else {
+      driver_metadata["active"] = nullptr;
+    }
+    output_tree["virtual_display_driver"] = std::move(driver_metadata);
     try {
       const auto gpus = platf::enumerate_gpus();
       if (!gpus.empty()) {
@@ -4095,8 +4369,8 @@ namespace confighttp {
         return;
       }
 
-      std::ifstream in(validated_path, std::ios::binary);
-      if (!in) {
+      const auto image = proc::read_validated_app_image(validated_path);
+      if (!image) {
         BOOST_LOG(warning) << "Unable to read cover image file: " << validated_path;
         bad_request(response, request, "Unable to read cover image file");
         return;
@@ -4107,7 +4381,7 @@ namespace confighttp {
       headers.emplace("X-Frame-Options", "DENY");
       headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
 
-      response->write(SimpleWeb::StatusCode::success_ok, in, headers);
+      response->write(SimpleWeb::StatusCode::success_ok, *image, headers);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "GetCover: "sv << e.what();
       bad_request(response, request, e.what());
@@ -4256,6 +4530,389 @@ namespace confighttp {
     }
   }
 
+  namespace {
+    /// @brief Locate an app node by uuid, or by the numeric id older clients still use.
+    nlohmann::json *find_app_node(nlohmann::json &file_tree, const std::string &key) {
+      if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+        return nullptr;
+      }
+      for (auto &app : file_tree["apps"]) {
+        if (!app.is_object()) {
+          continue;
+        }
+        if (app.contains("uuid") && app["uuid"].is_string() && app["uuid"].get<std::string>() == key) {
+          return &app;
+        }
+        if (app.contains("id") && app["id"].is_string() && app["id"].get<std::string>() == key) {
+          return &app;
+        }
+      }
+      return nullptr;
+    }
+
+    nlohmann::json igdb_candidate_json(const igdb::policy::game_t &game) {
+      nlohmann::json node = nlohmann::json::object();
+      node["igdb_id"] = game.igdb_id;
+      node["name"] = game.name;
+      node["summary"] = game.summary;
+      node["release_date"] = igdb::policy::release_date_from_timestamp(game.first_release_date);
+      node["genres"] = game.genres;
+      node["developers"] = game.developers;
+      node["publishers"] = game.publishers;
+      if (game.community_score >= 0) {
+        node["community_score"] = game.community_score;
+      }
+      if (game.critic_score >= 0) {
+        node["critic_score"] = game.critic_score;
+      }
+      // A thumbnail the picker can show directly. The full-size copy is only downloaded once
+      // the user actually picks the record.
+      node["cover_url"] = igdb::policy::image_url(game.cover_image_id, "t_cover_big");
+      return node;
+    }
+
+    nlohmann::json app_metadata_json(const nlohmann::json &app) {
+      const auto meta = metadata::read_from_app(app);
+      nlohmann::json node = nlohmann::json::object();
+      node["present"] = meta.present;
+      node["description"] = meta.description;
+      node["genres"] = meta.genres;
+      node["developers"] = meta.developers;
+      node["publishers"] = meta.publishers;
+      node["release_date"] = meta.release_date;
+      node["community_score"] = meta.community_score;
+      node["critic_score"] = meta.critic_score;
+      node["last_played"] = meta.last_played;
+      node["playtime_minutes"] = meta.playtime_minutes;
+      node["has_background"] = !meta.background_image_path.empty();
+      node["source"] = meta.source;
+      node["igdb_id"] = meta.igdb_id;
+      node["locked"] = meta.locked;
+      // What the resolver would have to work with. Shown in the editor so a game that cannot
+      // be matched automatically says why instead of just failing quietly.
+      nlohmann::json ids = nlohmann::json::array();
+      for (const auto &id : metadata::store_ids_of(app)) {
+        ids.push_back({{"store", id.store}, {"id", id.id}});
+      }
+      node["store_ids"] = std::move(ids);
+      return node;
+    }
+  }  // namespace
+
+  /**
+   * @brief Report whether IGDB lookups are configured, and how the last one went.
+   * @api_examples{/api/igdb/status| GET| null}
+   */
+  void getIgdbStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    const auto state = igdb::status();
+    nlohmann::json output;
+    output["status"] = true;
+    output["enabled"] = state.enabled;
+    output["configured"] = state.configured;
+    output["authenticated"] = state.authenticated;
+    output["last_error"] = state.last_error;
+    // The client id is not a secret and the settings page has to show which one is in use.
+    // The secret is never returned, only whether one is stored.
+    output["client_id"] = config::igdb.client_id;
+    output["secret_file"] = state.secret_file;
+    output["auto_resolve"] = config::igdb.auto_resolve;
+    output["allow_name_match"] = config::igdb.allow_name_match;
+    output["resolving"] = metadata::resolver::background_pass_running();
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Store or clear the IGDB client secret.
+   *
+   * The secret goes to its own file rather than into sunshine.conf, because GET /api/config
+   * returns that file as it stands and would hand the secret to anything allowed to read
+   * settings.
+   * @api_examples{/api/igdb/secret| POST| {"secret":"abc123"}}
+   */
+  void postIgdbSecret(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      const auto input = nlohmann::json::parse(request->content.string());
+      std::string secret = input.value("secret", std::string {});
+      nlohmann::json output;
+      std::string error;
+      const bool ok = secret.empty() ? igdb::clear_secret(error) : igdb::save_secret(secret, error);
+      std::fill(secret.begin(), secret.end(), '\0');
+      if (!ok) {
+        // The detail matters here: every way this fails is about a path or a permission, and
+        // "could not store" on its own leaves nothing to act on.
+        bad_request(response, request, error.empty() ? "Could not store the IGDB secret" : error);
+        return;
+      }
+      output["status"] = true;
+      send_response(response, output);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "postIgdbSecret: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Exchange the stored credentials for a token, to tell the user whether they work.
+   * @api_examples{/api/igdb/verify| POST| null}
+   */
+  void postIgdbVerify(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    std::string error;
+    const bool ok = igdb::verify(error);
+    nlohmann::json output;
+    output["status"] = ok;
+    if (!ok) {
+      output["error"] = error;
+    }
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Search IGDB by name, for the manual picker.
+   * @api_examples{/api/igdb/search?q=Hades| GET| null}
+   */
+  void getIgdbSearch(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    const auto query = request->parse_query_string();
+    std::string term;
+    if (auto it = query.find("q"); it != query.end()) {
+      term = it->second;
+    }
+    int limit = 20;
+    if (auto it = query.find("limit"); it != query.end()) {
+      try {
+        limit = std::stoi(it->second);
+      } catch (...) {
+        limit = 20;
+      }
+    }
+    if (trim_copy(term).empty()) {
+      bad_request(response, request, "Missing search term");
+      return;
+    }
+
+    std::string error;
+    const auto hits = igdb::search(term, limit, error);
+    nlohmann::json output;
+    output["status"] = error.empty();
+    if (!error.empty()) {
+      output["error"] = error;
+    }
+    nlohmann::json results = nlohmann::json::array();
+    for (const auto &hit : hits) {
+      results.push_back(igdb_candidate_json(hit));
+    }
+    output["results"] = std::move(results);
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Resolve metadata for one app, or for the whole library.
+   *
+   * Without a uuid this walks every app, which is the first-setup case; with one it is the
+   * "try again for this game" button in the editor.
+   * @api_examples{/api/igdb/resolve| POST| {"uuid":"aaaa-bbbb","force":true}}
+   */
+  void postIgdbResolve(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      nlohmann::json input = nlohmann::json::object();
+      const auto body = request->content.string();
+      if (!body.empty()) {
+        input = nlohmann::json::parse(body);
+      }
+      const auto uuid = input.value("uuid", std::string {});
+      const bool force = input.value("force", false);
+
+      std::lock_guard apps_lock {apps_file_mutex()};
+      nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+
+      nlohmann::json output;
+      if (uuid.empty()) {
+        // Queued rather than run here: a few hundred games take minutes at IGDB's four
+        // requests a second, which is far longer than this request should stay open. The
+        // library reloads on its own once the pass writes.
+        metadata::resolver::request_library_pass(force);
+        output["status"] = true;
+        output["started"] = true;
+        send_response(response, output);
+        return;
+      }
+
+      auto *app = find_app_node(file_tree, uuid);
+      if (!app) {
+        not_found(response, request);
+        return;
+      }
+      const auto outcome = metadata::resolver::resolve_app(*app, force);
+      if (outcome.changed) {
+        confighttp::refresh_client_apps_cache(file_tree, false);
+      }
+      output["status"] = outcome.error.empty();
+      output["changed"] = outcome.changed;
+      output["igdb_id"] = outcome.igdb_id;
+      output["skipped_locked"] = outcome.skipped_locked;
+      if (!outcome.error.empty()) {
+        output["error"] = outcome.error;
+      }
+      output["metadata"] = app_metadata_json(*app);
+      send_response(response, output);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "postIgdbResolve: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Drop every cached IGDB record and downloaded image.
+   * @api_examples{/api/igdb/cache| DELETE| null}
+   */
+  void deleteIgdbCache(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["removed"] = igdb::clear_cache();
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Read one app's metadata, including what the resolver has to match on.
+   * @api_examples{/api/apps/@c uuid/metadata| GET| null}
+   */
+  void getAppMetadata(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      const auto uuid = request->path_match[1].str();
+      std::lock_guard apps_lock {apps_file_mutex()};
+      nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+      auto *app = find_app_node(file_tree, uuid);
+      if (!app) {
+        not_found(response, request);
+        return;
+      }
+      nlohmann::json output = app_metadata_json(*app);
+      output["status"] = true;
+      send_response(response, output);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "getAppMetadata: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Edit one app's metadata by hand, or link it to an IGDB record.
+   *
+   * A body carrying `igdb_id` re-fetches that record and adopts it; any other field is taken
+   * as the user's own wording. Either way the app is marked as edited, so the next library
+   * sync leaves the descriptive fields alone -- without that, a correction would last only
+   * until Playnite next reported the game.
+   * @api_examples{/api/apps/@c uuid/metadata| POST| {"igdb_id":"1020"}}
+   */
+  void postAppMetadata(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      const auto uuid = request->path_match[1].str();
+      const auto input = nlohmann::json::parse(request->content.string());
+
+      std::lock_guard apps_lock {apps_file_mutex()};
+      nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+      auto *app = find_app_node(file_tree, uuid);
+      if (!app) {
+        not_found(response, request);
+        return;
+      }
+
+      if (input.contains("igdb_id")) {
+        std::string igdb_id;
+        if (input["igdb_id"].is_string()) {
+          igdb_id = input["igdb_id"].get<std::string>();
+        } else if (input["igdb_id"].is_number_integer()) {
+          igdb_id = std::to_string(input["igdb_id"].get<std::int64_t>());
+        }
+        std::string error;
+        if (!metadata::resolver::apply_igdb_id(*app, igdb_id, error)) {
+          bad_request(response, request, error);
+          return;
+        }
+      } else {
+        auto meta = metadata::read_from_app(*app);
+        const auto read_list = [&input](const char *key, std::vector<std::string> &target) {
+          if (auto it = input.find(key); it != input.end() && it->is_array()) {
+            target.clear();
+            for (const auto &entry : *it) {
+              if (entry.is_string() && !entry.get<std::string>().empty()) {
+                target.push_back(entry.get<std::string>());
+              }
+            }
+          }
+        };
+        if (auto it = input.find("description"); it != input.end() && it->is_string()) {
+          meta.description = it->get<std::string>();
+        }
+        if (auto it = input.find("release_date"); it != input.end() && it->is_string()) {
+          meta.release_date = it->get<std::string>();
+        }
+        read_list("genres", meta.genres);
+        read_list("developers", meta.developers);
+        read_list("publishers", meta.publishers);
+        if (auto it = input.find("community_score"); it != input.end() && it->is_number_integer()) {
+          meta.community_score = std::clamp(it->get<int>(), -1, 100);
+        }
+        if (auto it = input.find("critic_score"); it != input.end() && it->is_number_integer()) {
+          meta.critic_score = std::clamp(it->get<int>(), -1, 100);
+        }
+        // Anything the user typed is theirs, so the app is marked as edited unless they
+        // explicitly hand it back to whichever provider owns the library.
+        meta.locked = input.value("locked", true);
+        meta.source = meta.locked ? "manual" : meta.source;
+        meta.present = metadata::has_any_value(meta);
+        metadata::write_to_app(*app, meta);
+      }
+
+      confighttp::refresh_client_apps_cache(file_tree, false);
+      nlohmann::json output = app_metadata_json(*app);
+      output["status"] = true;
+      send_response(response, output);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "postAppMetadata: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
   /**
    * @brief Purge all auto-synced Playnite applications (playnite-managed == "auto").
    * @api_examples{/api/apps/purge_autosync| POST| null}
@@ -4268,6 +4925,7 @@ namespace confighttp {
     print_req(request);
 
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       nlohmann::json output_tree;
       nlohmann::json new_apps = nlohmann::json::array();
       std::string file = file_handler::read_file(config::stream.file_apps.c_str());
@@ -4295,6 +4953,71 @@ namespace confighttp {
       bad_request(response, request, e.what());
     }
   }
+
+#ifndef _WIN32
+  void downloadLogs(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    try {
+      logging::log_flush();
+      std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> candidates;
+      for (const auto &path : logging::recent_session_logs(30)) {
+        std::error_code ec;
+        const auto mtime = std::filesystem::last_write_time(path, ec);
+        if (!ec) {
+          candidates.emplace_back(path, mtime);
+        }
+      }
+      // Snapshot timestamps before sorting: the active log can change during collection.
+      // Match the Windows support bundle limits, selecting newest files first.
+      std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+      });
+      constexpr std::size_t max_files = 32;
+      constexpr std::size_t max_bytes = 64 * 1024 * 1024;
+      std::size_t bytes = 0;
+      log_export::export_log_sanitizer_t sanitizer;
+      std::vector<log_export::ZipDataEntry> entries;
+      for (const auto &[path, mtime] : candidates) {
+        if (entries.size() >= max_files || bytes >= max_bytes) {
+          break;
+        }
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(path, ec))) {
+          continue;
+        }
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec || size > max_bytes - bytes) {
+          continue;
+        }
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+          continue;
+        }
+        // Bound reads even if the active file grows during collection.
+        std::string data(static_cast<std::size_t>(size), '\0');
+        file.read(data.data(), static_cast<std::streamsize>(data.size()));
+        data.resize(static_cast<std::size_t>(file.gcount()));
+        bytes += data.size();
+        entries.push_back(log_export::make_export_log_entry(sanitizer, path.filename().string(), std::move(data), mtime));
+      }
+      if (entries.empty()) {
+        bad_request(response, request, "No retained log files are available");
+        return;
+      }
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/zip");
+      headers.emplace("Content-Disposition", std::string {"attachment; filename=\""} + std::string {log_export::support_bundle_filename} + "\"");
+      headers.emplace("Cache-Control", "no-store");
+      headers.emplace("X-Frame-Options", "DENY");
+      headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+      response->write(success_ok, log_export::build_zip_from_entries(entries), headers);
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+    }
+  }
+#endif
 
   /**
    * @brief Get the logs from the log file.
@@ -4565,6 +5288,34 @@ namespace confighttp {
   }
 
 #ifdef _WIN32
+  /**
+   * @brief Execute the same terminal virtual-display cleanup as the restore hotkey.
+   * @api_examples{/api/display/terminate_virtual| POST| {"status":true}}
+   */
+  void postTerminateVirtualDisplay(resp_https_t response, req_https_t request) {
+    if (!check_content_type(response, request, "application/json")) {
+      return;
+    }
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    nlohmann::json out;
+    const auto result = platf::virtual_display_cleanup::terminate_all("maintenance_api");
+    out["status"] = result.virtual_displays_removed;
+    out["driver_watchdog_stopped"] = true;
+    out["recovery_disengaged"] = true;
+    out["virtual_displays_removed"] = result.virtual_displays_removed;
+    out["restore_dispatched"] = result.helper_revert_dispatched;
+    out["database_restore_applied"] = result.database_restore_applied;
+    out["watchdogs_stopped"] = true;
+    if (!result.virtual_displays_removed) {
+      out["error"] = "One or more managed virtual displays could not be removed.";
+    }
+    send_response(response, out, "no-store");
+  }
+
   /**
    * @brief Export the current Windows display settings as a golden restore snapshot.
    * @api_examples{/api/display/export_golden| POST| {"status":true}}
@@ -5500,12 +6251,16 @@ namespace confighttp {
     output_tree["version"] = version_str;
     output_tree["version_compatible"] = version_compatible;
     output_tree["packaged_version"] = VIGEMBUS_PACKAGED_VERSION;
+    // Drives whether the UI presents a missing ViGEmBus as a problem or as an
+    // unused option: Vibeshine's own driver provides controllers without it.
+    output_tree["required"] = !platf::is_virtual_gamepad_driver_available();
 #else
     output_tree["error"] = "ViGEmBus is only available on Windows";
     output_tree["installed"] = false;
     output_tree["version"] = "";
     output_tree["version_compatible"] = false;
     output_tree["packaged_version"] = "";
+    output_tree["required"] = false;
 #endif
 
     send_response(response, output_tree);
@@ -5779,6 +6534,7 @@ namespace confighttp {
     register_api_route("^/api/quit$", "POST", quit);
     register_blocking_api_route("^/api/reset-display-device-persistence$", "POST", resetDisplayDevicePersistence);
 #if defined(_WIN32)
+    register_blocking_api_route("^/api/display/terminate_virtual$", "POST", postTerminateVirtualDisplay);
     register_blocking_api_route("^/api/display/export_golden$", "POST", postExportGoldenDisplay);
     register_blocking_api_route("^/api/display/golden_status$", "GET", getGoldenStatus);
     register_api_route("^/api/display/golden$", "DELETE", deleteGolden);
@@ -5799,6 +6555,8 @@ namespace confighttp {
     register_api_route("^/api/apps/([0-9]+)$", "DELETE", deleteApp);
     register_api_route("^/api/clients/unpair-all$", "POST", unpairAll);
     register_api_route("^/api/clients/list$", "GET", getClients);
+    register_api_route("^/api/clients/display-layout$", "GET", getClientDisplayLayout);
+    register_api_route("^/api/clients/display-layout$", "PUT", putClientDisplayLayout);
     register_api_route("^/api/clients/hdr-profiles$", "GET", getHdrProfiles);
     register_api_route("^/api/clients/update$", "POST", updateClient);
     register_api_route("^/api/clients/unpair$", "POST", unpair);
@@ -5829,6 +6587,27 @@ namespace confighttp {
     register_api_route("^/api/vigembus/status$", "GET", getViGEmBusStatus);
     register_api_route("^/api/vigembus/install$", "POST", installViGEmBus);
     register_api_route("^/api/apps/purge_autosync$", "POST", purgeAutoSyncedApps);
+    register_api_route("^/api/igdb/status$", "GET", getIgdbStatus);
+    register_api_route("^/api/igdb/secret$", "POST", postIgdbSecret);
+    register_blocking_api_route("^/api/igdb/verify$", "POST", postIgdbVerify);
+    register_blocking_api_route("^/api/igdb/search$", "GET", getIgdbSearch);
+    register_blocking_api_route("^/api/igdb/resolve$", "POST", postIgdbResolve);
+    register_api_route("^/api/igdb/cache$", "DELETE", deleteIgdbCache);
+    register_api_route("^/api/apps/([^/]+)/metadata$", "GET", getAppMetadata);
+    register_blocking_api_route("^/api/apps/([^/]+)/metadata$", "POST", postAppMetadata);
+#if defined(_WIN32) || defined(__linux__)
+    register_api_route("^/api/frame-limiter/status$", "GET", getFrameLimiterStatus);
+#endif
+    register_api_route("^/api/steam/status$", "GET", getSteamStatus);
+    register_api_route("^/api/steam/games$", "GET", getSteamGames);
+    register_api_route("^/api/steam/force_sync$", "POST", postSteamForceSync);
+    register_api_route("^/api/steam/launch$", "POST", postSteamLaunch);
+#ifdef __linux__
+    register_api_route("^/api/lutris/status$", "GET", getLutrisStatus);
+    register_api_route("^/api/lutris/games$", "GET", getLutrisGames);
+    register_api_route("^/api/lutris/force_sync$", "POST", postLutrisForceSync);
+    register_api_route("^/api/lutris/launch$", "POST", postLutrisLaunch);
+#endif
 #ifdef _WIN32
     register_api_route("^/api/playnite/status$", "GET", getPlayniteStatus);
     register_api_route("^/api/rtss/status$", "GET", getRtssStatus);
@@ -5840,10 +6619,14 @@ namespace confighttp {
     register_api_route("^/api/playnite/force_sync$", "POST", postPlayniteForceSync);
     register_blocking_api_route("^/api/playnite/cover$", "POST", postPlayniteCover);
     register_api_route("^/api/playnite/launch$", "POST", postPlayniteLaunch);
-    // Export logs bundle (Windows only)
-    register_api_route("^/api/logs/export$", "GET", downloadPlayniteLogs);
-    register_api_route("^/api/logs/export_crash/manifest$", "GET", getCrashBundleManifest);
-    register_api_route("^/api/logs/export_crash$", "GET", downloadCrashBundle);
+    // Export logs bundle (Windows only). Collection and sanitizing can take
+    // seconds on large log sets; keep it off the single io thread so the rest
+    // of the WebUI stays responsive during an export.
+    register_blocking_api_route("^/api/logs/export$", "GET", downloadPlayniteLogs);
+    register_blocking_api_route("^/api/logs/export_crash/manifest$", "GET", getCrashBundleManifest);
+    register_blocking_api_route("^/api/logs/export_crash$", "GET", downloadCrashBundle);
+#else
+    register_blocking_api_route("^/api/logs/export$", "GET", downloadLogs);
 #endif
     server.resource["^/images/sunshine.ico$"]["GET"] = getFaviconImage;
     server.resource["^/images/logo-apollo-45.png$"]["GET"] = getApolloLogoImage;

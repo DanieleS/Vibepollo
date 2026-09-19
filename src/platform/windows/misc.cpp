@@ -5,7 +5,9 @@
 // standard includes
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <csignal>
 #include <filesystem>
 #include <iomanip>
@@ -16,6 +18,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <string>
 #include <vector>
 
 // lib includes
@@ -47,8 +50,12 @@
 #define NTDDI_VERSION NTDDI_WIN10
 #include <Shlwapi.h>
 
+// lib includes
+#include <libvirtualgamepad/client.h>
+
 // local includes
 #include "misc.h"
+#include "src/screen_saver_state.h"
 #include "src/platform/common_services.h"
 #include "nvprefs/nvprefs_interface.h"
 #include "src/boost_process_shim.h"
@@ -87,8 +94,11 @@ extern "C" {
 namespace {
 
   std::atomic<bool> used_nt_set_timer_resolution = false;
-  std::mutex screen_saver_state_mutex;
-  std::optional<bool> screen_saver_active_before_app;
+  struct screen_saver_context_t {
+    std::mutex mutex;
+    platf::screen_saver_state_t state;
+  };
+  const auto screen_saver_context = std::make_shared<screen_saver_context_t>();
 
   bool nt_set_timer_resolution_max() {
     ULONG maximum;
@@ -123,6 +133,7 @@ using namespace std::literals;
 namespace platf {
   using adapteraddrs_t = util::c_ptr<IP_ADAPTER_ADDRESSES>;
 
+  std::mutex mouse_keys_mutex;
   bool enabled_mouse_keys = false;
   MOUSEKEYS previous_mouse_keys_state;
 
@@ -174,39 +185,53 @@ namespace platf {
   }  // namespace
 
   void cache_screen_saver_state() {
-    auto lock = std::lock_guard(screen_saver_state_mutex);
-    if (screen_saver_active_before_app) {
-      return;
-    }
+    const auto context = screen_saver_context;
+    auto lock = std::lock_guard(context->mutex);
+    context->state.begin([]() -> std::optional<bool> {
+      BOOL active = FALSE;
+      DWORD winerr = ERROR_SUCCESS;
+      if (!update_screen_saver_state(SPI_GETSCREENSAVEACTIVE, 0, &active, winerr)) {
+        BOOST_LOG(warning) << "Unable to cache the screen saver state before app launch: " << winerr;
+        return std::nullopt;
+      }
+      BOOST_LOG(debug) << "Cached screen saver state before app launch: " << (active ? "enabled" : "disabled");
+      return active != FALSE;
+    });
+  }
 
-    BOOL screen_saver_active = FALSE;
+  static bool apply_screen_saver_state(bool previous_state) {
     DWORD winerr = ERROR_SUCCESS;
-    if (!update_screen_saver_state(SPI_GETSCREENSAVEACTIVE, 0, &screen_saver_active, winerr)) {
-      BOOST_LOG(warning) << "Unable to cache the screen saver state before app launch: "sv << winerr;
-      return;
+    if (!update_screen_saver_state(SPI_SETSCREENSAVEACTIVE, previous_state ? TRUE : FALSE, nullptr, winerr)) {
+      BOOST_LOG(warning) << "Unable to restore the screen saver state after app/session teardown: " << winerr;
+      return false;
     }
+    BOOST_LOG(info) << "Restored screen saver state after app/session teardown: " << (previous_state ? "enabled" : "disabled");
+    return true;
+  }
 
-    screen_saver_active_before_app = screen_saver_active != FALSE;
-    BOOST_LOG(debug) << "Cached screen saver state before app launch: "
-                     << (*screen_saver_active_before_app ? "enabled" : "disabled");
+  std::function<void()> deferred_screen_saver_restore() {
+    const auto context = screen_saver_context;
+    auto lock = std::lock_guard(context->mutex);
+    const auto token = context->state.defer();
+    auto release_on_failure = util::fail_guard([&] {
+      context->state.finish(token, apply_screen_saver_state);
+    });
+    std::function<void()> completion = [weak_context = std::weak_ptr {context}, token] {
+      // Pause commands may outlive normal host teardown. Do not dereference
+      // destroyed globals; an in-flight completion retains its own context.
+      if (const auto retained_context = weak_context.lock()) {
+        auto state_lock = std::lock_guard(retained_context->mutex);
+        retained_context->state.finish(token, apply_screen_saver_state);
+      }
+    };
+    release_on_failure.disable();
+    return completion;
   }
 
   void restore_screen_saver_state() {
-    auto lock = std::lock_guard(screen_saver_state_mutex);
-    if (!screen_saver_active_before_app) {
-      return;
-    }
-
-    DWORD winerr = ERROR_SUCCESS;
-    const auto previous_state = *screen_saver_active_before_app;
-    if (!update_screen_saver_state(SPI_SETSCREENSAVEACTIVE, previous_state ? TRUE : FALSE, nullptr, winerr)) {
-      BOOST_LOG(warning) << "Unable to restore the screen saver state after app/session teardown: "sv << winerr;
-      return;
-    }
-
-    screen_saver_active_before_app.reset();
-    BOOST_LOG(info) << "Restored screen saver state after app/session teardown: "
-                    << (previous_state ? "enabled" : "disabled");
+    const auto context = screen_saver_context;
+    auto lock = std::lock_guard(context->mutex);
+    context->state.restore(apply_screen_saver_state);
   }
 
   std::filesystem::path appdata() {
@@ -329,6 +354,17 @@ namespace platf {
     }
 
     return local_ip;
+  }
+
+  bool is_virtual_gamepad_driver_available() {
+    // Opening the control interface is the only honest test: the driver package
+    // can be staged while the source device is not started, and a stream would
+    // fail in exactly that case.
+    lvg::client probe;
+    if (probe.connect() != ERROR_SUCCESS) {
+      return false;
+    }
+    return probe.available_profiles() != 0;
   }
 
   bool is_vigem_installed(std::string *version_out) {
@@ -699,23 +735,6 @@ namespace platf {
 
     CloseDesktop(hDesk);
     return locked;
-  }
-
-  bool is_default_input_desktop_active() {
-    HDESK hDesk = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
-    if (!hDesk) {
-      return false;
-    }
-
-    bool is_default = false;
-    wchar_t name[256] {};
-    DWORD needed = 0;
-    if (GetUserObjectInformationW(hDesk, UOI_NAME, name, sizeof(name), &needed)) {
-      is_default = (_wcsicmp(name, L"Default") == 0);
-    }
-
-    CloseDesktop(hDesk);
-    return is_default;
   }
 
   // Note: This does NOT append a null terminator
@@ -1594,6 +1613,14 @@ namespace platf {
   }
 
   void enable_mouse_keys() {
+    // Capture threads check every frame, including concurrent streams. Keep the
+    // original snapshot until restoration succeeds instead of saving our own
+    // temporary settings on the next check.
+    const auto lock = std::lock_guard(mouse_keys_mutex);
+    if (enabled_mouse_keys) {
+      return;
+    }
+
     // If there is no mouse connected, enable Mouse Keys to force the cursor to appear
     if (!GetSystemMetrics(SM_MOUSEPRESENT)) {
       BOOST_LOG(info) << "A mouse was not detected. Sunshine will enable Mouse Keys while streaming to force the mouse cursor to appear.";
@@ -1655,11 +1682,13 @@ namespace platf {
     }
 
     // Restore Mouse Keys back to the previous settings if we turned it on
+    const auto lock = std::lock_guard(mouse_keys_mutex);
     if (enabled_mouse_keys) {
-      enabled_mouse_keys = false;
       if (!SystemParametersInfoW(SPI_SETMOUSEKEYS, 0, &previous_mouse_keys_state, 0)) {
         auto winerr = GetLastError();
         BOOST_LOG(warning) << "Unable to restore original state of Mouse Keys: "sv << winerr;
+      } else {
+        enabled_mouse_keys = false;
       }
     }
   }
@@ -1993,7 +2022,21 @@ namespace platf {
     DWORD bytes_sent;
     if (WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) == SOCKET_ERROR) {
       auto winerr = WSAGetLastError();
-      BOOST_LOG(warning) << "WSASendMsg() failed: "sv << winerr;
+      // A session stuck in a bad state fails every FEC shard of every frame,
+      // which used to flood the log with thousands of identical lines and
+      // drown out the actual failure. Log the first occurrence, then a
+      // suppressed-count summary at most once per 5 seconds.
+      static std::atomic<std::int64_t> last_log_tick {std::numeric_limits<std::int64_t>::min()};
+      static std::atomic<std::uint64_t> suppressed_count {0};
+      const auto now_tick = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+      auto last = last_log_tick.load(std::memory_order_relaxed);
+      if (now_tick - last >= 5 && last_log_tick.compare_exchange_strong(last, now_tick, std::memory_order_relaxed)) {
+        const auto suppressed = suppressed_count.exchange(0, std::memory_order_relaxed);
+        BOOST_LOG(warning) << "WSASendMsg() failed: "sv << winerr
+                           << (suppressed ? " (" + std::to_string(suppressed) + " similar failures suppressed)" : std::string {});
+      } else {
+        suppressed_count.fetch_add(1, std::memory_order_relaxed);
+      }
       return false;
     }
 
@@ -3006,4 +3049,3 @@ static int setClipboardData(const std::wstring &utf16Str) {
 
   return 0;
 }
-

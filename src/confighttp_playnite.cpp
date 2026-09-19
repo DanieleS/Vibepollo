@@ -16,6 +16,8 @@
   #include <fstream>
   #include <iterator>
   #include <limits>
+  #include <map>
+  #include <memory>
   #include <mutex>
   #include <optional>
   #include <regex>
@@ -38,6 +40,7 @@
   #include "confighttp.h"
   #include "httpcommon.h"
   #include "logging.h"
+  #include "log_export.h"
   #include "src/platform/windows/ipc/misc_utils.h"
   #include "src/platform/windows/playnite_integration.h"
   #include "state_storage.h"
@@ -129,6 +132,10 @@ namespace confighttp {
       return;
     }
     print_req(request);
+    if (!config::playnite.enabled) {
+      send_response(response, nlohmann::json{{"active", false}, {"enabled", false}, {"available", false}, {"installed", false}, {"update_available", false}});
+      return;
+    }
     // Keep the Playnite IPC client alive when the UI refreshes status.
     // This updates the inactivity timer and ensures a fresh connection.
     platf::playnite::ensure_client_for_api();
@@ -362,6 +369,10 @@ namespace confighttp {
       return;
     }
     print_req(request);
+    if (!config::playnite.enabled) {
+      send_response(response, nlohmann::json{{"status", false}, {"error", "Playnite integration is disabled"}});
+      return;
+    }
     nlohmann::json out;
     bool ok = platf::playnite::force_sync();
     out["status"] = ok;
@@ -426,292 +437,7 @@ namespace confighttp {
     send_response(response, out);
   }
 
-  // --- Collect Playnite-related logs into a ZIP and stream to browser ---
-  static inline void write_le16(std::string &out, uint16_t v) {
-    out.push_back(static_cast<char>(v & 0xFF));
-    out.push_back(static_cast<char>((v >> 8) & 0xFF));
-  }
-
-  static inline void write_le32(std::string &out, uint32_t v) {
-    out.push_back(static_cast<char>(v & 0xFF));
-    out.push_back(static_cast<char>((v >> 8) & 0xFF));
-    out.push_back(static_cast<char>((v >> 16) & 0xFF));
-    out.push_back(static_cast<char>((v >> 24) & 0xFF));
-  }
-
-  static inline void current_dos_datetime(uint16_t &dos_time, uint16_t &dos_date) {
-    std::time_t tt = std::time(nullptr);
-    std::tm tm {};
-  #ifdef _WIN32
-    localtime_s(&tm, &tt);
-  #else
-    localtime_r(&tt, &tm);
-  #endif
-    dos_time = static_cast<uint16_t>(((tm.tm_hour & 0x1F) << 11) | ((tm.tm_min & 0x3F) << 5) | ((tm.tm_sec / 2) & 0x1F));
-    int year = tm.tm_year + 1900;
-    if (year < 1980) {
-      year = 1980;
-    }
-    if (year > 2107) {
-      year = 2107;
-    }
-    dos_date = static_cast<uint16_t>(((year - 1980) << 9) | (((tm.tm_mon + 1) & 0x0F) << 5) | (tm.tm_mday & 0x1F));
-  }
-
-  static bool deflate_buffer(const char *data, std::size_t size, std::string &out) {
-    z_stream zs {};
-    if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-      deflateEnd(&zs);
-      return false;
-    }
-    std::array<unsigned char, 16384> buf {};
-    out.clear();
-    std::size_t offset = 0;
-    int ret = Z_OK;
-    do {
-      if (zs.avail_in == 0 && offset < size) {
-        std::size_t chunk = std::min<std::size_t>(size - offset, static_cast<std::size_t>(std::numeric_limits<uInt>::max()));
-        zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(data + offset));
-        zs.avail_in = static_cast<uInt>(chunk);
-        offset += chunk;
-      }
-      zs.next_out = buf.data();
-      zs.avail_out = static_cast<uInt>(buf.size());
-      int flush = (offset >= size && zs.avail_in == 0) ? Z_FINISH : Z_NO_FLUSH;
-      ret = deflate(&zs, flush);
-      if (ret == Z_STREAM_ERROR) {
-        deflateEnd(&zs);
-        return false;
-      }
-      std::size_t produced = buf.size() - zs.avail_out;
-      if (produced > 0) {
-        out.append(reinterpret_cast<char *>(buf.data()), produced);
-      }
-    } while (ret != Z_STREAM_END);
-    deflateEnd(&zs);
-    return true;
-  }
-
-  static std::chrono::system_clock::time_point file_time_to_system_clock(std::filesystem::file_time_type ft);
-  static void to_dos_datetime(std::chrono::system_clock::time_point tp, uint16_t &dos_time, uint16_t &dos_date);
-
-  struct ZipDataEntry {
-    std::string name;
-    std::string data;
-    std::optional<std::filesystem::file_time_type> write_time;
-  };
-
-  class export_log_sanitizer_t {
-  public:
-    std::string sanitize(const std::string &input) {
-      struct replacement_t {
-        std::size_t begin;
-        std::size_t end;
-        int priority;
-        std::string value;
-      };
-
-      std::vector<replacement_t> replacements;
-      const auto add_matches = [&](const std::regex &pattern, std::size_t capture, int priority, const std::string &kind, bool validate_ipv6 = false, bool preserve_service_identity = false) {
-        std::match_results<std::string::const_iterator> match;
-        auto search_start = input.cbegin();
-        while (std::regex_search(search_start, input.cend(), match, pattern)) {
-          if (capture >= match.size() || !match[capture].matched) {
-            break;
-          }
-          const std::string value = match.str(capture);
-          if (validate_ipv6 && !is_ipv6(value)) {
-            search_start += match.position(capture) + std::max<std::ptrdiff_t>(match.length(capture), 1);
-            continue;
-          }
-          if (!(preserve_service_identity && kind == "USER" && is_service_identity(value))) {
-            const auto offset = static_cast<std::size_t>(std::distance(input.cbegin(), search_start));
-            replacements.push_back(replacement_t {
-              offset + static_cast<std::size_t>(match.position(capture)),
-              offset + static_cast<std::size_t>(match.position(capture) + match.length(capture)),
-              priority,
-              placeholder(kind, value),
-            });
-          }
-          // Resume after the captured value, not the whole match. Boundary-based
-          // patterns consume punctuation, which must remain available to find the
-          // following address in a comma- or space-separated list.
-          search_start += match.position(capture) + std::max<std::ptrdiff_t>(match.length(capture), 1);
-        }
-      };
-
-      // Match only user components of conventional home-directory paths.
-      add_matches(std::regex {R"((?:[A-Za-z]:[\\/]+Users[\\/]+)([^\\/,:;"'<>()[\]{}|]+))", std::regex_constants::icase}, 1, 10, "USER");
-      add_matches(std::regex {R"((?:^|[^A-Za-z0-9_])/(?:home|Users)/([^/\s:,;"'<>()[\]{}|]+))", std::regex_constants::icase}, 1, 10, "USER");
-
-      // Explicit fields are safer to redact than arbitrary words that happen to look like names.
-      add_matches(std::regex {R"(\b(?:username|user_name|user)\b\s*[:=]\s*["']([^"']+)["'])", std::regex_constants::icase}, 1, 0, "USER", false, true);
-      add_matches(std::regex {R"(\b(?:username|user_name|user)\b\s*[:=]\s*([A-Za-z0-9._-]+))", std::regex_constants::icase}, 1, 0, "USER", false, true);
-
-      add_matches(std::regex {R"((?:^|[^0-9A-Za-z])((?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})(?:[^0-9A-Za-z]|$))"}, 1, 20, "IP");
-      add_matches(std::regex {R"((?:^|[^0-9A-Za-z:.])([0-9A-Fa-f:.]{2,})(?:[^0-9A-Za-z:.]|$))"}, 1, 20, "IP", true);
-      add_matches(std::regex {R"(\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}|[0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5})\b)"}, 1, 30, "MAC");
-      add_matches(std::regex {R"(\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\b)"}, 0, 40, "EMAIL");
-
-      std::sort(replacements.begin(), replacements.end(), [](const auto &a, const auto &b) {
-        if (a.begin != b.begin) {
-          return a.begin < b.begin;
-        }
-        if (a.end != b.end) {
-          return a.end > b.end;
-        }
-        return a.priority < b.priority;
-      });
-
-      std::string output;
-      output.reserve(input.size());
-      std::size_t cursor = 0;
-      for (const auto &replacement : replacements) {
-        if (replacement.begin < cursor || replacement.end > input.size()) {
-          continue;
-        }
-        output.append(input, cursor, replacement.begin - cursor);
-        output.append(replacement.value);
-        cursor = replacement.end;
-      }
-      output.append(input, cursor, std::string::npos);
-      return output;
-    }
-
-  private:
-    static bool is_service_identity(const std::string &value) {
-      std::string normalized;
-      normalized.reserve(value.size());
-      for (const unsigned char ch : value) {
-        if (std::isspace(ch)) {
-          continue;
-        }
-        normalized.push_back(static_cast<char>(std::tolower(ch)));
-      }
-      return normalized == "system" || normalized == "localsystem" || normalized == "root" || normalized == "daemon" || normalized == "unknown" ||
-             normalized == "nobody" || normalized == "networkservice" || normalized == "localservice" || normalized == "www-data";
-    }
-
-    static bool is_ipv6(const std::string &value) {
-      IN6_ADDR address {};
-      return InetPtonA(AF_INET6, value.c_str(), &address) == 1;
-    }
-
-    static std::string key_for(const std::string &kind, const std::string &value) {
-      std::string key = kind + ":" + value;
-      if (kind == "IP" || kind == "MAC" || kind == "EMAIL") {
-        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char ch) {
-          return static_cast<char>(std::tolower(ch));
-        });
-      }
-      return key;
-    }
-
-    std::string placeholder(const std::string &kind, const std::string &value) {
-      const std::string key = key_for(kind, value);
-      const auto it = placeholders.find(key);
-      if (it != placeholders.end()) {
-        return it->second;
-      }
-      const std::string result = "<" + kind + "_" + std::to_string(next_id++) + ">";
-      placeholders.emplace(key, result);
-      return result;
-    }
-
-    std::unordered_map<std::string, std::string> placeholders;
-    std::size_t next_id = 1;
-  };
-
-  static ZipDataEntry make_export_log_entry(export_log_sanitizer_t &sanitizer, std::string name, std::string data, std::optional<std::filesystem::file_time_type> write_time) {
-    return ZipDataEntry {std::move(name), sanitizer.sanitize(data), write_time};
-  }
-
-  static std::string build_zip_from_entries(const std::vector<ZipDataEntry> &entries) {
-    std::string out;
-
-    struct CdEnt {
-      std::string name;
-      uint32_t crc;
-      uint32_t comp_size;
-      uint32_t uncomp_size;
-      uint16_t method;
-      uint32_t offset;
-      uint16_t dostime;
-      uint16_t dosdate;
-    };
-
-    std::vector<CdEnt> cd;
-    for (const auto &e : entries) {
-      const std::string &name = e.name;
-      const std::string &data = e.data;
-      boost::crc_32_type crc;
-      crc.process_bytes(data.data(), data.size());
-      uint32_t crc32 = crc.checksum();
-      uint32_t uncomp_size = static_cast<uint32_t>(data.size());
-      std::string compressed;
-      bool use_deflate = deflate_buffer(data.data(), data.size(), compressed) && compressed.size() < data.size();
-      const std::string &payload = use_deflate ? compressed : data;
-      uint16_t method = use_deflate ? 8 : 0;
-      uint32_t comp_size = static_cast<uint32_t>(payload.size());
-      uint16_t dostime = 0, dosdate = 0;
-      if (e.write_time) {
-        to_dos_datetime(file_time_to_system_clock(*e.write_time), dostime, dosdate);
-      } else {
-        current_dos_datetime(dostime, dosdate);
-      }
-      uint32_t offset = static_cast<uint32_t>(out.size());
-      write_le32(out, 0x04034b50u);
-      write_le16(out, 20);
-      write_le16(out, 0);
-      write_le16(out, method);
-      write_le16(out, dostime);
-      write_le16(out, dosdate);
-      write_le32(out, crc32);
-      write_le32(out, comp_size);
-      write_le32(out, uncomp_size);
-      write_le16(out, static_cast<uint16_t>(name.size()));
-      write_le16(out, 0);
-      out.append(name.data(), name.size());
-      out.append(payload.data(), payload.size());
-      cd.push_back(CdEnt {name, crc32, comp_size, uncomp_size, method, offset, dostime, dosdate});
-    }
-
-    uint32_t cd_start = static_cast<uint32_t>(out.size());
-    uint32_t cd_size = 0;
-    for (const auto &e : cd) {
-      std::string rec;
-      write_le32(rec, 0x02014b50u);
-      write_le16(rec, 20);
-      write_le16(rec, 20);
-      write_le16(rec, 0);
-      write_le16(rec, e.method);
-      write_le16(rec, e.dostime);
-      write_le16(rec, e.dosdate);
-      write_le32(rec, e.crc);
-      write_le32(rec, e.comp_size);
-      write_le32(rec, e.uncomp_size);
-      write_le16(rec, static_cast<uint16_t>(e.name.size()));
-      write_le16(rec, 0);
-      write_le16(rec, 0);
-      write_le16(rec, 0);
-      write_le16(rec, 0);
-      write_le32(rec, 0);
-      write_le32(rec, e.offset);
-      rec.append(e.name.data(), e.name.size());
-      cd_size += static_cast<uint32_t>(rec.size());
-      out.append(rec);
-    }
-
-    write_le32(out, 0x06054b50u);
-    write_le16(out, 0);
-    write_le16(out, 0);
-    write_le16(out, static_cast<uint16_t>(cd.size()));
-    write_le16(out, static_cast<uint16_t>(cd.size()));
-    write_le32(out, cd_size);
-    write_le32(out, cd_start);
-    write_le16(out, 0);
-    return out;
-  }
+  using namespace log_export;
 
   namespace {
     namespace fs = std::filesystem;
@@ -740,12 +466,11 @@ namespace confighttp {
       }
       std::lock_guard<std::mutex> lock(statefile::state_mutex());
       fs::path path(path_str);
-      if (!fs::exists(path)) {
-        return std::nullopt;
-      }
       pt::ptree tree;
       try {
-        pt::read_json(path.string(), tree);
+        if (statefile::load_json(path.string(), tree) != statefile::json_load_result_e::loaded) {
+          return std::nullopt;
+        }
       } catch (const std::exception &e) {
         BOOST_LOG(warning) << "Crash dismissal: failed to read state file: " << e.what();
         return std::nullopt;
@@ -1009,10 +734,16 @@ namespace confighttp {
       }
     };
 
-    // Sunshine log directory (session logging)
+    // Sunshine log directory (session logging). Retention keeps up to ~30
+    // sessions x 5 rollover files here; exporting all of them made the bundle
+    // hundreds of megabytes and blew past the HTTP content deadline. Newest
+    // files win, bounded by both a file count and a total byte budget.
+    constexpr std::size_t k_max_session_export_files = 32;
+    constexpr std::uintmax_t k_max_session_export_bytes = 64ull * 1024ull * 1024ull;
     try {
       bool collected_directory = false;
       if (auto log_dir = logging::session_log_directory()) {
+        std::vector<log_candidate_t> candidates;
         std::error_code ec;
         for (std::filesystem::directory_iterator it(*log_dir, ec); it != std::filesystem::directory_iterator(); ++it) {
           if (ec) {
@@ -1022,10 +753,28 @@ namespace confighttp {
           if (!it->is_regular_file(file_ec)) {
             continue;
           }
+          add_log_candidate(it->path(), candidates);
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
+          return a.mtime > b.mtime;
+        });
+        std::uintmax_t budget_used = 0;
+        std::size_t files_added = 0;
+        for (const auto &candidate : candidates) {
+          if (files_added >= k_max_session_export_files) {
+            break;
+          }
+          std::error_code size_ec;
+          const auto size = std::filesystem::file_size(candidate.path, size_ec);
+          if (!size_ec && files_added > 0 && budget_used + size > k_max_session_export_bytes) {
+            break;
+          }
           std::string data;
           std::optional<std::filesystem::file_time_type> mtime;
-          if (read_file_if_exists(it->path(), data, &mtime)) {
-            entries.push_back(make_export_log_entry(sanitizer, it->path().filename().string(), std::move(data), mtime));
+          if (read_file_if_exists(candidate.path, data, &mtime)) {
+            budget_used += data.size();
+            ++files_added;
+            entries.push_back(make_export_log_entry(sanitizer, candidate.path.filename().string(), std::move(data), mtime));
             collected_directory = true;
           }
         }
@@ -1151,7 +900,12 @@ namespace confighttp {
       } catch (...) {}
     }
 
-    auto add_session_logs_with_prefix = [&](const std::filesystem::path &dir, const std::string &prefix) {
+    // One scan per directory, newest few files per helper prefix. The previous
+    // shape re-enumerated the directory once per prefix and read every session
+    // file ever rotated, which multiplied into the export slowdown.
+    constexpr std::size_t k_max_helper_logs_per_prefix = 6;
+    auto add_session_logs_with_prefixes = [&](const std::filesystem::path &dir, const std::vector<std::string> &prefixes) {
+      std::map<std::string, std::vector<log_candidate_t>> per_prefix;
       std::error_code ec;
       for (std::filesystem::directory_iterator it(dir, ec); it != std::filesystem::directory_iterator(); ++it) {
         if (ec) {
@@ -1162,18 +916,46 @@ namespace confighttp {
           continue;
         }
         const auto filename = it->path().filename().string();
-        if (filename.rfind(prefix, 0) != 0) {
-          continue;
+        for (const auto &prefix : prefixes) {
+          if (filename.rfind(prefix, 0) == 0) {
+            add_log_candidate(it->path(), per_prefix[prefix]);
+            break;
+          }
         }
-        std::string data;
-        std::optional<std::filesystem::file_time_type> mtime;
-        if (read_file_if_exists(it->path(), data, &mtime)) {
-          entries.push_back(make_export_log_entry(sanitizer, filename, std::move(data), mtime));
+      }
+      for (auto &[prefix, candidates] : per_prefix) {
+        std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
+          return a.mtime > b.mtime;
+        });
+        if (candidates.size() > k_max_helper_logs_per_prefix) {
+          candidates.resize(k_max_helper_logs_per_prefix);
+        }
+        for (const auto &candidate : candidates) {
+          std::string data;
+          std::optional<std::filesystem::file_time_type> mtime;
+          if (read_file_if_exists(candidate.path, data, &mtime)) {
+            entries.push_back(make_export_log_entry(sanitizer, candidate.path.filename().string(), std::move(data), mtime));
+          }
         }
       }
     };
 
+    // The known-folder and CSIDL passes below resolve to the same directories
+    // when Sunshine runs in a user session; without dedup every helper log was
+    // read from disk and regex-sanitized twice.
+    std::unordered_set<std::wstring> visited_helper_bases;
+    auto mark_base_visited = [&](const std::filesystem::path &base) {
+      std::error_code ec;
+      auto canonical = std::filesystem::weakly_canonical(base, ec);
+      std::wstring key = (ec ? base : canonical).native();
+      std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+      return visited_helper_bases.insert(key).second;
+    };
+
     auto add_user_helper_logs = [&](const std::filesystem::path &base) {
+      if (!mark_base_visited(base)) {
+        return;
+      }
       // Legacy single-file helper logs (kept for backwards compatibility).
       {
         std::filesystem::path p = base / L"sunshine_playnite.log";
@@ -1217,12 +999,14 @@ namespace confighttp {
       }
 
       // Session-mode helper logs live under Roaming/LocalAppData\\Sunshine\\logs.
-      const auto log_dir = base / L"logs";
-      add_session_logs_with_prefix(log_dir, "sunshine_playnite-");
-      add_session_logs_with_prefix(log_dir, "sunshine_playnite_launcher-");
-      add_session_logs_with_prefix(log_dir, "sunshine_launcher-");
-      add_session_logs_with_prefix(log_dir, "sunshine_display_helper-");
-      add_session_logs_with_prefix(log_dir, "sunshine_wgc_helper-");
+      static const std::vector<std::string> helper_log_prefixes {
+        "sunshine_playnite_launcher-",
+        "sunshine_playnite-",
+        "sunshine_launcher-",
+        "sunshine_display_helper-",
+        "sunshine_wgc_helper-",
+      };
+      add_session_logs_with_prefixes(base / L"logs", helper_log_prefixes);
     };
 
     try {
@@ -1295,6 +1079,26 @@ namespace confighttp {
     return entries;
   }
 
+  // The crash-bundle flow calls into the log collection once for the manifest
+  // and once per downloaded part; collecting and sanitizing the corpus each
+  // time multiplied the export cost by the part count. Reuse one snapshot for
+  // the duration of a bundle download.
+  static std::shared_ptr<const std::vector<ZipDataEntry>> collect_support_logs_cached() {
+    static std::mutex cache_mutex;
+    static std::shared_ptr<const std::vector<ZipDataEntry>> cached;
+    static std::chrono::steady_clock::time_point cached_at {};
+    constexpr auto cache_ttl = std::chrono::seconds {120};
+
+    std::lock_guard lock(cache_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (cached && now - cached_at < cache_ttl) {
+      return cached;
+    }
+    cached = std::make_shared<const std::vector<ZipDataEntry>>(collect_support_logs());
+    cached_at = now;
+    return cached;
+  }
+
   void downloadPlayniteLogs(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -1304,15 +1108,9 @@ namespace confighttp {
       auto entries = collect_support_logs();
       std::string zip = build_zip_from_entries(entries);
 
-      char fname[64];
-      std::time_t tt = std::time(nullptr);
-      std::tm tm {};
-      localtime_s(&tm, &tt);
-      std::snprintf(fname, sizeof(fname), "vibeshine_logs-%04d%02d%02d-%02d%02d%02d.zip", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
-
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/zip");
-      std::string cd = std::string("attachment; filename=\"") + fname + "\"";
+      std::string cd = std::string("attachment; filename=\"") + std::string {support_bundle_filename} + "\"";
       headers.emplace("Content-Disposition", cd);
       headers.emplace("X-Frame-Options", "DENY");
       headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
@@ -1512,25 +1310,6 @@ namespace confighttp {
     }
 
     return roots;
-  }
-
-  static std::chrono::system_clock::time_point file_time_to_system_clock(std::filesystem::file_time_type ft) {
-    return std::chrono::time_point_cast<std::chrono::system_clock::duration>(ft - decltype(ft)::clock::now() + std::chrono::system_clock::now());
-  }
-
-  static void to_dos_datetime(std::chrono::system_clock::time_point tp, uint16_t &dos_time, uint16_t &dos_date) {
-    std::time_t tt = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm {};
-    localtime_s(&tm, &tt);
-    dos_time = static_cast<uint16_t>(((tm.tm_hour & 0x1F) << 11) | ((tm.tm_min & 0x3F) << 5) | ((tm.tm_sec / 2) & 0x1F));
-    int year = tm.tm_year + 1900;
-    if (year < 1980) {
-      year = 1980;
-    }
-    if (year > 2107) {
-      year = 2107;
-    }
-    dos_date = static_cast<uint16_t>(((year - 1980) << 9) | (((tm.tm_mon + 1) & 0x0F) << 5) | (tm.tm_mday & 0x1F));
   }
 
   static std::string to_iso8601(const std::chrono::system_clock::time_point &tp) {
@@ -1862,7 +1641,7 @@ namespace confighttp {
     std::time_t tt = std::time(nullptr);
     std::tm tm {};
     localtime_s(&tm, &tt);
-    std::snprintf(fname, sizeof(fname), "sunshine_crashbundle-%04d%02d%02d-%02d%02d%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    std::snprintf(fname, sizeof(fname), "%.*s-%04d%02d%02d-%02d%02d%02d", static_cast<int>(crash_bundle_prefix.size()), crash_bundle_prefix.data(), tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
     return std::string(fname);
   }
 
@@ -2185,8 +1964,8 @@ namespace confighttp {
         bad_request(response, request, "No recent crash dumps found (within last 7 days)");
         return;
       }
-      auto entries = collect_support_logs();
-      auto plan = build_crash_bundle_plan(entries, dumps);
+      auto entries = collect_support_logs_cached();
+      auto plan = build_crash_bundle_plan(*entries, dumps);
       nlohmann::json out;
       out["parts"] = nlohmann::json::array();
       for (std::size_t i = 0; i < plan.size(); ++i) {
@@ -2228,15 +2007,15 @@ namespace confighttp {
         bad_request(response, request, "No recent crash dumps found (within last 7 days)");
         return;
       }
-      auto entries = collect_support_logs();
-      auto plan = build_crash_bundle_plan(entries, dumps);
+      auto entries = collect_support_logs_cached();
+      auto plan = build_crash_bundle_plan(*entries, dumps);
       if (part_index > plan.size()) {
         bad_request(response, request, "Invalid crash bundle part index");
         return;
       }
       const auto &selected = plan[part_index - 1];
       const std::vector<ZipDataEntry> empty_entries;
-      const auto &data_entries = selected.include_logs ? entries : empty_entries;
+      const auto &data_entries = selected.include_logs ? *entries : empty_entries;
 
       wchar_t tmpDir[MAX_PATH] = {};
       wchar_t tmpFile[MAX_PATH] = {};

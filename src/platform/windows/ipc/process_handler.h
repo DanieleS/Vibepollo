@@ -14,6 +14,23 @@
 #include <winrt/base.h>
 
 /**
+ * @brief Read ends of a helper's captured standard streams.
+ *
+ * Handed back by @ref ProcessHandler::start when the caller asks for capture.
+ * The two streams stay **separate** on purpose: a helper whose stdout is a
+ * machine-readable protocol (one JSON object per line, say) is corrupted the
+ * moment human-readable diagnostics are merged into it, so stderr gets its own
+ * pipe and can be logged verbatim.
+ *
+ * Both handles are owned by the caller; reads return 0 bytes / `ERROR_BROKEN_PIPE`
+ * once the child exits, which is the natural end-of-stream signal.
+ */
+struct helper_pipes_t {
+  winrt::handle stdout_read;
+  winrt::handle stderr_read;
+};
+
+/**
  * @brief RAII wrapper for launching and controlling a Windows helper process.
  *
  * Provides minimal operations needed by the WGC capture helper: start, wait, terminate
@@ -41,12 +58,18 @@ public:
    * @brief Launch the target executable with arguments if no process is running.
    * @param application_path Full path to executable.
    * @param arguments Command line arguments (not including the executable path).
+   * @param allow_system_fallback Launch as SYSTEM when no user session is available.
+   * @param pipes When non-null, capture the child's stdout and stderr and return
+   *              the read ends here. Handle inheritance is restricted to exactly
+   *              the two write ends, so asking for capture does not hand the
+   *              child anything else this process happens to hold.
    * @return `true` on successful launch, `false` otherwise.
    */
   bool start(
     const std::wstring &application_path,
     std::wstring_view arguments,
-    bool allow_system_fallback = false
+    bool allow_system_fallback = false,
+    helper_pipes_t *pipes = nullptr
   );
 
   /**

@@ -9,6 +9,10 @@ on:
         description: Tag to publish, for example v1.16.0-alpha.4
         required: false
         type: string
+      use_self_hosted:
+        description: Use the local Windows release runner
+        type: boolean
+        default: true
   push:
     branches:
       - '**'
@@ -68,9 +72,14 @@ jobs:
               for key, value in values.items():
                 print(f"{key}={value}", file=fh)
 
-          def skip(reason):
+          def skip(reason, *, release_version="", release_commit=""):
             print(f"::notice::{reason}")
-            output(should_release="false", tag_name="", release_version="", release_commit="")
+            output(
+              should_release="false",
+              tag_name="",
+              release_version=release_version,
+              release_commit=release_commit,
+            )
             sys.exit(0)
 
           def version_key(tag):
@@ -122,6 +131,9 @@ jobs:
           event_name = os.environ["EVENT_NAME"]
           if event_name not in {"push", "workflow_dispatch"}:
             skip("Release gate only applies to push and manual workflow_dispatch events.")
+
+          if event_name == "push" and os.environ.get("GITHUB_REF_TYPE") != "tag":
+            skip("Branch push: package builds wait for a release tag.")
 
           run("git", "fetch", "--force", "--tags")
 
@@ -205,16 +217,24 @@ jobs:
     name: Windows
     needs:
       - release-candidate
-    if: github.event_name != 'push' || needs.release-candidate.outputs.should_release == 'true'
+    # Branch pushes only select candidates. Build release artifacts once, on the tag push.
+    if: >-
+      ${{ github.event_name != 'push' ||
+          (github.ref_type == 'tag' && needs.release-candidate.outputs.should_release == 'true') }}
     permissions:
       actions: read
       contents: read
     uses: ./.github/workflows/ci-windows.yml
     with:
+      use_self_hosted: ${{ needs.release-candidate.outputs.should_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.use_self_hosted) }}
       build_only: ${{ needs.release-candidate.outputs.should_release == 'true' }}
-      build_tests: ${{ needs.release-candidate.outputs.should_release != 'true' }}
+      build_tests: false
       release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
-      release_version: ${{ needs.release-candidate.outputs.release_version || '0.0.0' }}
+      # Not 0.0.0: build_version.cmake refuses that outright, because a package built from it
+      # sorts below every real release and installs over one as a downgrade. Passing it to a
+      # build that rejects it means no pull request can compile at all, so non-release builds
+      # get a version that says what they are and still sorts sanely.
+      release_version: ${{ needs.release-candidate.outputs.release_version || format('2.0.0-dev.{0}', github.run_number) }}
       release_tag: ${{ needs.release-candidate.outputs.tag_name }}
       release_artifact_retention_days: ${{ needs.release-candidate.outputs.should_release == 'true' && 14 || 1 }}
       symbol_product_name: Vibepollo
@@ -223,16 +243,45 @@ jobs:
       publish_symbols: false
       symbol_release_draft: true
       symbol_release_prefix: polo
-      require_truehdr_runtime: ${{ needs.release-candidate.outputs.should_release == 'true' }}
+      # Always, not just on a release: cmake/packaging/windows.cmake forces
+      # SUNSHINE_REQUIRE_TRUEHDR_RUNTIME on regardless of what is asked for here, so leaving
+      # this off skips the download step and then fails configure looking for the file it did
+      # not fetch. The runtime lives in a public repository and downloads with the default
+      # token, so requiring it costs a non-release build nothing.
+      require_truehdr_runtime: true
     secrets:
       symbol_token: ${{ secrets.SYMBOL_TOKEN }}
       truehdr_runtime_token: ${{ secrets.TRUEHDR_RUNTIME_TOKEN }}
+
+  build-archlinux:
+    name: Arch Linux
+    needs:
+      - release-candidate
+    # Match Windows: release preparation must not build packages before the tag push.
+    if: >-
+      ${{ github.event_name != 'push' ||
+          (github.ref_type == 'tag' && needs.release-candidate.outputs.should_release == 'true') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-archlinux.yml
+    with:
+      # Upstream skips the test graph in release artifact builds to save compile time, and says
+      # ordinary builds should keep it. Everything but the release tag counts as ordinary here,
+      # so a pull request runs ctest while the tag build stays lean. Arch carries this rather
+      # than Windows because the portable suites all build here and this runner is the cheaper
+      # of the two.
+      build_tests: ${{ needs.release-candidate.outputs.should_release != 'true' }}
+      artifact_retention_days: ${{ needs.release-candidate.outputs.should_release == 'true' && 14 || 1 }}
+      release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
+      # Same reasoning as the Windows call above.
+      release_version: ${{ needs.release-candidate.outputs.release_version || format('2.0.0-dev.{0}', github.run_number) }}
 
   awaiting-signing:
     name: Awaiting manual signing
     if: needs.release-candidate.outputs.should_release == 'true'
     needs:
       - release-candidate
+      - build-archlinux
       - build-windows
     permissions: {}
     runs-on: ubuntu-latest

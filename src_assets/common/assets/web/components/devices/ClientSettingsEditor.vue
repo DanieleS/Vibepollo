@@ -2,7 +2,9 @@
 import { computed, reactive, toRaw, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import ClientCommands from '@/components/devices/ClientCommands.vue';
 import SettingsOverrideEditor from '@/components/settings/SettingsOverrideEditor.vue';
+import DisplayTopologyEditor from '@/components/devices/DisplayTopologyEditor.vue';
 import { AppButton, SettingRow, StatusBadge, UiIcon } from '@/components/ui';
 
 export type ClientVirtualDisplayMode = 'global' | 'per_client' | 'shared' | 'disabled' | null;
@@ -139,6 +141,7 @@ const permissionOptions = [
   { key: 'clipboard_set', mask: 0x00010000 },
   { key: 'clipboard_read', mask: 0x00020000 },
   { key: 'server_cmd', mask: 0x00100000 },
+  { key: 'telemetry_read', mask: 0x00200000 },
   { key: 'input_controller', mask: 0x00000100 },
   { key: 'input_touch', mask: 0x00000200 },
   { key: 'input_pen', mask: 0x00000400 },
@@ -200,8 +203,8 @@ const globalVirtualDisplayLayoutLabel = computed(() =>
 );
 
 const globalVirtualDisplayScale = computed(() => {
-  const value = Number(props.commonSettings.dd_virtual_display_scale ?? -1);
-  return Number.isFinite(value) ? value : -1;
+  const value = Number(props.commonSettings.dd_virtual_display_scale ?? 0);
+  return Number.isFinite(value) ? value : 0;
 });
 
 const globalVirtualDisplayScaleLabel = computed(() => {
@@ -784,6 +787,17 @@ function applyDisplaySelection(selection: ClientDisplaySelection): void {
       :display-selection="visibleOverrideDisplaySelection"
       :hidden-keys="hiddenOverrideKeys"
       :control-id-prefix="`${controlIdPrefix}-override`"
+    />
+
+    <DisplayTopologyEditor v-if="isWindows" :client-uuid="controlIdPrefix.replace(/^client-/, '')" compact />
+
+    <ClientCommands
+      v-model:allow-client-commands="draft.allowClientCommands"
+      v-model:do-commands="draft.doCommands"
+      v-model:undo-commands="draft.undoCommands"
+      :platform="metadata.platform"
+      :disabled="busy"
+      :control-id-prefix="`${controlIdPrefix}-commands`"
     />
 
     <div class="client-settings-editor__footer">

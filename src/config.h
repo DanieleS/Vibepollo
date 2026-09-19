@@ -83,6 +83,7 @@ namespace config {
       int h264_coder;
       int aq;
       int vbv_percentage_increase;
+      int split_encode_mode;
     } nv_legacy;
 
     struct {
@@ -106,7 +107,7 @@ namespace config {
       std::optional<int> amd_preanalysis;
       std::optional<int> amd_vbaq;  // nullopt = follow usage-preset default
       int amd_coder;
-      // Native AMF encoder (amdvce) tuning knobs.
+      // Native AMF encoder (amdvce_experimental) tuning knobs.
       int amd_ltr_frames;  // Long-term reference frames for RFI (0 = off)
       int amd_input_queue_size;  // AMF input queue depth (0 = driver default)
       // Curated tri-state native-AMF feature knobs. nullopt (auto) leaves the
@@ -157,6 +158,12 @@ namespace config {
 
     virtual_display_mode_e virtual_display_mode;
     virtual_display_layout_e virtual_display_layout;
+
+    bool remote_monitor_mute_audio;  ///< Do not capture or transmit audio for Remote Monitor sessions.
+    bool remote_monitor_disconnect_on_stream_end;  ///< Release a Remote Monitor when its RTSP stream ends.
+    bool remote_monitor_disconnect_on_client_disconnect;  ///< Release a Remote Monitor when its paired client transport disconnects.
+    bool remote_monitor_terminate_on_first_request;  ///< Let extra clients terminate the active game with one Terminate request.
+    bool remote_monitor_confirm_app_replacement;  ///< Require confirmation before an ungated launch replaces the active game.
 
     struct dd_t {
       struct workarounds_t {
@@ -230,9 +237,10 @@ namespace config {
       std::uint32_t snapshot_restore_hotkey_modifiers;  ///< Modifier flags for the restore hotkey.
       bool use_sunshine_virtual_display_driver;  ///< Use the Vibepollo Display Driver instead of rollback drivers such as SudoVDA.
       bool activate_virtual_display;  ///< Auto-activate Sunshine virtual display when selected as the target output.
-      int virtual_display_scale_percent;  ///< Windows scale for virtual displays (-1 is resolution-based; 0 preserves Windows' choice).
+      int virtual_display_scale_percent;  ///< Virtual-display scale percent (-1 is automatic; 0 preserves the compositor's choice).
       int virtual_display_permanent_count;  ///< Number of always-present Sunshine virtual displays to request when explicitly configured.
       bool virtual_display_permanent_count_configured;  ///< False preserves installs that predate this setting.
+      std::vector<std::string> virtual_display_outputs;  ///< Linux connector names reserved for private streaming displays; empty enables managed-VKMS discovery.
       std::vector<std::string> snapshot_exclude_devices;  ///< Device IDs to skip when saving display snapshots.
       mode_remapping_t mode_remapping;
       workarounds_t wa;
@@ -253,6 +261,7 @@ namespace config {
     bool install_steam_drivers;
     bool keep_default;
     bool auto_capture;
+    bool sink_capture_only;  ///< Capture the selected Windows audio sink without changing default outputs.
   };
 
   constexpr int ENCRYPTION_MODE_NEVER = 0;  // Never use video encryption, even if the client supports it
@@ -333,11 +342,21 @@ namespace config {
 
     bool enable {false};
 
-    // Provider selector. Supported values: "auto", "nvidia-control-panel", "rtss".
+    // Provider selector. Linux defaults to Proton with a MangoHUD overlay;
+    // Windows defaults to RTSS or NVIDIA Control Panel.
+    // Supported values: "auto", "mangohud", "proton", "mangohud-proton",
+    // "nvidia-control-panel", "rtss", "none".
     std::string provider;
 
     // Optional FPS limit override in millihertz. 0 uses the stream's requested FPS.
     std::uint32_t fps_limit_millihz {0};
+
+    // Linux MangoHUD overlay presentation. "custom" preserves the user's
+    // configuration; 1-4 select MangoHUD's standard built-in presets.
+    std::string mangohud_preset {"custom"};
+    bool mangohud_always_show_graph {false};
+    // MangoHUD's own limiter timing. Early favors smooth pacing; late favors latency.
+    std::string mangohud_limiter_method {"late"};
 
     // When enabled, Sunshine forces the NVIDIA driver VSYNC setting to Off during streams when available.
     // When NVIDIA overrides are unavailable, the display helper falls back to the highest refresh rate instead.
@@ -375,11 +394,67 @@ namespace config {
     // SyncLimiter mode. One of: "async", "front edge sync", "back edge sync", "nvidia reflex".
     // If empty or unrecognized, SyncLimiter is not modified.
     std::string frame_limit_type;
+
+    // When enabled, the configured SyncLimiter mode may replace the automatic NVIDIA Reflex
+    // policy for virtual-display streams. Game-provided frame generation still selects Reflex
+    // unless the app/client supplies an explicit RTSS mode override.
+    bool allow_virtual_display_override {false};
   };
 
   struct lossless_scaling_t {
     std::string exe_path;
     bool legacy_auto_detect {false};
+  };
+
+  // Windows-only: game-memory telemetry read by the bundled `scry` helper and
+  // forwarded to clients that asked for it. Off by default — it reads a game's
+  // memory and ships what it finds off the machine, which is a decision the user
+  // makes explicitly, per client, not a default they discover afterwards.
+  struct scry_t {
+    bool enabled {false};
+
+    // Directory of per-game profiles handed to the helper. Every profile in it is
+    // a candidate; the helper picks the one whose probe actually resolves in the
+    // target's memory, so a stale or wrong profile costs a failed probe, not bad
+    // telemetry. Defaults to a per-machine directory under ProgramData.
+    std::string profiles_dir;
+
+    // Helper polling cadence in milliseconds. This is how often the *game* is
+    // read; what reaches a client is coalesced separately and more slowly.
+    int tick_ms {50};
+  };
+
+  // Metadata pulled from IGDB instead of from whichever launcher happens to own the game.
+  // Off until the user supplies credentials, because IGDB is a third party and sending it a
+  // list of what someone owns is a decision they make, not one we make for them.
+  struct igdb_t {
+    bool enabled {false};
+
+    // Twitch application client id. This one is safe to keep in the config file; the paired
+    // secret is not, so it lives in its own file the config API never reads back.
+    std::string client_id;
+
+    // File holding the client secret, one line, nothing else. Defaults next to the other
+    // per-machine state. The same reasoning as credentials_file: GET /api/config returns
+    // sunshine.conf as it stands, so a secret stored there would be handed to every caller
+    // allowed to read settings.
+    std::string secret_file;
+
+    // Resolve metadata for newly discovered games as part of a library sync. When off, IGDB is
+    // only consulted for the app the user is looking at in the editor.
+    bool auto_resolve {true};
+
+    // Where resolved records and downloaded art are kept. A cache hit costs no request, which
+    // is what keeps a library scan inside IGDB's rate limit on every run after the first.
+    std::string cache_dir;
+
+    // How long a cached record stays usable. Summaries and ratings drift slowly.
+    int cache_ttl_days {30};
+
+    // Fall back to matching by name when a game has no store id IGDB indexes, or when the
+    // lookup by store id finds nothing. Name matches are only accepted on an exact normalized
+    // title, but a user who would rather have no metadata than a wrong one can turn them off.
+    bool allow_name_match {true};
   };
 
   namespace flag {
@@ -475,6 +550,8 @@ namespace config {
   extern frame_limiter_t frame_limiter;
   extern rtss_t rtss;
   extern lossless_scaling_t lossless_scaling;
+  extern scry_t scry;
+  extern igdb_t igdb;
   extern sunshine_t sunshine;
 
   int parse(int argc, char *argv[]);
@@ -519,7 +596,6 @@ namespace config {
   std::optional<std::string> runtime_output_name_override();
   std::string get_active_output_name();
 
-#ifdef _WIN32
   // A recovery worker can publish a temporary virtual-output override.  The
   // lease makes rollback conditional so an older recovery cannot erase an
   // override installed by a newer session.
@@ -527,6 +603,7 @@ namespace config {
   runtime_output_override_lease_t set_runtime_output_name_override_with_lease(std::string output_name);
   bool clear_runtime_output_name_override_if_lease(runtime_output_override_lease_t lease);
 
+#ifdef _WIN32
   // The lock-screen virtual-output retry worker is owned work.  Main stops
   // and joins it before configuration, display-helper, and mail teardown.
   void request_deferred_virtual_output_reapply_shutdown();

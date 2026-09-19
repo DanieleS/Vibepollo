@@ -93,6 +93,7 @@ namespace platf::playnite {
           game.categories = to_string_list(g.value("categories", json::array()));
           game.plugin_id = g.value("pluginId", "");
           game.plugin_name = g.value("pluginName", "");
+          game.store_id = g.value("storeId", "");
           // playtimeMinutes may arrive as number or string
           try {
             game.playtime_minutes = g.value("playtimeMinutes", (uint64_t) 0);

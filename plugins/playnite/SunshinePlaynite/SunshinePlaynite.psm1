@@ -1646,6 +1646,11 @@ function Get-PlayniteGames {
     try { if ($g.PluginId) { $pluginId = $g.PluginId.ToString() } } catch {}
     $pluginName = ''
     if ($pluginId -and $pluginMap.ContainsKey($pluginId)) { $pluginName = $pluginMap[$pluginId] }
+    # The owning library plugin's own id for the game: the Steam appid, the GOG product id,
+    # and so on. Playnite's own Id is a local GUID and means nothing off this machine, so this
+    # is the only field that lets the host look the game up in an external database.
+    $storeId = ''
+    try { if ($g.GameId) { $storeId = $g.GameId.ToString() } } catch {}
     $instDir = ''
     try { if ($g.InstallDirectory) { $instDir = $g.InstallDirectory } } catch {}
     $games += @{
@@ -1658,6 +1663,7 @@ function Get-PlayniteGames {
       categories      = $catNames
       pluginId        = $pluginId
       pluginName      = $pluginName
+      storeId         = $storeId
       playtimeMinutes = $playtimeMin
       lastPlayed      = $lastPlayed
       boxArtPath      = $boxArt

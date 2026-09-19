@@ -25,8 +25,10 @@
 
 // local includes
 #include "config.h"
+#include "game_metadata.h"
 #include "platform/common.h"
 #include "rtsp.h"
+#include "steam_process_tracker.h"
 #include "utility.h"
 
 #ifdef _WIN32
@@ -35,13 +37,12 @@
 
 namespace VDISPLAY {
   enum class DRIVER_STATUS;
+  enum class DRIVER_SELECTION;
 }
 
 #endif
 
-#define VIRTUAL_DISPLAY_UUID "8902CB19-674A-403D-A587-41B092E900BA"
 #define FALLBACK_DESKTOP_UUID "EAAC6159-089A-46A9-9E24-6436885F6610"
-#define REMOTE_INPUT_UUID "8CB5C136-DA67-4F99-B4A1-F9CD35005CF4"
 #define TERMINATE_APP_UUID "E16CBE1B-295D-4632-9A76-EC4180C857D3"
 
 namespace bp = boost_process_shim;
@@ -52,6 +53,14 @@ namespace proc {
 
 #ifdef _WIN32
   extern std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus;
+  extern std::atomic<VDISPLAY::DRIVER_SELECTION> vDisplayDriverSelection;
+  struct vdisplay_driver_status_snapshot_t {
+    VDISPLAY::DRIVER_STATUS status;
+    VDISPLAY::DRIVER_SELECTION selection;
+  };
+  vdisplay_driver_status_snapshot_t vDisplayDriverStatusSnapshot();
+  void setVDisplayDriverStatus(VDISPLAY::DRIVER_STATUS status);
+  void setVDisplayDriverStatus(VDISPLAY::DRIVER_STATUS status, VDISPLAY::DRIVER_SELECTION selection);
   void initVDisplayDriver();
 #endif
 
@@ -64,6 +73,7 @@ namespace proc {
     bool uses_playnite {false};
     std::string playnite_id;
     std::string client_uuid;
+    std::uint64_t normal_vdd_identity_token {0};
     std::chrono::steady_clock::time_point launch_started_at {};
   };
 
@@ -102,26 +112,9 @@ namespace proc {
     std::optional<bool> anime4k_vrs;
   };
 
-  // Playnite-enriched game metadata, carried through to clients. Absent values stay empty or
-  // -1; `present` is set when the app carries any metadata at all.
-  struct playnite_metadata_t {
-    bool present {false};
-    std::string description;
-    std::vector<std::string> genres;
-    std::vector<std::string> developers;
-    std::vector<std::string> publishers;
-    std::string release_date;
-    int community_score {-1};
-    int critic_score {-1};
-    // When Playnite last recorded the game as played (ISO8601), and for how long in total.
-    // Unlike anything a client can track on its own, these cover sessions played at the PC
-    // itself. Empty / 0 when the game has never been played or Playnite reports nothing.
-    std::string last_played;
-    uint64_t playtime_minutes {0};
-    // Local path to the converted background/hero image, served via /appbackground. Empty when
-    // the game has none.
-    std::string background_image_path;
-  };
+  // Descriptive metadata carried through to clients. Playnite, IGDB and the user all fill the
+  // same container; see game_metadata.h for the fields and who owns which of them.
+  using game_metadata_t = metadata::game_metadata_t;
 
   struct ctx_t {
     std::vector<cmd_t> prep_cmds;
@@ -153,15 +146,26 @@ namespace proc {
     std::string gamepad;
     std::string art_version;
     std::vector<std::string> id_aliases;
+    // Provider metadata used by the Steam-owned process lifecycle boundary.
+    // These remain strings because the catalog/API stores Steam IDs and paths
+    // as JSON strings for compatibility with older app entries.
+    std::string steam_id;
+    std::string steam_install_dir;
+    // Lutris also launches through a short-lived broker. Its game directory
+    // lets the shared process tracker own the real Wine/native process.
+    std::string lutris_id;
+    std::string lutris_directory;
     // When present, this app should be launched via Playnite instead of direct cmd.
     std::string playnite_id;
-    // Playnite-enriched metadata for this app (empty/absent for non-Playnite apps).
-    playnite_metadata_t playnite_metadata;
+    // Descriptive metadata for this app, from whichever provider supplied it.
+    game_metadata_t metadata;
     // When true, launch Playnite in fullscreen mode via the helper.
     bool playnite_fullscreen;
     bool frame_gen_limiter_fix;
     bool elevated;
     bool virtual_screen {false};
+    // Unset inherits the device preference; false allows normal client HDR requests.
+    std::optional<bool> prefer_10bit_sdr;
     std::optional<config::video_t::virtual_display_mode_e> virtual_display_mode_override;
     std::optional<config::video_t::virtual_display_layout_e> virtual_display_layout_override;
     bool auto_detach;
@@ -212,8 +216,6 @@ namespace proc {
         _env(std::move(env)),
         _apps(std::move(apps)) {
     }
-
-    void launch_input_only();
 
     int execute(const ctx_t &_app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
 
@@ -282,11 +284,20 @@ namespace proc {
     ctx_t _app;
     std::chrono::steady_clock::time_point _app_launch_time;
     std::string _active_client_uuid;
+    std::uint64_t _active_client_vdd_identity_token {0};
 
     mutable std::mutex _apps_mutex;
 
     // If no command associated with _app_id, yet it's still running
     bool placebo {};
+
+    platf::steam::lifecycle::tracker _steam_tracker;
+    std::shared_ptr<platf::steam::lifecycle::process_controller> _steam_process_controller;
+    bool _steam_tracking_active {false};
+    bool _steam_tracking_associated {false};
+    platf::steam::lifecycle::exit_latch _steam_tracking_exit;
+    std::chrono::steady_clock::time_point _steam_tracking_deadline {};
+    std::chrono::steady_clock::time_point _steam_last_tracking_poll {};
 
 #ifdef _WIN32
     bool _deferred_launch {false};
@@ -332,6 +343,7 @@ namespace proc {
 
   bool check_valid_png(const std::filesystem::path &path);
   std::string validate_app_image_path(std::string app_image_path);
+  std::optional<std::string> read_validated_app_image(const std::string &validated_path);
   std::string calculate_app_cover_fingerprint(std::string app_image_path);
   void refresh(const std::string &file_name, bool needs_terminate = true);
   void migrate_apps(nlohmann::json *fileTree_p, nlohmann::json *inputTree_p);
@@ -364,8 +376,6 @@ namespace proc {
 
   extern proc_t proc;
 
-  extern int input_only_app_id;
-  extern std::string input_only_app_id_str;
   extern int terminate_app_id;
   extern std::string terminate_app_id_str;
 }  // namespace proc
