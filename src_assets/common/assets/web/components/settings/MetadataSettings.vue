@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/api/client';
 import { AppButton, InlineAlert, SettingRow, StatusBadge } from '@/components/ui';
@@ -24,6 +24,9 @@ const { t } = useI18n();
 const status = ref<IgdbStatus | null>(null);
 const values = ref<Record<string, unknown>>({});
 const original = ref<Record<string, unknown>>({});
+// The host configuration as last read, kept so a field that depends on the platform can be
+// added to the form after the fact without another round trip.
+const hostConfig = ref<Record<string, unknown>>({});
 // Never read back from the host: the secret leaves the browser once and is not returned.
 const secret = ref('');
 
@@ -62,6 +65,29 @@ function note(text: string, tone: 'success' | 'warning' = 'success') {
   messageTone.value = tone;
 }
 
+// The Playnite switch is part of the form only on Windows hosts. The platform can arrive after
+// the first load, so the field is added or removed whenever that answer changes, and it goes
+// into `original` too so merely learning the platform never counts as an unsaved change.
+function syncPlayniteField() {
+  const key = 'playnite_sync_metadata';
+  if (isWindows.value) {
+    if (!(key in values.value)) {
+      const current = configBoolean(hostConfig.value[key] ?? true, true);
+      values.value = { ...values.value, [key]: current };
+      original.value = { ...original.value, [key]: current };
+    }
+    return;
+  }
+  if (key in values.value) {
+    const { [key]: _dropped, ...rest } = values.value;
+    values.value = rest;
+    const { [key]: _droppedOriginal, ...restOriginal } = original.value;
+    original.value = restOriginal;
+  }
+}
+
+watch(isWindows, syncPlayniteField);
+
 async function load() {
   loading.value = true;
   failed.value = false;
@@ -77,11 +103,10 @@ async function load() {
       igdb_allow_name_match: configBoolean(config.igdb_allow_name_match ?? true),
       igdb_cache_ttl_days: Number(config.igdb_cache_ttl_days ?? 30),
     };
-    if (isWindows.value) {
-      next.playnite_sync_metadata = configBoolean(config.playnite_sync_metadata ?? true, true);
-    }
+    hostConfig.value = config;
     values.value = next;
     original.value = JSON.parse(JSON.stringify(next));
+    syncPlayniteField();
     status.value = igdb;
   } catch {
     failed.value = true;
@@ -299,6 +324,22 @@ onUnmounted(() => {
           </SettingRow>
 
           <SettingRow
+            v-if="enabled && isWindows"
+            :label="t('ui.metadata.fields.playniteSync')"
+            :description="t('ui.metadata.fields.playniteSyncHint')"
+            control-id="playnite_sync_metadata"
+          >
+            <label class="vs-switch">
+              <input
+                id="playnite_sync_metadata"
+                v-model="values.playnite_sync_metadata"
+                type="checkbox"
+              />
+              <span class="vs-switch__track" aria-hidden="true" />
+            </label>
+          </SettingRow>
+
+          <SettingRow
             v-if="enabled"
             :label="t('ui.metadata.fields.nameMatch')"
             :description="t('ui.metadata.fields.nameMatchHint')"
@@ -308,22 +349,6 @@ onUnmounted(() => {
               <input
                 id="igdb_allow_name_match"
                 v-model="values.igdb_allow_name_match"
-                type="checkbox"
-              />
-              <span class="vs-switch__track" aria-hidden="true" />
-            </label>
-          </SettingRow>
-
-          <SettingRow
-            v-if="isWindows"
-            :label="t('ui.metadata.fields.playniteSync')"
-            :description="t('ui.metadata.fields.playniteSyncHint')"
-            control-id="playnite_sync_metadata"
-          >
-            <label class="vs-switch">
-              <input
-                id="playnite_sync_metadata"
-                v-model="values.playnite_sync_metadata"
                 type="checkbox"
               />
               <span class="vs-switch__track" aria-hidden="true" />
