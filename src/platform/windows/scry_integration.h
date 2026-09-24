@@ -66,9 +66,13 @@ namespace platf::scry {
     std::string profile;
     std::string profile_file;
 
-    /// Shape of `values`, as declared by the winning profile. Absent when the
-    /// profile declares no contract; a renderer downstream keys off this.
-    std::optional<std::uint32_t> contract_version;
+    /// The contract `values` follows, as declared by the winning profile: an id
+    /// such as `sea-of-stars` and a `major.minor` version. A renderer downstream
+    /// keys off these, never off the profile label. Both are empty when the
+    /// profile declares no contract; the id alone is empty for a profile that
+    /// still uses the deprecated integer `contractVersion`.
+    std::string contract_id;
+    std::string contract_version;
 
     /// Watch name → last known value. A watch that went unreadable is `null`,
     /// which is a different claim from being absent.

@@ -118,8 +118,12 @@ namespace platf::scry {
         body["process"] = snap.process;
         body["profile"] = snap.profile;
         body["values"] = snap.values;
-        if (snap.contract_version) {
-          body["contract"] = *snap.contract_version;
+        if (!snap.contract_version.empty()) {
+          nlohmann::json contract {{"version", snap.contract_version}};
+          if (!snap.contract_id.empty()) {
+            contract["id"] = snap.contract_id;
+          }
+          body["contract"] = std::move(contract);
         }
       }
       return frame_t {snap.revision, "snapshot", std::move(body)};
@@ -338,23 +342,51 @@ namespace platf::scry {
       const auto type = event.value("event", std::string {});
 
       if (type == "attached") {
+        // Read before the snapshot is touched, and tolerantly: `profile_file` is
+        // optional in scry and may arrive as null, and json::value() throws on a
+        // null where a string is expected. A throw half-way through the update
+        // below would leave a snapshot marked attached with half its fields.
+        const auto text = [&event](const char *key, const std::string &fallback) {
+          const auto it = event.find(key);
+          return it != event.end() && it->is_string() ? it->get<std::string>() : fallback;
+        };
+        const auto process = text("process", target.exe);
+        const auto profile = text("profile", std::string {});
+        const auto profile_file = text("profile_file", std::string {});
+
         auto lg = g_snapshot.lock();
         auto &snap = g_snapshot.raw;
         snap.attached = true;
         snap.slug = target.slug;
-        snap.process = event.value("process", target.exe);
-        snap.profile = event.value("profile", std::string {});
-        snap.profile_file = event.value("profile_file", std::string {});
-        snap.contract_version.reset();
-        if (auto it = event.find("contract_version"); it != event.end() && it->is_number_unsigned()) {
-          snap.contract_version = it->get<std::uint32_t>();
+        snap.process = process;
+        snap.profile = profile;
+        snap.profile_file = profile_file;
+        snap.contract_id.clear();
+        snap.contract_version.clear();
+        if (auto it = event.find("contract"); it != event.end() && it->is_object()) {
+          if (auto id = it->find("id"); id != it->end() && id->is_string()) {
+            snap.contract_id = id->get<std::string>();
+          }
+          if (auto version = it->find("version"); version != it->end() && version->is_string()) {
+            snap.contract_version = version->get<std::string>();
+          }
+        }
+        // scry before 0.2 announces only the integer, which was always the major.
+        if (snap.contract_version.empty()) {
+          if (auto it = event.find("contract_version"); it != event.end() && it->is_number_unsigned()) {
+            snap.contract_version = std::to_string(it->get<std::uint32_t>()) + ".0";
+          }
         }
         snap.values = nlohmann::json::object();
         bump(snap);
         // A new game is a new picture, not a change to the old one.
         publish(snap, snapshot_frame(snap));
+        std::string contract = "none";
+        if (!snap.contract_version.empty()) {
+          contract = (snap.contract_id.empty() ? std::string {"(no id)"} : snap.contract_id) + " " + snap.contract_version;
+        }
         BOOST_LOG(info) << "scry: attached to " << snap.process << " with profile '" << snap.profile
-                        << "' (contract " << (snap.contract_version ? std::to_string(*snap.contract_version) : "none") << ")";
+                        << "' (contract " << contract << ")";
         return;
       }
 
@@ -482,7 +514,14 @@ namespace platf::scry {
               BOOST_LOG(warning) << "scry: helper wrote a line that is not a JSON object; ignoring it";
               return;
             }
-            apply_event(event, target);
+            // One event the parser did not expect, a null where a string was
+            // assumed, must cost that event and nothing more. Uncaught, it would
+            // leave this thread and take the whole host down with it.
+            try {
+              apply_event(event, target);
+            } catch (const std::exception &e) {
+              BOOST_LOG(warning) << "scry: could not apply a helper event: " << e.what();
+            }
           });
         } else {
           std::this_thread::sleep_for(POLL_INTERVAL);
