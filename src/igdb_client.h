@@ -71,7 +71,12 @@ namespace igdb {
   std::string download_cover(const policy::game_t &game, const std::filesystem::path &covers_root);
   std::string download_background(const policy::game_t &game, const std::filesystem::path &covers_root);
 
-  /// @brief Drop every cached record and downloaded image. Returns how many files went.
+  /**
+   * @brief Drop every cached IGDB record. Returns how many files went.
+   *
+   * Downloaded covers and hero art stay: apps.json points at them, and removing them would
+   * leave those apps showing placeholder art until each one was resolved again.
+   */
   std::size_t clear_cache();
 
 }  // namespace igdb

@@ -4805,7 +4805,7 @@ namespace confighttp {
   }
 
   /**
-   * @brief Drop every cached IGDB record and downloaded image.
+   * @brief Drop every cached IGDB record. Downloaded art stays, since apps still point at it.
    * @api_examples{/api/igdb/cache| DELETE| null}
    */
   void deleteIgdbCache(resp_https_t response, req_https_t request) {
