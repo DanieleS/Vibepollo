@@ -388,7 +388,7 @@ namespace platf::scry {
             snap.contract_version = version->get<std::string>();
           }
         }
-        // scry before 0.2 announces only the integer, which was always the major.
+        // scry before 0.1.0-alpha.4 announces only the integer, which was always the major.
         if (snap.contract_version.empty()) {
           if (auto it = event.find("contract_version"); it != event.end() && it->is_number_unsigned()) {
             snap.contract_version = std::to_string(it->get<std::uint32_t>()) + ".0";
