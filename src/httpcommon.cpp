@@ -434,9 +434,12 @@ namespace http {
       return false;
     }
 
-    FILE *fp = fopen(file.c_str(), "wb");
+    // The body lands next to the target and is renamed over it only once the transfer is
+    // complete, so a failed or cut-off download never leaves a file that reads as a good one.
+    const std::string partial = file + ".part";
+    FILE *fp = fopen(partial.c_str(), "wb");
     if (!fp) {
-      BOOST_LOG(error) << "Couldn't open ["sv << file << ']';
+      BOOST_LOG(error) << "Couldn't open ["sv << partial << ']';
       curl_easy_cleanup(curl);
       return false;
     }
@@ -448,6 +451,12 @@ namespace http {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    // An HTTP error status is a failed download, not a file: without this the error page is
+    // written out and reported as success. The timeouts keep a stalled server from holding
+    // the caller forever.
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 #ifdef _WIN32
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
 #endif
@@ -456,8 +465,20 @@ namespace http {
       BOOST_LOG(error) << "Couldn't download ["sv << url << ", code:" << result << ']';
     }
     curl_easy_cleanup(curl);
-    fclose(fp);
-    return result == CURLE_OK;
+    const bool closed = fclose(fp) == 0;
+
+    std::error_code ec;
+    if (result != CURLE_OK || !closed) {
+      fs::remove(partial, ec);
+      return false;
+    }
+    fs::rename(partial, file, ec);
+    if (ec) {
+      BOOST_LOG(error) << "Couldn't move download into ["sv << file << "]: "sv << ec.message();
+      fs::remove(partial, ec);
+      return false;
+    }
+    return true;
   }
 
   bool configure_curl_tls(CURL *curl) {
