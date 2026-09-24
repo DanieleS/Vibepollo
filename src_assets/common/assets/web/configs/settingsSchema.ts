@@ -1009,7 +1009,10 @@ export const settingsCategories: SettingsCategory[] = [
             visibleWhen: { key: 'scry_enabled', equals: true },
           }),
           number('scry_tick_ms', {
-            min: 1,
+            // The host clamps to 10-1000; offering anything outside it would save
+            // a value that silently turns into a different one.
+            min: 10,
+            max: 1000,
             step: 1,
             visibleWhen: { key: 'scry_enabled', equals: true },
           }),
@@ -1072,6 +1075,9 @@ export const settingsDefaults: Record<string, unknown> = {
   capture: '',
   stream_audio: true,
   controller: true,
+  scry_enabled: false,
+  scry_profiles_dir: '',
+  scry_tick_ms: 50,
   origin_web_ui_allowed: 'lan',
   upnp: false,
   output_name: '',
