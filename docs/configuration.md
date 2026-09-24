@@ -3295,7 +3295,7 @@ granted the **Receive game telemetry** permission. Windows only.
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            scry_profiles_dir = "C:\\ProgramData\\Vibepollo\\scry-profiles"
+            scry_profiles_dir = C:\ProgramData\Vibepollo\scry-profiles
             @endcode</td>
     </tr>
 </table>
