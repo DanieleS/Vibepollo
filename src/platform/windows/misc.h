@@ -49,6 +49,13 @@ namespace platf {
   }
 
   /**
+   * @brief Quote/escape an argument according to the Windows parsing convention.
+   * @param argument The raw argument to process.
+   * @return An argument string suitable for use by CreateProcess().
+   */
+  std::wstring escape_argument(const std::wstring &argument);
+
+  /**
    * @brief Check if the current process is running under the SYSTEM account.
    */
   bool is_running_as_system();

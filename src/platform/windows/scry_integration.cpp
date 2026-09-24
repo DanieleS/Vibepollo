@@ -420,8 +420,11 @@ namespace platf::scry {
      * return value.
      */
     helper_end_e run_helper(const std::filesystem::path &helper, const std::filesystem::path &profiles, const target_t &target) {
+      // The path goes through the same escaping as every other command line here. Wrapped in bare
+      // quotes, a directory entered with a trailing backslash ended the argument with \" — a
+      // literal quote under the argv rules — and swallowed the rest of the line into the path.
       std::wstring args = L"watch --pid " + std::to_wstring(target.pid) +
-                          L" --profiles \"" + profiles.wstring() + L"\"" +
+                          L" --profiles " + escape_argument(profiles.wstring()) +
                           L" --format json --tick " + std::to_wstring(std::clamp(config::scry.tick_ms, 10, 1000));
 
       helper_pipes_t pipes;
