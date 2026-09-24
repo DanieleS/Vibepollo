@@ -181,6 +181,64 @@ TEST(IgdbPolicy, ANameMatchHasToBeExactAfterNormalizing) {
   EXPECT_FALSE(igdb::policy::best_name_match({near_miss}, "Half-Life 2").has_value());
 }
 
+namespace {
+  igdb::policy::game_t hit(const char *id, const char *name, std::int64_t released) {
+    igdb::policy::game_t game;
+    game.igdb_id = id;
+    game.name = name;
+    game.first_release_date = released;
+    return game;
+  }
+
+  // 1993-12-10 and 2016-05-13, the two games IGDB calls "DOOM".
+  constexpr std::int64_t k_1993 = 755481600;
+  constexpr std::int64_t k_2016 = 1463097600;
+}  // namespace
+
+TEST(IgdbPolicy, TheReleaseYearTellsARemakeFromTheOriginal) {
+  const std::vector<igdb::policy::game_t> hits {hit("1", "DOOM", k_1993), hit("2", "DOOM", k_2016)};
+  const auto remake = igdb::policy::best_name_match(hits, "DOOM", 2016);
+  ASSERT_TRUE(remake.has_value());
+  EXPECT_EQ(remake->igdb_id, "2");
+  const auto original = igdb::policy::best_name_match(hits, "DOOM", 1993);
+  ASSERT_TRUE(original.has_value());
+  EXPECT_EQ(original->igdb_id, "1");
+  // A year that fits neither says the app is neither.
+  EXPECT_FALSE(igdb::policy::best_name_match(hits, "DOOM", 2005).has_value());
+}
+
+TEST(IgdbPolicy, ASharedTitleWithNothingToTellThemApartMatchesNothing) {
+  // IGDB's ranking between two games with one name is not an answer.
+  const std::vector<igdb::policy::game_t> hits {hit("1", "DOOM", k_1993), hit("2", "DOOM", k_2016)};
+  EXPECT_FALSE(igdb::policy::best_name_match(hits, "DOOM").has_value());
+}
+
+TEST(IgdbPolicy, AnEditionTheAppSpellsOutWinsOverTheOriginal) {
+  const std::vector<igdb::policy::game_t> hits {hit("1", "Dark Souls", 0), hit("2", "Dark Souls: Remastered", 0)};
+  const auto remaster = igdb::policy::best_name_match(hits, "DARK SOULS: REMASTERED");
+  ASSERT_TRUE(remaster.has_value());
+  EXPECT_EQ(remaster->igdb_id, "2");
+  const auto original = igdb::policy::best_name_match(hits, "Dark Souls");
+  ASSERT_TRUE(original.has_value());
+  EXPECT_EQ(original->igdb_id, "1");
+}
+
+TEST(IgdbPolicy, ASingleExactHitNeedsNoYear) {
+  // A year only breaks ties; it does not veto the one hit there is.
+  const std::vector<igdb::policy::game_t> hits {hit("7", "Hades", 0)};
+  const auto match = igdb::policy::best_name_match(hits, "Hades", 2020);
+  ASSERT_TRUE(match.has_value());
+  EXPECT_EQ(match->igdb_id, "7");
+}
+
+TEST(IgdbPolicy, ReadsTheYearOfAStoredDate) {
+  EXPECT_EQ(igdb::policy::year_from_date("2016-05-13"), 2016);
+  EXPECT_EQ(igdb::policy::year_from_date("1993"), 1993);
+  EXPECT_EQ(igdb::policy::year_from_date(""), 0);
+  EXPECT_EQ(igdb::policy::year_from_date("May 2016"), 0);
+  EXPECT_EQ(igdb::policy::year_from_date("20160513"), 0);
+}
+
 TEST(IgdbPolicy, PacingHoldsAtFourRequestsASecond) {
   using namespace std::chrono;
   const auto now = steady_clock::now();

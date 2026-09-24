@@ -160,7 +160,9 @@ namespace metadata::resolver {
       if (hits.empty()) {
         return {};
       }
-      const auto best = igdb::policy::best_name_match(hits, name);
+      // A release date the launcher already supplied is what tells a remake from the original.
+      const auto year = igdb::policy::year_from_date(read_from_app(app).release_date);
+      const auto best = igdb::policy::best_name_match(hits, name, year);
       return best ? best->igdb_id : std::string {};
     }
   }  // namespace

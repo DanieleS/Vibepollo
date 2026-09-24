@@ -401,21 +401,47 @@ namespace igdb::policy {
     return url;
   }
 
-  std::string normalize_title(const std::string &name) {
-    std::string folded;
-    folded.reserve(name.size());
-    for (const unsigned char c : name) {
-      if (std::isalnum(c)) {
-        folded.push_back(static_cast<char>(std::tolower(c)));
-      } else if (c >= 0x80) {
-        // Non-ASCII bytes are dropped rather than transliterated: the alternative is a
-        // Unicode table for the handful of accented titles it would rescue.
-        continue;
-      } else {
-        folded.push_back(' ');
+  namespace {
+    /// @brief Lowercase alphanumerics, one space for any run of anything else.
+    std::string fold_title(const std::string &name) {
+      std::string folded;
+      folded.reserve(name.size());
+      for (const unsigned char c : name) {
+        if (std::isalnum(c)) {
+          folded.push_back(static_cast<char>(std::tolower(c)));
+        } else if (c >= 0x80) {
+          // Non-ASCII bytes are dropped rather than transliterated: the alternative is a
+          // Unicode table for the handful of accented titles it would rescue.
+          continue;
+        } else {
+          folded.push_back(' ');
+        }
       }
+      return collapse_whitespace(folded);
     }
-    folded = collapse_whitespace(folded);
+
+    /// @brief The year a hit was first released, or 0 when IGDB does not say.
+    int release_year_of(const game_t &hit) {
+      return year_from_date(release_date_from_timestamp(hit.first_release_date));
+    }
+
+    /// @brief The single hit left, or nothing when none or several are.
+    std::optional<game_t> only_one(const std::vector<const game_t *> &candidates) {
+      if (candidates.empty()) {
+        return std::nullopt;
+      }
+      // The same record twice is one answer, not an ambiguity.
+      for (const auto *candidate : candidates) {
+        if (candidate->igdb_id != candidates.front()->igdb_id) {
+          return std::nullopt;
+        }
+      }
+      return *candidates.front();
+    }
+  }  // namespace
+
+  std::string normalize_title(const std::string &name) {
+    auto folded = fold_title(name);
     for (const char *suffix : k_edition_suffixes) {
       const std::string_view tail {suffix};
       if (folded.size() > tail.size() + 1 &&
@@ -428,17 +454,63 @@ namespace igdb::policy {
     return folded;
   }
 
-  std::optional<game_t> best_name_match(const std::vector<game_t> &hits, const std::string &name) {
+  int year_from_date(const std::string &date) {
+    if (date.size() < 4) {
+      return 0;
+    }
+    int year = 0;
+    for (std::size_t index = 0; index < 4; ++index) {
+      const auto c = static_cast<unsigned char>(date[index]);
+      if (!std::isdigit(c)) {
+        return 0;
+      }
+      year = year * 10 + (c - '0');
+    }
+    // A fifth digit means this was not a year at all.
+    if (date.size() > 4 && std::isdigit(static_cast<unsigned char>(date[4]))) {
+      return 0;
+    }
+    return year;
+  }
+
+  std::optional<game_t> best_name_match(const std::vector<game_t> &hits, const std::string &name, int release_year) {
     const auto wanted = normalize_title(name);
     if (wanted.empty()) {
       return std::nullopt;
     }
+    std::vector<const game_t *> matches;
     for (const auto &hit : hits) {
       if (normalize_title(hit.name) == wanted) {
-        return hit;
+        matches.push_back(&hit);
       }
     }
-    return std::nullopt;
+    if (matches.size() <= 1) {
+      return only_one(matches);
+    }
+
+    // Several records share the title once editions are folded away: an original and its
+    // remaster, or two games that happen to share a name. IGDB's ranking between them is not
+    // an answer, so something about the app has to tell them apart, or nothing is picked.
+    if (release_year > 0) {
+      std::vector<const game_t *> same_year;
+      for (const auto *hit : matches) {
+        if (release_year_of(*hit) == release_year) {
+          same_year.push_back(hit);
+        }
+      }
+      // A year that fits none of them says the app is none of them.
+      return only_one(same_year);
+    }
+    // No year, but the app may name the edition outright: "Dark Souls: Remastered" is the
+    // remaster, not the original that normalizes to the same title.
+    const auto spelled = fold_title(name);
+    std::vector<const game_t *> spelled_alike;
+    for (const auto *hit : matches) {
+      if (fold_title(hit->name) == spelled) {
+        spelled_alike.push_back(hit);
+      }
+    }
+    return only_one(spelled_alike);
   }
 
   std::chrono::milliseconds pacing_delay(const std::vector<std::chrono::steady_clock::time_point> &recent,
