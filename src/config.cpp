@@ -2133,6 +2133,15 @@ namespace config {
     if (igdb.cache_ttl_days < 0) {
       igdb.cache_ttl_days = 0;
     }
+    // A relative path is taken against the config directory, as path_f does for other keys.
+    // Left alone it would resolve against the working directory, which for the service is
+    // System32.
+    if (fs::path {igdb.secret_file}.is_relative()) {
+      igdb.secret_file = (platf::appdata() / igdb.secret_file).string();
+    }
+    if (fs::path {igdb.cache_dir}.is_relative()) {
+      igdb.cache_dir = (platf::appdata() / igdb.cache_dir).string();
+    }
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

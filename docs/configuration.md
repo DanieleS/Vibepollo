@@ -3409,7 +3409,7 @@ Off by default: looking a library up means telling a third party what is in it.
             <br><br>
             The secret is deliberately not a configuration option. Reading the configuration over the API returns this file as it stands, so a secret in it would be handed to anything allowed to read settings. Setting it through the web UI writes this file with owner-only permissions and never reads it back.
             <br><br>
-            If empty, defaults to an @code{igdb_secret} file alongside the other per-machine state.
+            If empty, defaults to an @code{igdb_secret} file alongside the other per-machine state. A relative path is taken against that same directory. The value is used as written: do not quote it or double its backslashes.
         </td>
     </tr>
     <tr>
@@ -3419,7 +3419,7 @@ Off by default: looking a library up means telling a third party what is in it.
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            igdb_secret_file = "C:\\ProgramData\\Vibepollo\\igdb_secret"
+            igdb_secret_file = C:\ProgramData\Vibepollo\igdb_secret
             @endcode</td>
     </tr>
 </table>
@@ -3476,11 +3476,11 @@ Off by default: looking a library up means telling a third party what is in it.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Directory holding fetched IGDB records and downloaded art.
+            Directory holding fetched IGDB records. Downloaded covers and hero art are kept with the rest of the library art in the covers directory, and clearing the cache leaves them in place.
             <br><br>
             A cache hit costs no request, which is what keeps a library scan inside IGDB's limit of four requests a second on every run after the first.
             <br><br>
-            If empty, defaults to an @code{igdb-cache} directory alongside the other per-machine state.
+            If empty, defaults to an @code{igdb-cache} directory alongside the other per-machine state. A relative path is taken against that same directory. The value is used as written: do not quote it or double its backslashes.
         </td>
     </tr>
     <tr>
@@ -3490,7 +3490,7 @@ Off by default: looking a library up means telling a third party what is in it.
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            igdb_cache_dir = "C:\\ProgramData\\Vibepollo\\igdb-cache"
+            igdb_cache_dir = C:\ProgramData\Vibepollo\igdb-cache
             @endcode</td>
     </tr>
 </table>
