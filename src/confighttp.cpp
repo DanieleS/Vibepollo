@@ -2101,6 +2101,12 @@ namespace confighttp {
                 input_tree["uuid"] = apps_node[i]["uuid"].get<std::string>();
               }
             } catch (...) {}
+            // Metadata is not this form's to write. It has its own endpoint, and the library
+            // syncs and the IGDB resolver rewrite it in the background, so whatever copy the
+            // editor loaded may already be stale: saving it back would undo an edit made in the
+            // metadata editor since, or drop the lock that keeps a sync from overwriting it.
+            // The stored node's metadata is kept as it stands.
+            metadata::write_to_app(input_tree, metadata::read_from_app(apps_node[i]));
             newApps.push_back(input_tree);
           } else {
             newApps.push_back(apps_node[i]);
