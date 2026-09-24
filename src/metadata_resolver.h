@@ -66,7 +66,9 @@ namespace metadata::resolver {
    * one pass, the pass itself is debounced, and it does its network work without holding the
    * apps file, so a sync that adds forty games costs one pass and blocks nothing.
    *
-   * Does nothing unless IGDB is both configured and set to resolve automatically.
+   * Does nothing unless IGDB is both configured and set to resolve automatically. Entries that
+   * are not games (Desktop, the remote-session controls) are skipped, and so, for a day, are
+   * apps a pass already found no match for.
    */
   void schedule_background_resolve();
 
@@ -74,7 +76,8 @@ namespace metadata::resolver {
    * @brief Ask for a pass because the user pressed a button.
    *
    * Unlike the automatic trigger this runs even with automatic resolution turned off, and
-   * `force` re-fetches apps that already carry metadata. It returns as soon as the pass is
+   * `force` re-fetches apps that already carry metadata. Either way it retries the apps a
+   * recent pass found no match for. It returns as soon as the pass is
    * queued: describing a library of a few hundred games takes minutes at IGDB's four requests
    * a second, which is far longer than an HTTP request should stay open.
    */
@@ -83,7 +86,13 @@ namespace metadata::resolver {
   /// @brief Whether a background pass is queued or running, for the UI to report.
   bool background_pass_running();
 
-  /// @brief Stop the background worker and wait for an in-flight pass. Called at shutdown.
+  /**
+   * @brief Stop the background worker and wait for an in-flight pass. Called at shutdown.
+   *
+   * A pass checks for the stop between apps and then writes nothing, so the wait is normally
+   * one IGDB request long. It is bounded at ten seconds all the same, so a request stuck on a
+   * dead connection cannot hold shutdown; the worker then finishes on its own and exits.
+   */
   void stop_background_resolve();
 
 }  // namespace metadata::resolver

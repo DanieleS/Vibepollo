@@ -14,13 +14,16 @@
 #include "igdb_policy.h"
 #include "logging.h"
 #include "platform/common.h"
+#include "remote_session.h"
 
 // standard includes
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 
 namespace metadata::resolver {
   namespace {
@@ -241,52 +244,181 @@ namespace metadata::resolver {
     return true;
   }
 
-  summary_t resolve_all(nlohmann::json &root, bool force) {
-    summary_t summary;
-    auto apps = root.find("apps");
-    if (apps == root.end() || !apps->is_array()) {
-      return summary;
-    }
-    for (auto &app : *apps) {
-      if (!app.is_object()) {
-        continue;
+  namespace {
+    /// @brief Whether a stop was asked for. Defined with the worker's state below.
+    bool stop_requested();
+
+    /**
+     * @brief Whether an entry is a game at all.
+     *
+     * Desktop launches nothing of its own, and the remote-session entries stand for host
+     * controls. Neither has anything to look up, and searching IGDB for "Desktop" on every
+     * pass only spends requests on a guaranteed miss or, worse, a wrong match.
+     */
+    bool is_game_entry(const nlohmann::json &app) {
+      if (auto it = app.find("uuid"); it != app.end() && it->is_string() &&
+                                      remote_session::identify(0, std::string_view {it->get_ref<const std::string &>()}) != remote_session::control_e::none) {
+        return false;
       }
-      ++summary.considered;
-      const auto outcome = resolve_app(app, force);
-      if (outcome.skipped_locked) {
-        ++summary.skipped;
-        // Skipped for its metadata, but it may still have had old art replaced.
-        summary.changed = summary.changed || outcome.changed;
-        continue;
+      if (remote_session::reserved_name(app_name(app))) {
+        return false;
       }
-      if (!outcome.error.empty()) {
-        ++summary.failed;
-        if (summary.error.empty()) {
-          summary.error = outcome.error;
+      const auto launches = [&app](const char *key) {
+        auto it = app.find(key);
+        if (it == app.end()) {
+          return false;
         }
-        // One failure is a game IGDB does not know; a run of them is a broken token or a rate
-        // limit, and grinding through the rest of the library would only make it worse.
-        if (summary.failed >= 5) {
-          BOOST_LOG(warning) << "Metadata resolve: giving up after " << summary.failed
-                             << " failures, last was: " << summary.error;
+        if (it->is_string()) {
+          return !it->get_ref<const std::string &>().empty();
+        }
+        return it->is_array() && !it->empty();
+      };
+      return launches("cmd") || launches("detached");
+    }
+
+    /**
+     * @brief Apps the background pass recently looked up and found nothing for.
+     *
+     * Without this every write to apps.json queued a pass that searched IGDB again for every
+     * game it had just failed to match. Keyed by everything the lookup used, so renaming an
+     * app, a new store id or turning name matching on retries at once. Only automatic passes
+     * consult it; a pass the user asks for clears it.
+     */
+    struct unmatched_t {
+      std::mutex mutex;
+      std::unordered_map<std::string, std::chrono::steady_clock::time_point> until;
+    };
+
+    unmatched_t &unmatched() {
+      static unmatched_t instance;
+      return instance;
+    }
+
+    constexpr std::chrono::hours k_unmatched_ttl {24};
+
+    std::string lookup_key(const nlohmann::json &app) {
+      std::string key = config::igdb.allow_name_match ? "name:" : "ids:";
+      key += app_name(app);
+      for (const auto &id : store_ids_of(app)) {
+        key += '\n';
+        key += id.store;
+        key += ':';
+        key += id.id;
+      }
+      return key;
+    }
+
+    bool recently_unmatched(const std::string &key) {
+      auto &cache = unmatched();
+      std::scoped_lock lock {cache.mutex};
+      const auto found = cache.until.find(key);
+      if (found == cache.until.end()) {
+        return false;
+      }
+      if (found->second <= std::chrono::steady_clock::now()) {
+        cache.until.erase(found);
+        return false;
+      }
+      return true;
+    }
+
+    void remember_unmatched(const std::string &key) {
+      auto &cache = unmatched();
+      std::scoped_lock lock {cache.mutex};
+      const auto now = std::chrono::steady_clock::now();
+      // Entries for apps that were renamed or removed would otherwise stay forever.
+      if (cache.until.size() > 4096) {
+        std::erase_if(cache.until, [now](const auto &entry) {
+          return entry.second <= now;
+        });
+      }
+      cache.until[key] = now + k_unmatched_ttl;
+    }
+
+    void forget_unmatched() {
+      auto &cache = unmatched();
+      std::scoped_lock lock {cache.mutex};
+      cache.until.clear();
+    }
+
+    /**
+     * @brief The loop behind resolve_all.
+     *
+     * `automatic` is set for the background pass: it skips entries that are not games, skips
+     * apps it failed to match within the last day, and stops between apps once shutdown asks.
+     */
+    summary_t resolve_library(nlohmann::json &root, bool force, bool automatic) {
+      summary_t summary;
+      auto apps = root.find("apps");
+      if (apps == root.end() || !apps->is_array()) {
+        return summary;
+      }
+      for (auto &app : *apps) {
+        if (!app.is_object()) {
+          continue;
+        }
+        if (automatic && stop_requested()) {
           break;
         }
-        continue;
+        std::string key;
+        if (automatic && read_from_app(app).igdb_id.empty()) {
+          if (!is_game_entry(app)) {
+            continue;
+          }
+          key = lookup_key(app);
+          if (!force && recently_unmatched(key)) {
+            ++summary.considered;
+            ++summary.unmatched;
+            continue;
+          }
+        }
+        ++summary.considered;
+        const auto outcome = resolve_app(app, force);
+        if (outcome.skipped_locked) {
+          ++summary.skipped;
+          // Skipped for its metadata, but it may still have had old art replaced.
+          summary.changed = summary.changed || outcome.changed;
+          continue;
+        }
+        if (!outcome.error.empty()) {
+          ++summary.failed;
+          if (summary.error.empty()) {
+            summary.error = outcome.error;
+          }
+          // One failure is a game IGDB does not know; a run of them is a broken token or a
+          // rate limit, and grinding through the rest of the library would only make it worse.
+          if (summary.failed >= 5) {
+            BOOST_LOG(warning) << "Metadata resolve: giving up after " << summary.failed
+                               << " failures, last was: " << summary.error;
+            break;
+          }
+          continue;
+        }
+        if (outcome.changed) {
+          ++summary.matched;
+          summary.changed = true;
+        } else if (outcome.igdb_id.empty()) {
+          ++summary.unmatched;
+          // A clean miss, not an error: an error says nothing about whether a match exists.
+          if (!key.empty()) {
+            remember_unmatched(key);
+          }
+        }
       }
-      if (outcome.changed) {
-        ++summary.matched;
-        summary.changed = true;
-      } else if (outcome.igdb_id.empty()) {
-        ++summary.unmatched;
-      }
+      return summary;
     }
-    return summary;
+  }  // namespace
+
+  summary_t resolve_all(nlohmann::json &root, bool force) {
+    return resolve_library(root, force, false);
   }
 
   namespace {
     struct background_t {
       std::mutex mutex;
       std::condition_variable wake;
+      // Signalled when the worker exits, for shutdown to wait on.
+      std::condition_variable stopped;
       bool worker_running {false};
       bool pending {false};
       // A queued pass re-fetches everything because someone asked it to, not because a game
@@ -301,6 +433,17 @@ namespace metadata::resolver {
       static background_t instance;
       return instance;
     }
+
+    bool stop_requested() {
+      auto &state = background();
+      std::scoped_lock lock {state.mutex};
+      return state.stopping;
+    }
+
+    // How long shutdown waits for a pass to reach a stopping point. A pass checks between
+    // apps, so this normally ends within one request; a request stuck on a dead connection
+    // must not hold shutdown for its full timeout.
+    constexpr std::chrono::seconds k_stop_wait {10};
 
     // Long enough that a library sync writing apps.json several times in a row still costs one
     // pass, short enough that a game added by hand is described before the user looks away.
@@ -340,8 +483,10 @@ namespace metadata::resolver {
       }
       // What the pass started from, so the write-back can tell what the pass itself changed.
       const auto original = snapshot;
-      const auto summary = resolve_all(snapshot, force);
-      if (!summary.changed) {
+      const auto summary = resolve_library(snapshot, force, true);
+      // A pass cut short by shutdown writes nothing: what it found is found again next start,
+      // and writing apps.json while the process tears down is not worth the risk.
+      if (!summary.changed || stop_requested()) {
         return;
       }
       BOOST_LOG(info) << "Metadata resolve: matched " << summary.matched << " of "
@@ -419,10 +564,12 @@ namespace metadata::resolver {
             if (state.stopping) {
               state.worker_running = false;
               state.pending = false;
+              state.stopped.notify_all();
               return;
             }
             if (!state.pending) {
               state.worker_running = false;
+              state.stopped.notify_all();
               return;
             }
             state.pending = false;
@@ -452,6 +599,8 @@ namespace metadata::resolver {
     if (!config::igdb.enabled) {
       return;
     }
+    // The user asked, so games that recently found no match are tried again too.
+    forget_unmatched();
     queue_pass(force);
   }
 
@@ -467,6 +616,9 @@ namespace metadata::resolver {
     state.stopping = true;
     state.pending = false;
     state.wake.notify_all();
+    state.stopped.wait_for(lock, k_stop_wait, [&state]() {
+      return !state.worker_running;
+    });
   }
 
 }  // namespace metadata::resolver
