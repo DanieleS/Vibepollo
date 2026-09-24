@@ -137,7 +137,8 @@ namespace igdb::policy {
   std::string external_sources_query() {
     // The list is short and fully enumerable; taking it whole means one request covers every
     // store a library might draw from, now and after IGDB adds another.
-    return "fields id,name; limit 500;";
+    // Sorted so the rows arrive in a stable order; parse_external_sources does not rely on it.
+    return "fields id,name; sort id asc; limit 500;";
   }
 
   source_map_t parse_external_sources(const std::string &body) {
@@ -161,9 +162,13 @@ namespace igdb::policy {
       if (store.empty()) {
         continue;
       }
-      // First wins: IGDB lists regional storefronts under similar names, and the lowest id is
-      // the general one.
-      sources.emplace(store, id->get<int>());
+      // The lowest id wins: IGDB lists regional storefronts under similar names, and the
+      // lowest id is the general one. Compared rather than taken first, so the answer does not
+      // depend on the order IGDB happens to return rows in.
+      const auto value = id->get<int>();
+      if (const auto [existing, inserted] = sources.emplace(store, value); !inserted && value < existing->second) {
+        existing->second = value;
+      }
     }
     return sources;
   }

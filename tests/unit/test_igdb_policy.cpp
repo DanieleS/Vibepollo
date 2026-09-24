@@ -21,6 +21,12 @@ TEST(IgdbPolicy, TheLowestIdWinsWhenTwoSourcesNormalizeTheSame) {
   EXPECT_EQ(sources.at("steam"), 1);
 }
 
+TEST(IgdbPolicy, TheLowestIdWinsWhateverOrderTheRowsArriveIn) {
+  const auto sources = igdb::policy::parse_external_sources(
+    R"([{"id": 54, "name": "Steam China"}, {"id": 1, "name": "Steam"}])");
+  EXPECT_EQ(sources.at("steam"), 1);
+}
+
 TEST(IgdbPolicy, ExternalLookupOnlyAsksAboutStoresIgdbIndexes) {
   const auto sources = igdb::policy::parse_external_sources(
     R"([{"id": 1, "name": "Steam"}, {"id": 5, "name": "GOG"}])");
