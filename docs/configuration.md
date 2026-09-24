@@ -3259,7 +3259,7 @@ granted the **Receive game telemetry** permission. Windows only.
             <ul>
                 <li>Windows only.</li>
                 <li>Each client must also hold the <b>Receive game telemetry</b> permission; enabling this alone sends nothing.</li>
-                <li>Requires at least one matching profile in @code{scry_profiles_dir}. With no profile that fits the running game, no telemetry is produced — deliberately, since a profile that does not fit the game's memory is refused rather than guessed at.</li>
+                <li>Requires a profile that fits the running game, either from the scry-profiles registry or in @code{scry_profiles_dir}. With no profile that fits, no telemetry is produced — deliberately, since a profile that does not fit the game's memory is refused rather than guessed at.</li>
             </ul>
         </td>
     </tr>
@@ -3281,7 +3281,9 @@ granted the **Receive game telemetry** permission. Windows only.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Directory holding per-game telemetry profiles.
+            Directory holding per-game telemetry profiles you add by hand.
+            <br><br>
+            You do not need to put anything here for games the <a href="https://github.com/DanieleS/scry-profiles">scry-profiles</a> registry covers. When a game starts, Vibepollo downloads the registry's index and only the profiles for that game's executable, checks each against its hash, and keeps them in a @code{scry-registry} directory alongside the Sunshine configuration, so they keep working offline. A profile in this directory is tried before the registry's, which is how to try one before it is published.
             <br><br>
             Every profile in the directory is a candidate. Which one is used is decided by testing each against the running game's memory, so extra or outdated profiles cost a failed test rather than wrong readings.
             <br><br>

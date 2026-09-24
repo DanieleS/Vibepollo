@@ -7,7 +7,10 @@
 #ifdef _WIN32
 
   #include "src/config.h"
+  #include "src/crypto.h"
+  #include "src/httpcommon.h"
   #include "src/logging.h"
+  #include "src/platform/common.h"
   #include "src/platform/windows/foreground_app.h"
   #include "src/platform/windows/ipc/process_handler.h"
   #include "src/platform/windows/misc.h"
@@ -18,14 +21,17 @@
   #include <atomic>
   #include <chrono>
   #include <condition_variable>
+  #include <cctype>
   #include <deque>
   #include <filesystem>
+  #include <fstream>
   #include <functional>
   #include <memory>
   #include <mutex>
   #include <string>
   #include <string_view>
   #include <thread>
+  #include <unordered_set>
   #include <vector>
 
   #include <windows.h>
@@ -222,19 +228,190 @@ namespace platf::scry {
       return settings_t {config::scry.enabled, config::scry.profiles_dir, config::scry.tick_ms};
     }
 
-    /// Where per-game profiles live. Configurable because Phase 1 has no
-    /// registry: a user (or a support tech) drops profiles in a folder by hand.
-    std::optional<std::filesystem::path> profiles_dir(const std::string &configured) {
+    /// Profiles dropped into the configured folder by hand, in file-name order.
+    /// They are handed to the helper ahead of the registry's, so a profile tried
+    /// here wins over the published one for the same game.
+    std::vector<std::filesystem::path> local_profiles(const std::string &configured) {
+      std::vector<std::filesystem::path> found;
       if (configured.empty()) {
-        return std::nullopt;
+        return found;
       }
-      std::filesystem::path dir = platf::from_utf8(configured);
+      const std::filesystem::path dir = platf::from_utf8(configured);
       std::error_code ec;
-      if (!std::filesystem::is_directory(dir, ec)) {
-        return std::nullopt;
+      for (std::filesystem::directory_iterator it {dir, ec}, end; !ec && it != end; it.increment(ec)) {
+        if (it->is_regular_file(ec) && it->path().extension() == L".json") {
+          found.push_back(it->path());
+        }
       }
-      return dir;
+      std::sort(found.begin(), found.end());
+      return found;
     }
+
+    /**
+     * Profiles published by scry-profiles, fetched for one executable at a time.
+     *
+     * The registry is an index.json on GitHub Pages naming, for each profile, the
+     * executable it matches, its file and its sha256. Only the profiles for the
+     * executable about to be read are downloaded, never the whole registry, and
+     * they are kept under appdata so a game read once keeps working offline.
+     *
+     * The index is fetched again once a day, and once per run for an executable
+     * it does not list, in case a profile for it was published since. Failed
+     * fetches are spaced out, so a machine with no network does not try every
+     * second the supervisor looks.
+     */
+    namespace registry {
+      constexpr std::string_view BASE_URL = "https://danieles.github.io/scry-profiles/";
+      constexpr auto INDEX_MAX_AGE = std::chrono::hours(24);
+      constexpr auto RETRY_AFTER_FAILURE = std::chrono::minutes(5);
+
+      std::optional<std::chrono::steady_clock::time_point> last_failed_fetch;
+      std::unordered_set<std::string> refetched_for;
+
+      std::filesystem::path dir() {
+        return platf::appdata() / "scry-registry";
+      }
+
+      std::string lower(std::string text) {
+        for (auto &c : text) {
+          c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return text;
+      }
+
+      std::optional<std::string> read_file(const std::filesystem::path &path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+          return std::nullopt;
+        }
+        return std::string {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+      }
+
+      std::string sha256_hex(const std::string &bytes) {
+        static constexpr char digits[] = "0123456789abcdef";
+        const auto digest = crypto::hash(bytes);
+        std::string hex;
+        hex.reserve(digest.size() * 2);
+        for (const auto byte : digest) {
+          hex.push_back(digits[byte >> 4]);
+          hex.push_back(digits[byte & 0x0F]);
+        }
+        return hex;
+      }
+
+      /// The index names files as URL paths. Anything but a plain relative path
+      /// under profiles/ is refused, so a bad index can fail a lookup but can
+      /// never make the host write outside its own directory.
+      bool is_plain_profile_path(const std::string &file) {
+        if (file.rfind("profiles/", 0) != 0 || file.size() <= 5 || file.substr(file.size() - 5) != ".json") {
+          return false;
+        }
+        if (file.find("..") != std::string::npos || file.find('\\') != std::string::npos || file.find(':') != std::string::npos) {
+          return false;
+        }
+        return std::all_of(file.begin(), file.end(), [](char c) {
+          return std::isalnum(static_cast<unsigned char>(c)) || c == '/' || c == '-' || c == '_' || c == '.';
+        });
+      }
+
+      std::optional<nlohmann::json> parse_index(const std::optional<std::string> &text) {
+        if (!text) {
+          return std::nullopt;
+        }
+        auto index = nlohmann::json::parse(*text, nullptr, false);
+        if (index.is_discarded() || !index.is_object() || index.value("format", 0) != 1 || !index.contains("profiles") || !index["profiles"].is_array()) {
+          return std::nullopt;
+        }
+        return index;
+      }
+
+      std::optional<nlohmann::json> fetch_index() {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_failed_fetch && now - *last_failed_fetch < RETRY_AFTER_FAILURE) {
+          return std::nullopt;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(dir(), ec);
+        const auto path = dir() / "index.json";
+        // download_file writes next to the target and renames it into place only
+        // when the transfer succeeded, so a failed fetch leaves the old index.
+        if (!http::download_file(std::string {BASE_URL} + "index.json", path.string())) {
+          last_failed_fetch = now;
+          return std::nullopt;
+        }
+        auto index = parse_index(read_file(path));
+        if (!index) {
+          BOOST_LOG(warning) << "scry: the profile registry index is not one this host can read";
+          last_failed_fetch = now;
+        }
+        return index;
+      }
+
+      std::vector<const nlohmann::json *> entries_for(const nlohmann::json &index, const std::string &exe) {
+        std::vector<const nlohmann::json *> matching;
+        const auto wanted = lower(exe);
+        for (const auto &entry : index["profiles"]) {
+          if (entry.is_object() && entry.contains("process") && entry["process"].is_string() && lower(entry["process"].get<std::string>()) == wanted) {
+            matching.push_back(&entry);
+          }
+        }
+        return matching;
+      }
+
+      /// The published profiles for @p exe, downloaded if missing or changed.
+      std::vector<std::filesystem::path> profiles_for(const std::string &exe) {
+        std::vector<std::filesystem::path> found;
+        if (exe.empty()) {
+          return found;
+        }
+
+        const auto index_path = dir() / "index.json";
+        std::error_code ec;
+        const auto modified = std::filesystem::last_write_time(index_path, ec);
+        const bool fresh = !ec && std::filesystem::file_time_type::clock::now() - modified < INDEX_MAX_AGE;
+
+        auto index = fresh ? parse_index(read_file(index_path)) : fetch_index();
+        if (!index) {
+          // No network, or a failed fetch: whatever was fetched before still serves.
+          index = parse_index(read_file(index_path));
+        }
+        if (index && entries_for(*index, exe).empty() && refetched_for.insert(lower(exe)).second) {
+          if (auto refreshed = fetch_index()) {
+            index = std::move(refreshed);
+          }
+        }
+        if (!index) {
+          return found;
+        }
+
+        for (const auto *entry : entries_for(*index, exe)) {
+          const auto file = entry->value("file", std::string {});
+          const auto expected = lower(entry->value("sha256", std::string {}));
+          if (!is_plain_profile_path(file) || expected.empty()) {
+            continue;
+          }
+          const auto local = dir() / std::filesystem::path(platf::from_utf8(file)).make_preferred();
+          auto bytes = read_file(local);
+          if (!bytes || sha256_hex(*bytes) != expected) {
+            std::filesystem::create_directories(local.parent_path(), ec);
+            if (!http::download_file(std::string {BASE_URL} + file, local.string())) {
+              continue;
+            }
+            bytes = read_file(local);
+            if (!bytes || sha256_hex(*bytes) != expected) {
+              // Pages caches for a few minutes, so a new index can briefly name a
+              // profile the CDN still serves the old copy of. Try again later.
+              BOOST_LOG(warning) << "scry: registry profile " << file << " does not match its hash";
+              std::filesystem::remove(local, ec);
+              continue;
+            }
+            BOOST_LOG(info) << "scry: fetched registry profile " << file << " for " << exe;
+          }
+          found.push_back(local);
+        }
+        return found;
+      }
+    }  // namespace registry
 
     /// Best-effort executable name out of a configured command line, which may be
     /// quoted and may carry arguments. Only ever used for logging and for the
@@ -472,13 +649,15 @@ namespace platf::scry {
      * changed under us, or shutdown was requested. Which of those it was is the
      * return value.
      */
-    helper_end_e run_helper(const std::filesystem::path &helper, const std::filesystem::path &profiles, const target_t &target, int tick_ms) {
-      // The path goes through the same escaping as every other command line here. Wrapped in bare
-      // quotes, a directory entered with a trailing backslash ended the argument with \" — a
-      // literal quote under the argv rules — and swallowed the rest of the line into the path.
-      std::wstring args = L"watch --pid " + std::to_wstring(target.pid) +
-                          L" --profiles " + escape_argument(profiles.wstring()) +
-                          L" --format json --tick " + std::to_wstring(std::clamp(tick_ms, 10, 1000));
+    helper_end_e run_helper(const std::filesystem::path &helper, const std::vector<std::filesystem::path> &profiles, const target_t &target, int tick_ms) {
+      // Each profile goes as its own --profile, in the order given: when more
+      // than one fits, scry takes the first, so the hand-placed ones come first.
+      // Paths go through the same escaping as every other command line here.
+      std::wstring args = L"watch --pid " + std::to_wstring(target.pid);
+      for (const auto &profile : profiles) {
+        args += L" --profile " + escape_argument(profile.wstring());
+      }
+      args += L" --format json --tick " + std::to_wstring(std::clamp(tick_ms, 10, 1000));
 
       helper_pipes_t pipes;
       ProcessHandler child(true);
@@ -582,10 +761,19 @@ namespace platf::scry {
         }
 
         const auto helper = helper_path();
-        const auto profiles = profiles_dir(settings.profiles_dir);
         const auto target = resolve_target();
 
-        if (!helper || !profiles || !target) {
+        if (!helper || !target) {
+          clear_snapshot();
+          interruptible_wait(SUPERVISE_INTERVAL);
+          continue;
+        }
+
+        auto profiles = local_profiles(settings.profiles_dir);
+        for (auto &published : registry::profiles_for(target->exe)) {
+          profiles.push_back(std::move(published));
+        }
+        if (profiles.empty()) {
           clear_snapshot();
           interruptible_wait(SUPERVISE_INTERVAL);
           continue;
@@ -597,7 +785,7 @@ namespace platf::scry {
         }
 
         const auto started_at = std::chrono::steady_clock::now();
-        const auto end = run_helper(*helper, *profiles, *target, settings.tick_ms);
+        const auto end = run_helper(*helper, profiles, *target, settings.tick_ms);
         const auto ran_for = std::chrono::steady_clock::now() - started_at;
 
         // Only a helper that gave up by itself says anything about the target. One we stopped
