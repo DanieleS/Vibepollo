@@ -94,7 +94,8 @@ TEST(GameMetadata, StoreIdsComeFromEveryProvider) {
     {"steam-id", "570"},
     {"lutris-service", "gog"},
     {"lutris-service-id", "1207658924"},
-    {"playnite-source", "Epic Games Store"},
+    {"playnite-store", "Epic Games Store"},
+    {"playnite-source", "recent"},
     {"playnite-source-id", "abc123"},
   };
   const auto ids = metadata::store_ids_of(app);
@@ -104,6 +105,21 @@ TEST(GameMetadata, StoreIdsComeFromEveryProvider) {
   EXPECT_EQ(ids[1].store, "gog");
   EXPECT_EQ(ids[2].store, "epic");
   EXPECT_EQ(ids[2].id, "abc123");
+}
+
+TEST(GameMetadata, AutosyncProvenanceIsNotAStore) {
+  // playnite-source says why autosync picked a game, which names no store.
+  nlohmann::json app {{"playnite-source", "recent+installed"}, {"playnite-source-id", "abc123"}};
+  EXPECT_TRUE(metadata::store_ids_of(app).empty());
+}
+
+TEST(GameMetadata, StoreNameLeftInTheOldKeyStillMatches) {
+  // Apps synced by earlier builds carry the store name in playnite-source.
+  nlohmann::json app {{"playnite-source", "GOG"}, {"playnite-source-id", "1207658924"}};
+  const auto ids = metadata::store_ids_of(app);
+  ASSERT_EQ(ids.size(), 1u);
+  EXPECT_EQ(ids[0].store, "gog");
+  EXPECT_EQ(ids[0].id, "1207658924");
 }
 
 TEST(GameMetadata, LocalOnlyIdsAreNotStoreIdentity) {

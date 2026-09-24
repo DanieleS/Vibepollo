@@ -254,7 +254,13 @@ namespace metadata {
 
     // Playnite games carry the owning library plugin's display name. A Playnite game id is
     // likewise local-only, so a game whose plugin we cannot place has no store identity.
-    const auto playnite_store = normalize_store_name(app_string(app, "playnite-source"));
+    // Apps synced before the name had its own key still carry it in playnite-source; the
+    // autosync labels that normally live there ("recent", "installed", ...) name no store, so
+    // falling back to it can only find the old store name.
+    auto playnite_store = normalize_store_name(app_string(app, "playnite-store"));
+    if (playnite_store.empty()) {
+      playnite_store = normalize_store_name(app_string(app, "playnite-source"));
+    }
     push_unique(out, {playnite_store, app_id_string(app, "playnite-source-id")});
     return out;
   }
