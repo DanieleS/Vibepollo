@@ -1262,6 +1262,26 @@ const transientKeys = new Set([
   'playnite-icon-version',
   'remote-session',
 ]);
+// Metadata has its own editor and endpoint, and the host rewrites it from the library and from
+// IGDB while this form is open. A copy held here could only send a stale version back on save,
+// so it stays out of the form entirely, and the host keeps the stored metadata when an app is
+// saved. The playnite-* spellings are the ones metadata had before it left Playnite.
+const legacyMetadataKeys = new Set([
+  'playnite-description',
+  'playnite-genres',
+  'playnite-developers',
+  'playnite-publishers',
+  'playnite-release-date',
+  'playnite-community-score',
+  'playnite-critic-score',
+  'playnite-last-played',
+  'playnite-playtime-minutes',
+  'playnite-background',
+]);
+
+function isMetadataKey(key: string): boolean {
+  return key.startsWith('meta-') || legacyMetadataKeys.has(key);
+}
 
 function newUuid(): string {
   return crypto.randomUUID();
@@ -1713,7 +1733,9 @@ function hydrate(app: AppRecord): void {
     ? app.cmd.filter((part): part is string => typeof part === 'string').join('\n')
     : asString(app.cmd);
   const unknown = Object.fromEntries(
-    Object.entries(app).filter(([key]) => !editableKeys.has(key) && !transientKeys.has(key)),
+    Object.entries(app).filter(
+      ([key]) => !editableKeys.has(key) && !transientKeys.has(key) && !isMetadataKey(key),
+    ),
   );
   const rtxHdrOverrides = extractRtxHdrOverrides(clonePlainRecord(app['config-overrides']));
   const frameGenerationMode = frameGenerationModeFor(app);
@@ -3341,7 +3363,9 @@ onBeforeUnmount(() => {
 
       <!-- Metadata saves on its own, straight to the apps file, rather than riding along with
            this form: the host rewrites the same fields from the library and from IGDB, so a
-           stale copy held in the form would undo whichever wrote last. -->
+           stale copy held in the form would undo whichever wrote last. The form leaves every
+           meta-* key out of what it loads and sends, and the host keeps the stored metadata
+           when the app is saved. -->
       <AppMetadataEditor v-if="!isNew && form.uuid" :uuid="form.uuid" :name="form.name" />
 
       <section class="editor-section" aria-labelledby="execution-heading">

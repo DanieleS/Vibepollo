@@ -94,7 +94,8 @@ TEST(GameMetadata, StoreIdsComeFromEveryProvider) {
     {"steam-id", "570"},
     {"lutris-service", "gog"},
     {"lutris-service-id", "1207658924"},
-    {"playnite-source", "Epic Games Store"},
+    {"playnite-store", "Epic Games Store"},
+    {"playnite-source", "recent"},
     {"playnite-source-id", "abc123"},
   };
   const auto ids = metadata::store_ids_of(app);
@@ -104,6 +105,21 @@ TEST(GameMetadata, StoreIdsComeFromEveryProvider) {
   EXPECT_EQ(ids[1].store, "gog");
   EXPECT_EQ(ids[2].store, "epic");
   EXPECT_EQ(ids[2].id, "abc123");
+}
+
+TEST(GameMetadata, AutosyncProvenanceIsNotAStore) {
+  // playnite-source says why autosync picked a game, which names no store.
+  nlohmann::json app {{"playnite-source", "recent+installed"}, {"playnite-source-id", "abc123"}};
+  EXPECT_TRUE(metadata::store_ids_of(app).empty());
+}
+
+TEST(GameMetadata, StoreNameLeftInTheOldKeyStillMatches) {
+  // Apps synced by earlier builds carry the store name in playnite-source.
+  nlohmann::json app {{"playnite-source", "GOG"}, {"playnite-source-id", "1207658924"}};
+  const auto ids = metadata::store_ids_of(app);
+  ASSERT_EQ(ids.size(), 1u);
+  EXPECT_EQ(ids[0].store, "gog");
+  EXPECT_EQ(ids[0].id, "1207658924");
 }
 
 TEST(GameMetadata, LocalOnlyIdsAreNotStoreIdentity) {
@@ -126,4 +142,66 @@ TEST(GameMetadata, StoreNamesNormalizeAcrossProviders) {
   EXPECT_EQ(metadata::normalize_store_name("egs"), "epic");
   EXPECT_EQ(metadata::normalize_store_name("Ubisoft Connect"), "ubisoft");
   EXPECT_EQ(metadata::normalize_store_name("Humble Bundle"), "");
+}
+
+namespace {
+  // An app as a background resolve found it, and as the resolve left it.
+  nlohmann::json unresolved_app() {
+    return nlohmann::json {
+      {"name", "Hades II"},
+      {"uuid", "aaaa"},
+      {"image-path", "./assets/box.png"},
+      {"meta-playtime-minutes", 10},
+    };
+  }
+
+  nlohmann::json resolved_app() {
+    auto app = unresolved_app();
+    app["image-path"] = "C:/covers/igdb_1.png";
+    app["meta-description"] = "A rogue-like.";
+    app["meta-source"] = "igdb";
+    app["meta-igdb-id"] = "1";
+    return app;
+  }
+}  // namespace
+
+TEST(GameMetadata, MergeCarriesOverWhatTheResolveChanged) {
+  auto current = unresolved_app();
+  EXPECT_TRUE(metadata::merge_resolved(current, unresolved_app(), resolved_app()));
+  EXPECT_EQ(current, resolved_app());
+}
+
+TEST(GameMetadata, MergeKeepsFieldsWrittenMeanwhile) {
+  // Playnite reported fresh playtime while the resolve was on the network.
+  auto current = unresolved_app();
+  current["meta-playtime-minutes"] = 99;
+  EXPECT_TRUE(metadata::merge_resolved(current, unresolved_app(), resolved_app()));
+  EXPECT_EQ(current["meta-playtime-minutes"], 99);
+  EXPECT_EQ(current["meta-description"], "A rogue-like.");
+}
+
+TEST(GameMetadata, MergeKeepsACoverTheUserSetMeanwhile) {
+  auto current = unresolved_app();
+  current["image-path"] = "C:/mine.png";
+  metadata::merge_resolved(current, unresolved_app(), resolved_app());
+  EXPECT_EQ(current["image-path"], "C:/mine.png");
+}
+
+TEST(GameMetadata, MergeLeavesAnAppClaimedMeanwhileAlone) {
+  // The user edited the app by hand while the resolve ran.
+  auto current = unresolved_app();
+  current["meta-description"] = "Mine.";
+  current["meta-source"] = "manual";
+  current["meta-locked"] = true;
+  const auto expected = current;
+  EXPECT_FALSE(metadata::merge_resolved(current, unresolved_app(), resolved_app()));
+  EXPECT_EQ(current, expected);
+}
+
+TEST(GameMetadata, MergeOfAnUnchangedResolveWritesNothing) {
+  auto current = unresolved_app();
+  current["meta-playtime-minutes"] = 99;
+  const auto expected = current;
+  EXPECT_FALSE(metadata::merge_resolved(current, unresolved_app(), unresolved_app()));
+  EXPECT_EQ(current, expected);
 }

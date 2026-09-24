@@ -5761,12 +5761,63 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  namespace {
+    /**
+     * @brief UUIDs of the configured apps this client's /applist shows it.
+     *
+     * Built by the same remote-session projection /applist uses, so an endpoint describing
+     * apps answers for the same catalogue: a client in the Remote Monitor role, which sees
+     * only its controls, is not handed every game's name and playtime through a side door.
+     */
+    std::unordered_set<std::string> applist_visible_uuids(req_https_t request, const verified_client_t &verified_client, const std::vector<proc::ctx_t> &configured_apps) {
+      std::vector<remote_session::app_t> remote_configured_apps;
+      remote_configured_apps.reserve(configured_apps.size());
+      for (const auto &configured : configured_apps) {
+        remote_configured_apps.push_back({static_cast<std::int32_t>(util::from_view(configured.id)), configured.uuid, configured.name, false});
+      }
+
+      const auto current_appid = proc::proc.running();
+      const auto current_app = proc::proc.resolve_app(current_appid);
+      const auto active_session = proc::proc.active_session_guard();
+      const auto identity = resolve_client_identity(request, verified_client);
+      const remote_session::caller_t caller {
+        .uuid = identity.uuid,
+        .paired = !identity.uuid.empty(),
+        .may_view = has_client_perm(verified_client, PERM::_allow_view),
+        .may_launch = has_client_perm(verified_client, PERM::launch),
+        .may_terminate = has_client_perm(verified_client, PERM::launch),
+        .input_enabled = config::input.enable_input_only_mode,
+      };
+      const remote_session::game_t game {
+        .running = current_appid > 0,
+        .owner_uuid = active_session.client_uuid,
+        .generation = active_session_generation(active_session),
+        .app = current_app ? remote_session::app_t {static_cast<std::int32_t>(util::from_view(current_app->id)), current_app->uuid, current_app->name, false} : remote_session::app_t {},
+      };
+      const auto remote_gate = remote_role_gate_snapshot_for_client(identity.uuid);
+      const auto projection = remote_session::project(caller, game, remote_gate.owner, remote_configured_apps, remote_gate.active);
+
+      std::unordered_set<std::string> visible;
+      for (const auto &entry : projection.catalogue) {
+        // Synthetic entries are host controls, which carry no metadata of their own.
+        if (!entry.synthetic) {
+          visible.insert(entry.uuid);
+        }
+      }
+      return visible;
+    }
+  }  // namespace
+
   /**
    * @brief Serve per-app descriptive metadata as JSON, keyed by app UUID.
    *
-   * This is additive to the Moonlight protocol: only apps that carry metadata (Playnite games)
-   * are listed, and clients that don't know the endpoint simply never call it. The applist
-   * hot-path is left untouched.
+   * This is additive to the Moonlight protocol: only apps that carry metadata are listed, and
+   * clients that don't know the endpoint simply never call it. The applist hot-path is left
+   * untouched, but the catalogue is the one /applist would show this client.
+   *
+   * Every entry carries `source`, which says who wrote the descriptive fields and so how to
+   * read `description`: "playnite" is Playnite's HTML, "igdb" and "manual" are plain text, and
+   * "unknown" is metadata written before provenance was recorded, which only Playnite did.
    */
   void appmetadata(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
@@ -5788,9 +5839,11 @@ namespace nvhttp {
     nlohmann::json root = nlohmann::json::object();
     nlohmann::json apps = nlohmann::json::array();
 
-    for (const auto &app : proc::proc.get_apps()) {
+    const auto configured_apps = proc::proc.get_apps();
+    const auto visible = applist_visible_uuids(request, named_cert_p, configured_apps);
+    for (const auto &app : configured_apps) {
       const auto &meta = app.metadata;
-      if (!meta.present) {
+      if (!meta.present || !visible.contains(app.uuid)) {
         continue;
       }
       nlohmann::json node = nlohmann::json::object();
@@ -5831,11 +5884,9 @@ namespace nvhttp {
         // The image itself is fetched separately via /appbackground?appid=<id>.
         node["has_background"] = true;
       }
-      if (!meta.source.empty()) {
-        // Which database the description and scores came from. A client that wants to say
-        // where a summary is from, or to hide one it does not trust, needs to be told.
-        node["source"] = meta.source;
-      }
+      // Which provider the description and scores came from. Always present, because it is also
+      // how a client knows whether `description` is Playnite's HTML or plain text.
+      node["source"] = meta.source.empty() ? std::string {"unknown"} : meta.source;
       if (!meta.igdb_id.empty()) {
         node["igdb_id"] = meta.igdb_id;
       }
@@ -6038,8 +6089,17 @@ namespace nvhttp {
 
     fg.disable();
 
-    std::ifstream in(bg, std::ios::binary);
-    if (bg.empty() || !in.is_open()) {
+    // The path comes from apps.json, so it is checked the way /appasset checks a cover: it
+    // must name a PNG, and the bytes must be one. Anything else is reported as no background
+    // rather than substituted with the placeholder, which is box art and not a backdrop.
+    std::optional<std::string> image;
+    if (!bg.empty()) {
+      const auto validated = proc::validate_app_image_path(bg);
+      if (validated != DEFAULT_APP_IMAGE_PATH) {
+        image = proc::read_validated_app_image(validated);
+      }
+    }
+    if (!image) {
       response->write(SimpleWeb::StatusCode::client_error_not_found);
       response->close_connection_after_response = true;
       return;
@@ -6047,7 +6107,7 @@ namespace nvhttp {
 
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "image/png");
-    response->write(SimpleWeb::StatusCode::success_ok, in, headers);
+    response->write(SimpleWeb::StatusCode::success_ok, *image, headers);
     response->close_connection_after_response = true;
   }
 

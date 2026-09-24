@@ -23,6 +23,9 @@ on:
       - vibe
       - main
       - master
+      # The 2.x line: vibe-test upstream, and the fork's integration branch that tracks it.
+      - vibe-test
+      - merge/vibe-test
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"

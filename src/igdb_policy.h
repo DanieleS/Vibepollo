@@ -116,8 +116,16 @@ namespace igdb::policy {
    * IGDB's search is fuzzy enough to answer "Half-Life" with a fan mod, so a hit only counts
    * when its name normalizes to the same string. Guessing wrong here writes the wrong summary
    * and cover onto someone's library, which is worse than leaving the game unmatched.
+   *
+   * When several hits normalize to the same title (a remake, a remaster, two unrelated games
+   * with one name), `release_year` decides between them when the app knows one (0 when it
+   * does not); without it, only a hit spelled exactly like the app, edition and all, counts.
+   * Anything still ambiguous is left unmatched rather than guessed.
    */
-  std::optional<game_t> best_name_match(const std::vector<game_t> &hits, const std::string &name);
+  std::optional<game_t> best_name_match(const std::vector<game_t> &hits, const std::string &name, int release_year = 0);
+
+  /// @brief The year of a YYYY-MM-DD date as the metadata container stores it, or 0.
+  int year_from_date(const std::string &date);
 
   /// @brief Fold a title to its comparable form: lowercase, no punctuation, no edition suffix.
   std::string normalize_title(const std::string &name);

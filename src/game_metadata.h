@@ -81,6 +81,21 @@ namespace metadata {
    */
   void write_to_app(nlohmann::json &app, const game_metadata_t &meta);
 
+  /**
+   * @brief Carry what a resolve changed onto the app as it stands now.
+   *
+   * A resolve waits on the network, so it runs on a copy (`before`, which it turned into
+   * `after`) while other writers carry on. Only keys the resolve itself changed are written,
+   * and only where `current` still holds what `before` held: a field anything else wrote
+   * meanwhile, such as Playnite's playtime, keeps that newer value. Nothing is written at all
+   * when the app was claimed meanwhile -- locked, unlocked, re-linked or re-described by
+   * another provider -- because the resolve decided on the strength of claims that no longer
+   * hold.
+   *
+   * @return Whether `current` changed.
+   */
+  bool merge_resolved(nlohmann::json &current, const nlohmann::json &before, const nlohmann::json &after);
+
   /// @brief Recompute `present` from the descriptive fields. Called by read_from_app.
   bool has_any_value(const game_metadata_t &meta);
 

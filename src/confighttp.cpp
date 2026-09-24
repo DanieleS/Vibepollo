@@ -2101,6 +2101,12 @@ namespace confighttp {
                 input_tree["uuid"] = apps_node[i]["uuid"].get<std::string>();
               }
             } catch (...) {}
+            // Metadata is not this form's to write. It has its own endpoint, and the library
+            // syncs and the IGDB resolver rewrite it in the background, so whatever copy the
+            // editor loaded may already be stale: saving it back would undo an edit made in the
+            // metadata editor since, or drop the lock that keeps a sync from overwriting it.
+            // The stored node's metadata is kept as it stands.
+            metadata::write_to_app(input_tree, metadata::read_from_app(apps_node[i]));
             newApps.push_back(input_tree);
           } else {
             newApps.push_back(apps_node[i]);
@@ -4746,9 +4752,6 @@ namespace confighttp {
       const auto uuid = input.value("uuid", std::string {});
       const bool force = input.value("force", false);
 
-      std::lock_guard apps_lock {apps_file_mutex()};
-      nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
-
       nlohmann::json output;
       if (uuid.empty()) {
         // Queued rather than run here: a few hundred games take minutes at IGDB's four
@@ -4761,17 +4764,39 @@ namespace confighttp {
         return;
       }
 
+      // Resolving waits on IGDB, so it runs on a copy with the apps file released: every app
+      // endpoint and every library sync needs that lock. Only what the resolve changed is
+      // written back, onto the app as it stands by then.
+      nlohmann::json before;
+      {
+        std::lock_guard apps_lock {apps_file_mutex()};
+        nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+        auto *app = find_app_node(file_tree, uuid);
+        if (!app) {
+          not_found(response, request);
+          return;
+        }
+        before = *app;
+      }
+      auto resolved = before;
+      const auto outcome = metadata::resolver::resolve_app(resolved, force);
+
+      std::lock_guard apps_lock {apps_file_mutex()};
+      nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
       auto *app = find_app_node(file_tree, uuid);
       if (!app) {
         not_found(response, request);
         return;
       }
-      const auto outcome = metadata::resolver::resolve_app(*app, force);
+      bool changed = false;
       if (outcome.changed) {
-        confighttp::refresh_client_apps_cache(file_tree, false);
+        changed = metadata::merge_resolved(*app, before, resolved);
+        if (changed) {
+          confighttp::refresh_client_apps_cache(file_tree, false);
+        }
       }
       output["status"] = outcome.error.empty();
-      output["changed"] = outcome.changed;
+      output["changed"] = changed;
       output["igdb_id"] = outcome.igdb_id;
       output["skipped_locked"] = outcome.skipped_locked;
       if (!outcome.error.empty()) {
@@ -4786,7 +4811,7 @@ namespace confighttp {
   }
 
   /**
-   * @brief Drop every cached IGDB record and downloaded image.
+   * @brief Drop every cached IGDB record. Downloaded art stays, since apps still point at it.
    * @api_examples{/api/igdb/cache| DELETE| null}
    */
   void deleteIgdbCache(resp_https_t response, req_https_t request) {
@@ -4848,6 +4873,53 @@ namespace confighttp {
       const auto uuid = request->path_match[1].str();
       const auto input = nlohmann::json::parse(request->content.string());
 
+      if (input.contains("igdb_id")) {
+        std::string igdb_id;
+        if (input["igdb_id"].is_string()) {
+          igdb_id = input["igdb_id"].get<std::string>();
+        } else if (input["igdb_id"].is_number_integer()) {
+          igdb_id = std::to_string(input["igdb_id"].get<std::int64_t>());
+        }
+        // Linking fetches the record and its art, which takes as long as IGDB takes, so it is
+        // done on a copy with the apps file released and only the result is written back.
+        nlohmann::json before;
+        {
+          std::lock_guard apps_lock {apps_file_mutex()};
+          nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+          auto *app = find_app_node(file_tree, uuid);
+          if (!app) {
+            not_found(response, request);
+            return;
+          }
+          before = *app;
+        }
+        auto linked = before;
+        std::string error;
+        if (!metadata::resolver::apply_igdb_id(linked, igdb_id, error)) {
+          bad_request(response, request, error);
+          return;
+        }
+
+        std::lock_guard apps_lock {apps_file_mutex()};
+        nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+        auto *app = find_app_node(file_tree, uuid);
+        if (!app) {
+          not_found(response, request);
+          return;
+        }
+        if (!metadata::merge_resolved(*app, before, linked) && before != linked) {
+          // Something else re-described the app while the record was on its way. Its version
+          // is kept, and the user can pick the record again.
+          bad_request(response, request, "The app changed while its IGDB record was being fetched; try again");
+          return;
+        }
+        confighttp::refresh_client_apps_cache(file_tree, false);
+        nlohmann::json output = app_metadata_json(*app);
+        output["status"] = true;
+        send_response(response, output);
+        return;
+      }
+
       std::lock_guard apps_lock {apps_file_mutex()};
       nlohmann::json file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
       auto *app = find_app_node(file_tree, uuid);
@@ -4856,19 +4928,7 @@ namespace confighttp {
         return;
       }
 
-      if (input.contains("igdb_id")) {
-        std::string igdb_id;
-        if (input["igdb_id"].is_string()) {
-          igdb_id = input["igdb_id"].get<std::string>();
-        } else if (input["igdb_id"].is_number_integer()) {
-          igdb_id = std::to_string(input["igdb_id"].get<std::int64_t>());
-        }
-        std::string error;
-        if (!metadata::resolver::apply_igdb_id(*app, igdb_id, error)) {
-          bad_request(response, request, error);
-          return;
-        }
-      } else {
+      {
         auto meta = metadata::read_from_app(*app);
         const auto read_list = [&input](const char *key, std::vector<std::string> &target) {
           if (auto it = input.find(key); it != input.end() && it->is_array()) {

@@ -124,3 +124,14 @@ TEST(PlayniteSync_ArtPolicy, ReconvertOnlyWhenCacheDoesNotDescribeSource) {
   EXPECT_TRUE(should_reconvert_playnite_image(true, "cover-a|12|100", "cover-b|12|1"));
   EXPECT_TRUE(should_reconvert_playnite_image(true, "cover-a|12|100", ""));
 }
+
+TEST(PlayniteSync_Snapshot, ASnapshotShortOfItsAnnouncedCountIsNotTheLibrary) {
+  EXPECT_TRUE(snapshot_is_complete(250, 250));
+  // A lost batch: the plugin said 250 and 150 arrived.
+  EXPECT_FALSE(snapshot_is_complete(150, 250));
+  EXPECT_FALSE(snapshot_is_complete(0, 250));
+  EXPECT_FALSE(snapshot_is_complete(260, 250));
+  EXPECT_TRUE(snapshot_is_complete(0, 0));
+  // An older plugin that announces no count is trusted as before.
+  EXPECT_TRUE(snapshot_is_complete(150, -1));
+}

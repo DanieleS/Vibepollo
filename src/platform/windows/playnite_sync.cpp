@@ -101,8 +101,16 @@ namespace platf::playnite::sync {
           app.erase(key);
         }
       };
-      set_or_erase("playnite-source", game.plugin_name);
+      // The store name gets its own key: playnite-source already records why autosync picked
+      // the game ("installed", "recent", ...), and the purge reads it back.
+      set_or_erase("playnite-store", game.plugin_name);
       set_or_erase("playnite-source-id", game.store_id);
+      // Earlier builds wrote the store name into playnite-source, over the autosync label. The
+      // original label cannot be recovered, so the stale name is dropped rather than left
+      // where it reads as an unknown provenance.
+      if (!game.plugin_name.empty() && app.value("playnite-source", std::string {}) == game.plugin_name) {
+        app.erase("playnite-source");
+      }
     } catch (...) {}
     // Descriptive metadata. Playnite writes it unless something else already claimed the app:
     // a game the user corrected by hand, or one the IGDB resolver described, must survive the

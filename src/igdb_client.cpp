@@ -12,8 +12,13 @@
 #include "logging.h"
 #include "platform/common.h"
 
+#ifdef _WIN32
+  #include "src/platform/windows/image_convert.h"
+#endif
+
 // standard includes
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -56,6 +61,14 @@ namespace igdb {
     state_t &state() {
       static state_t instance;
       return instance;
+    }
+
+    /// @brief Forget what was learned about store-id lookups, so the next one asks again.
+    void reset_lookup_state_locked(state_t &s) {
+      s.external_lookup_supported = true;
+      s.sources_loaded = false;
+      s.sources.clear();
+      s.sources_legacy = false;
     }
 
     std::size_t append_body(char *data, std::size_t size, std::size_t count, void *user) {
@@ -336,19 +349,44 @@ namespace igdb {
       if (image_id.empty()) {
         return {};
       }
+      // Only a finished conversion is ever moved to the destination, so a file there is art.
       std::error_code exists_error;
       if (std::filesystem::exists(destination, exists_error) &&
           std::filesystem::file_size(destination, exists_error) > 0u) {
         return destination.generic_string();
       }
       const auto url = policy::image_url(image_id, size);
-      if (url.empty() || !http::download_file(url, destination.string())) {
+      if (url.empty()) {
         return {};
       }
-      // A failed download can still leave an error page behind; an empty or tiny file is not
-      // art and would show up as a broken cover in every client.
-      if (std::filesystem::file_size(destination, exists_error) < 1024u) {
-        std::filesystem::remove(destination, exists_error);
+      auto source = destination;
+      source.replace_extension(".download");
+      if (!http::download_file(url, source.string())) {
+        return {};
+      }
+      // IGDB serves JPEG, but clients are only ever handed PNG: the app asset endpoints check
+      // for a PNG signature and send the placeholder otherwise. So the download is converted
+      // the same way Playnite art is, into a temporary file first so that a conversion that
+      // fails halfway never leaves a truncated PNG where the cache would trust it.
+      auto converted = destination;
+      converted += ".tmp";
+      bool ok = false;
+      // A tiny file is an error body rather than art, whatever the status said.
+      if (std::filesystem::file_size(source, exists_error) >= 1024u && !exists_error) {
+#ifdef _WIN32
+        ok = platf::img::convert_to_png_96dpi(source.wstring(), converted.wstring());
+#else
+        // Nothing here can transcode JPEG, and a JPEG would never reach a client anyway.
+        ok = false;
+#endif
+      }
+      std::filesystem::remove(source, exists_error);
+      if (ok) {
+        std::filesystem::rename(converted, destination, exists_error);
+        ok = !exists_error;
+      }
+      if (!ok) {
+        std::filesystem::remove(converted, exists_error);
         return {};
       }
       return destination.generic_string();
@@ -391,10 +429,12 @@ namespace igdb {
     }
     auto &s = state();
     std::scoped_lock lock {s.mutex};
-    // A new secret invalidates whatever the old one bought.
+    // A new secret invalidates whatever the old one bought, including what the old account
+    // was told about store-id lookups: a failure then may well have been the credentials.
     s.access_token.clear();
     s.authenticated = false;
     s.last_error.clear();
+    reset_lookup_state_locked(s);
     return true;
   }
 
@@ -409,6 +449,7 @@ namespace igdb {
     s.access_token.clear();
     s.authenticated = false;
     s.last_error.clear();
+    reset_lookup_state_locked(s);
     if (remove_error) {
       error_out = "Could not remove " + path + ": " + remove_error.message();
       return false;
@@ -420,6 +461,9 @@ namespace igdb {
     auto &s = state();
     std::unique_lock lock {s.mutex};
     s.access_token.clear();
+    // Verifying is what a user does after fixing whatever was wrong, so store-id lookups get
+    // another chance too.
+    reset_lookup_state_locked(s);
     const bool ok = refresh_token_locked(error_out);
     if (!ok) {
       s.authenticated = false;
@@ -431,6 +475,14 @@ namespace igdb {
   std::optional<policy::game_t> fetch_game(const std::string &igdb_id, std::string &error_out) {
     if (igdb_id.empty()) {
       error_out = "No IGDB id";
+      return std::nullopt;
+    }
+    // Checked before the id names a cache file: it arrives from the API and from apps.json,
+    // and only digits keep it from naming a path outside the cache.
+    if (!std::all_of(igdb_id.begin(), igdb_id.end(), [](unsigned char character) {
+          return std::isdigit(character) != 0;
+        })) {
+      error_out = "Not a usable IGDB id";
       return std::nullopt;
     }
     if (auto cached = read_cached_record(igdb_id)) {
@@ -501,8 +553,14 @@ namespace igdb {
       // racing here cost one extra request and agree on the answer.
       auto sources = policy::source_map_t {};
       bool legacy = false;
+      // Whether IGDB actually said something about its sources. A 400 or 404 says the endpoint
+      // is not there, which is an answer; a timeout, a rate limit or a bad token says nothing.
+      bool answered = false;
       if (const auto body = request("external_game_sources", policy::external_sources_query(), error_out)) {
         sources = policy::parse_external_sources(*body);
+        answered = true;
+      } else if (error_out.find("HTTP 400") != std::string::npos || error_out.find("HTTP 404") != std::string::npos) {
+        answered = true;
       }
       if (sources.empty()) {
         // An older or mirrored IGDB. Matching on the retired numbering is still better than
@@ -514,11 +572,16 @@ namespace igdb {
       } else {
         BOOST_LOG(info) << "IGDB: matched " << sources.size() << " store sources";
       }
+      legacy_out = legacy;
+      if (!answered) {
+        // The fallback serves this lookup, and the next one asks again. Cached, a single
+        // failure at startup would pin the retired numbering until the next restart.
+        return sources;
+      }
       std::scoped_lock lock {s.mutex};
       s.sources = sources;
       s.sources_legacy = legacy;
       s.sources_loaded = true;
-      legacy_out = legacy;
       return sources;
     }
   }  // namespace
@@ -545,7 +608,10 @@ namespace igdb {
     }
     const auto body = request("external_games", query, error_out);
     if (!body) {
-      if (error_out.find("HTTP 400") != std::string::npos) {
+      // Only the retired category field is expected to be refused outright, and then it will
+      // be refused for every game. A 400 on the current field is about this query, not about
+      // store-id matching as a whole. Either way save_secret and verify turn lookups back on.
+      if (legacy && error_out.find("HTTP 400") != std::string::npos) {
         std::scoped_lock lock {s.mutex};
         s.external_lookup_supported = false;
         BOOST_LOG(warning) << "IGDB: external_games lookups rejected, falling back to name matching";
@@ -568,12 +634,12 @@ namespace igdb {
 
   std::string download_cover(const policy::game_t &game, const std::filesystem::path &covers_root) {
     return download_image(game.cover_image_id, "t_cover_big_2x",
-                          covers_root / ("igdb_" + game.igdb_id + ".jpg"));
+                          covers_root / ("igdb_" + game.igdb_id + ".png"));
   }
 
   std::string download_background(const policy::game_t &game, const std::filesystem::path &covers_root) {
     return download_image(game.artwork_image_id, "t_1080p",
-                          covers_root / ("igdb_bg_" + game.igdb_id + ".jpg"));
+                          covers_root / ("igdb_bg_" + game.igdb_id + ".png"));
   }
 
   std::size_t clear_cache() {
@@ -590,10 +656,7 @@ namespace igdb {
     }
     auto &s = state();
     std::scoped_lock lock {s.mutex};
-    s.external_lookup_supported = true;
-    s.sources_loaded = false;
-    s.sources.clear();
-    s.sources_legacy = false;
+    reset_lookup_state_locked(s);
     return removed;
   }
 

@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <string>
+#include <vector>
 
 namespace metadata {
   namespace {
@@ -216,6 +218,52 @@ namespace metadata {
     }
   }
 
+  bool merge_resolved(nlohmann::json &current, const nlohmann::json &before, const nlohmann::json &after) {
+    if (!current.is_object() || !before.is_object() || !after.is_object()) {
+      return false;
+    }
+    const auto now = read_from_app(current);
+    const auto then = read_from_app(before);
+    if (now.locked != then.locked || now.source != then.source || now.igdb_id != then.igdb_id) {
+      return false;
+    }
+
+    std::vector<std::string> keys;
+    for (const auto &entry : before.items()) {
+      keys.push_back(entry.key());
+    }
+    for (const auto &entry : after.items()) {
+      if (!before.contains(entry.key())) {
+        keys.push_back(entry.key());
+      }
+    }
+
+    bool changed = false;
+    for (const auto &key : keys) {
+      const auto was = before.find(key);
+      const auto will = after.find(key);
+      const bool had = was != before.end();
+      const bool has = will != after.end();
+      if (had == has && (!had || *was == *will)) {
+        // The resolve left this key alone, so whatever is there now stays.
+        continue;
+      }
+      const auto is = current.find(key);
+      const bool holds = is != current.end();
+      if (holds != had || (holds && *is != *was)) {
+        // Written by something else since the copy was taken; the newer value wins.
+        continue;
+      }
+      if (has) {
+        current[key] = *will;
+      } else {
+        current.erase(key);
+      }
+      changed = true;
+    }
+    return changed;
+  }
+
   std::string normalize_store_name(const std::string &name) {
     const auto text = lower(name);
     if (text.empty()) {
@@ -254,7 +302,13 @@ namespace metadata {
 
     // Playnite games carry the owning library plugin's display name. A Playnite game id is
     // likewise local-only, so a game whose plugin we cannot place has no store identity.
-    const auto playnite_store = normalize_store_name(app_string(app, "playnite-source"));
+    // Apps synced before the name had its own key still carry it in playnite-source; the
+    // autosync labels that normally live there ("recent", "installed", ...) name no store, so
+    // falling back to it can only find the old store name.
+    auto playnite_store = normalize_store_name(app_string(app, "playnite-store"));
+    if (playnite_store.empty()) {
+      playnite_store = normalize_store_name(app_string(app, "playnite-source"));
+    }
     push_unique(out, {playnite_store, app_id_string(app, "playnite-source-id")});
     return out;
   }

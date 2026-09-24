@@ -26,6 +26,27 @@ Newer clients can also read the optional `ArtVersion` field from `/applist` to i
 changing their saved app identity. Sunshine keeps old numeric IDs as compatibility aliases for launch and artwork
 requests, but client state should be keyed by `UUID` when possible.
 
+## App Metadata
+Clients that want more than a title and a cover can call `GET /appmetadata`. It returns
+`{"apps": [...]}` with one entry per app that carries metadata, keyed by `uuid`, and lists only apps the same client's
+`/applist` shows. Every field other than `uuid`, `id`, `name` and `source` is optional and omitted when unknown:
+`description`, `genres`, `developers`, `publishers`, `release_date` (`YYYY-MM-DD`), `community_score` and
+`critic_score` (0-100), `last_played` (ISO 8601), `playtime_minutes`, `has_background`, `igdb_id` and `playnite_id`.
+
+`source` says who wrote the descriptive fields, and therefore how to read `description`:
+
+| `source`   | `description`                                                                      |
+|:-----------|:-----------------------------------------------------------------------------------|
+| `playnite` | HTML, as Playnite stores it                                                        |
+| `igdb`     | Plain text                                                                         |
+| `manual`   | Plain text, typed by the user in the web UI                                        |
+| `unknown`  | Written before the host recorded provenance, which only Playnite did; treat as HTML |
+
+`last_played` and `playtime_minutes` come from whatever launches the game, whatever `source` says.
+
+When `has_background` is true, `GET /appbackground?appid=<id>` (or `appuuid=<uuid>`) returns the hero image as a PNG.
+It answers 404 when the app has no background, so clients can simply try it.
+
 ## Limitations
 Sunshine does have some limitations, as compared to Nvidia GameStream.
 
