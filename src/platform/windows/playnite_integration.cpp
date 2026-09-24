@@ -471,6 +471,8 @@ namespace platf::playnite {
           snapshot_markers_supported_ = false;
           library_complete_ = false;
           library_confirmed_empty_ = false;
+          snapshot_received_ = 0;
+          snapshot_short_ = false;
         } catch (...) {}
         {
           std::scoped_lock lk(progress_mutex_);
@@ -508,6 +510,8 @@ namespace platf::playnite {
         snapshot_markers_supported_ = false;
         library_complete_ = false;
         library_confirmed_empty_ = false;
+        snapshot_received_ = 0;
+        snapshot_short_ = false;
       }
       {
         std::scoped_lock lk(progress_mutex_);
@@ -778,8 +782,12 @@ namespace platf::playnite {
             new_snapshot_ = false;
             // Accumulating again: what we hold is partial until SnapshotComplete says otherwise.
             library_complete_ = false;
+            snapshot_received_ = 0;
           }
           before = last_games_.size();
+          // Counted as sent, duplicates and all, because that is what the plugin's closing count
+          // counts.
+          snapshot_received_ += msg.games.size();
           for (const auto &g : msg.games) {
             if (g.id.empty()) {
               skipped++;
@@ -859,12 +867,22 @@ namespace platf::playnite {
         new_snapshot_ = false;
         library_complete_ = false;
         library_confirmed_empty_ = false;
+        snapshot_received_ = 0;
+        snapshot_short_ = false;
       } else if (msg.type == MT::SnapshotComplete) {
         std::size_t total = 0;
+        std::size_t received = 0;
+        bool whole = true;
         {
           std::scoped_lock lk(mutex_);
           snapshot_markers_supported_ = true;
-          library_complete_ = true;
+          // The plugin sends each batch without waiting to hear whether it arrived, so a lost
+          // batch shows only as fewer games than the closing count says were sent. A library
+          // with games missing is not the library, and purging against it removes them.
+          received = snapshot_received_;
+          whole = platf::playnite::sync::policy::snapshot_is_complete(received, msg.snapshot_games_count);
+          snapshot_short_ = !whole;
+          library_complete_ = whole;
           // Only an explicit zero from the plugin proves the library is empty. If we accumulated
           // nothing but the plugin claims games (or reports nothing at all), the batches went
           // missing and purging everything against that would be destructive.
@@ -873,6 +891,10 @@ namespace platf::playnite {
           total = last_games_.size();
         }
         snapshot_cv_.notify_all();
+        if (!whole) {
+          BOOST_LOG(warning) << "Playnite: library snapshot incomplete: plugin sent " << msg.snapshot_games_count
+                             << " games, received " << received << "; keeping synced apps until a full snapshot arrives";
+        }
         SyncStats sync_stats;
         bool attempted_sync = false;
         if (config::playnite.auto_sync) {
@@ -991,11 +1013,13 @@ namespace platf::playnite {
       std::vector<platf::playnite::Game> all;
       bool library_complete = false;
       bool library_confirmed_empty = false;
+      bool snapshot_short = false;
       {
         std::scoped_lock lk(mutex_);
         all = last_games_;
         library_complete = library_complete_;
         library_confirmed_empty = library_confirmed_empty_;
+        snapshot_short = snapshot_short_;
       }
       // An empty snapshot usually means "no data from Playnite" (client just started, or Playnite
       // not running), not "the library is empty". Reconciling against it would purge auto apps
@@ -1020,7 +1044,11 @@ namespace platf::playnite {
       int delete_after_days = std::max(0, config::playnite.autosync_delete_after_days);
       bool changed = false;
       std::size_t matched = 0;
-      platf::playnite::sync::autosync_reconcile(root, all, library_complete, recentN, recent_age_days, delete_after_days, config::playnite.autosync_require_replacement, config::playnite.sync_all_installed, config::playnite.sync_categories, config::playnite.sync_plugins, config::playnite.exclude_categories, config::playnite.exclude_games, config::playnite.exclude_plugins, config::playnite.autosync_remove_uninstalled, config::playnite.exclude_hidden_games, changed, matched, config::playnite.auto_sync);
+      // Against a snapshot known to be missing games, every purge rule misfires on the missing
+      // ones: they are neither selected nor known. Metadata still updates for the games that
+      // did arrive, but which apps exist waits for a complete snapshot.
+      const bool manage_membership = config::playnite.auto_sync && !snapshot_short;
+      platf::playnite::sync::autosync_reconcile(root, all, library_complete, recentN, recent_age_days, delete_after_days, config::playnite.autosync_require_replacement, config::playnite.sync_all_installed, config::playnite.sync_categories, config::playnite.sync_plugins, config::playnite.exclude_categories, config::playnite.exclude_games, config::playnite.exclude_plugins, config::playnite.autosync_remove_uninstalled, config::playnite.exclude_hidden_games, changed, matched, manage_membership);
       if (changed) {
         platf::playnite::sync::write_and_refresh_apps(root, config::stream.file_apps);
       }
@@ -1093,6 +1121,8 @@ namespace platf::playnite {
     bool snapshot_markers_supported_ = false;  // Plugin sends snapshotStart/snapshotComplete (reset per connection)
     bool library_complete_ = false;  // last_games_ holds a whole library, not a partial accumulation
     bool library_confirmed_empty_ = false;  // Plugin explicitly reported a zero-game library
+    std::size_t snapshot_received_ = 0;  // Games received since the snapshot started, duplicates included
+    bool snapshot_short_ = false;  // The last snapshot closed with a different game count than the plugin sent
     uint64_t snapshot_generation_ = 0;  // Incremented on every completed snapshot
     std::condition_variable snapshot_cv_;  // Signals snapshot completion (paired with mutex_)
     std::atomic<uint64_t> command_request_counter_ {0};
