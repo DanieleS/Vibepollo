@@ -5924,6 +5924,11 @@ namespace nvhttp {
         }
 
         auto frame = subscription->next(std::chrono::seconds(1));
+        if (!frame && subscription->ended()) {
+          // Telemetry is shutting down. next() no longer waits once it has, so
+          // carrying on would write keepalives as fast as the socket takes them.
+          return;
+        }
         if (!frame) {
           // Nothing this second. A comment doubles as a keepalive: it proves the
           // socket is still writable, which is the only way to notice a client

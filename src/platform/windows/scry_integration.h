@@ -106,6 +106,14 @@ namespace platf::scry {
      * caller can check whether its own client is still there in between.
      */
     virtual std::optional<frame_t> next(std::chrono::milliseconds timeout) = 0;
+
+    /**
+     * @brief Whether the stream has ended for good because telemetry is shutting down.
+     *
+     * Once it has, @ref next returns at once instead of waiting out its timeout,
+     * so a caller looping on it has to stop rather than spin.
+     */
+    virtual bool ended() const = 0;
   };
 
   /**

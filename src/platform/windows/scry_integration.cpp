@@ -169,6 +169,10 @@ namespace platf::scry {
         return frame;
       }
 
+      bool ended() const override {
+        return g_stop.load(std::memory_order_acquire);
+      }
+
     private:
       std::shared_ptr<subscriber_t> _sub;
     };
