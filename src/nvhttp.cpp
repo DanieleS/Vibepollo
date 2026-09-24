@@ -5854,6 +5854,36 @@ namespace nvhttp {
   }
 
 #ifdef _WIN32
+  namespace {
+    /// The newest telemetry stream per client. A client that opens a second one
+    /// is almost always reconnecting after its first went quiet, so the new one
+    /// wins and the old one ends, rather than both holding a thread and a
+    /// subscription until their session goes away.
+    std::mutex telemetry_streams_mutex;
+    std::unordered_map<std::string, std::uint64_t> telemetry_streams;
+    std::uint64_t telemetry_stream_counter = 0;
+
+    std::uint64_t claim_telemetry_stream(const std::string &uuid) {
+      std::lock_guard lg {telemetry_streams_mutex};
+      const auto id = ++telemetry_stream_counter;
+      telemetry_streams[uuid] = id;
+      return id;
+    }
+
+    bool is_current_telemetry_stream(const std::string &uuid, std::uint64_t id) {
+      std::lock_guard lg {telemetry_streams_mutex};
+      const auto it = telemetry_streams.find(uuid);
+      return it != telemetry_streams.end() && it->second == id;
+    }
+
+    void release_telemetry_stream(const std::string &uuid, std::uint64_t id) {
+      std::lock_guard lg {telemetry_streams_mutex};
+      if (const auto it = telemetry_streams.find(uuid); it != telemetry_streams.end() && it->second == id) {
+        telemetry_streams.erase(it);
+      }
+    }
+  }  // namespace
+
   /**
    * @brief Stream game telemetry to a paired client as Server-Sent Events.
    *
@@ -5910,6 +5940,11 @@ namespace nvhttp {
         return;
       }
 
+      const auto stream_id = claim_telemetry_stream(uuid);
+      auto release = util::fail_guard([&]() {
+        release_telemetry_stream(uuid, stream_id);
+      });
+
       // Subscribed only now: the opening snapshot has to be the state as of the
       // moment the stream begins, not as of the moment the request arrived.
       auto subscription = platf::scry::subscribe();
@@ -5920,6 +5955,18 @@ namespace nvhttp {
         // stops reading without closing the socket would otherwise keep both
         // this thread and a subscription alive for as long as it felt like.
         if (!rtsp_stream::find_session(uuid)) {
+          return;
+        }
+
+        // The permission and the feature were checked when the stream opened,
+        // but either can be taken away while it runs: revoking "Receive game
+        // telemetry" for a client has to stop what it is already receiving.
+        if (!config::scry.enabled || !has_client_perm(get_client_snapshot_by_uuid(uuid), PERM::telemetry_read)) {
+          return;
+        }
+
+        // A newer stream from the same client replaces this one.
+        if (!is_current_telemetry_stream(uuid, stream_id)) {
           return;
         }
 
