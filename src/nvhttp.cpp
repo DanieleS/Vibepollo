@@ -5986,8 +5986,17 @@ namespace nvhttp {
 
     fg.disable();
 
-    std::ifstream in(bg, std::ios::binary);
-    if (bg.empty() || !in.is_open()) {
+    // The path comes from apps.json, so it is checked the way /appasset checks a cover: it
+    // must name a PNG, and the bytes must be one. Anything else is reported as no background
+    // rather than substituted with the placeholder, which is box art and not a backdrop.
+    std::optional<std::string> image;
+    if (!bg.empty()) {
+      const auto validated = proc::validate_app_image_path(bg);
+      if (validated != DEFAULT_APP_IMAGE_PATH) {
+        image = proc::read_validated_app_image(validated);
+      }
+    }
+    if (!image) {
       response->write(SimpleWeb::StatusCode::client_error_not_found);
       response->close_connection_after_response = true;
       return;
@@ -5995,7 +6004,7 @@ namespace nvhttp {
 
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "image/png");
-    response->write(SimpleWeb::StatusCode::success_ok, in, headers);
+    response->write(SimpleWeb::StatusCode::success_ok, *image, headers);
     response->close_connection_after_response = true;
   }
 

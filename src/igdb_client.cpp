@@ -12,6 +12,10 @@
 #include "logging.h"
 #include "platform/common.h"
 
+#ifdef _WIN32
+  #include "src/platform/windows/image_convert.h"
+#endif
+
 // standard includes
 #include <algorithm>
 #include <chrono>
@@ -336,19 +340,44 @@ namespace igdb {
       if (image_id.empty()) {
         return {};
       }
+      // Only a finished conversion is ever moved to the destination, so a file there is art.
       std::error_code exists_error;
       if (std::filesystem::exists(destination, exists_error) &&
           std::filesystem::file_size(destination, exists_error) > 0u) {
         return destination.generic_string();
       }
       const auto url = policy::image_url(image_id, size);
-      if (url.empty() || !http::download_file(url, destination.string())) {
+      if (url.empty()) {
         return {};
       }
-      // A failed download can still leave an error page behind; an empty or tiny file is not
-      // art and would show up as a broken cover in every client.
-      if (std::filesystem::file_size(destination, exists_error) < 1024u) {
-        std::filesystem::remove(destination, exists_error);
+      auto source = destination;
+      source.replace_extension(".download");
+      if (!http::download_file(url, source.string())) {
+        return {};
+      }
+      // IGDB serves JPEG, but clients are only ever handed PNG: the app asset endpoints check
+      // for a PNG signature and send the placeholder otherwise. So the download is converted
+      // the same way Playnite art is, into a temporary file first so that a conversion that
+      // fails halfway never leaves a truncated PNG where the cache would trust it.
+      auto converted = destination;
+      converted += ".tmp";
+      bool ok = false;
+      // A tiny file is an error body rather than art, whatever the status said.
+      if (std::filesystem::file_size(source, exists_error) >= 1024u && !exists_error) {
+#ifdef _WIN32
+        ok = platf::img::convert_to_png_96dpi(source.wstring(), converted.wstring());
+#else
+        // Nothing here can transcode JPEG, and a JPEG would never reach a client anyway.
+        ok = false;
+#endif
+      }
+      std::filesystem::remove(source, exists_error);
+      if (ok) {
+        std::filesystem::rename(converted, destination, exists_error);
+        ok = !exists_error;
+      }
+      if (!ok) {
+        std::filesystem::remove(converted, exists_error);
         return {};
       }
       return destination.generic_string();
@@ -568,12 +597,12 @@ namespace igdb {
 
   std::string download_cover(const policy::game_t &game, const std::filesystem::path &covers_root) {
     return download_image(game.cover_image_id, "t_cover_big_2x",
-                          covers_root / ("igdb_" + game.igdb_id + ".jpg"));
+                          covers_root / ("igdb_" + game.igdb_id + ".png"));
   }
 
   std::string download_background(const policy::game_t &game, const std::filesystem::path &covers_root) {
     return download_image(game.artwork_image_id, "t_1080p",
-                          covers_root / ("igdb_bg_" + game.igdb_id + ".jpg"));
+                          covers_root / ("igdb_bg_" + game.igdb_id + ".png"));
   }
 
   std::size_t clear_cache() {

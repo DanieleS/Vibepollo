@@ -39,13 +39,67 @@ namespace metadata::resolver {
       return {};
     }
 
+    /**
+     * @brief Art an earlier build saved as IGDB served it, JPEG.
+     *
+     * Clients are only ever handed PNG, so no client could show these files. They are treated
+     * as not set, which lets the next resolve replace them with converted copies.
+     */
+    bool is_legacy_igdb_art(const std::string &path) {
+      if (path.empty()) {
+        return false;
+      }
+      const std::filesystem::path file {path};
+      return file.extension() == ".jpg" && file.filename().string().rfind("igdb_", 0) == 0;
+    }
+
+    std::string image_path_of(const nlohmann::json &app) {
+      if (auto it = app.find("image-path"); it != app.end() && it->is_string()) {
+        return it->get<std::string>();
+      }
+      return {};
+    }
+
+    bool has_legacy_igdb_art(const nlohmann::json &app) {
+      return is_legacy_igdb_art(image_path_of(app)) ||
+             is_legacy_igdb_art(read_from_app(app).background_image_path);
+    }
+
     bool cover_is_ours_to_set(const nlohmann::json &app) {
       auto it = app.find("image-path");
       if (it == app.end() || !it->is_string()) {
         return true;
       }
       const auto path = it->get<std::string>();
-      return path.empty() || path == k_placeholder_cover;
+      return path.empty() || path == k_placeholder_cover || is_legacy_igdb_art(path);
+    }
+
+    /**
+     * @brief Swap legacy JPEG art for converted copies and change nothing else.
+     *
+     * Used for apps the resolver would otherwise leave alone, a locked one included: the user
+     * chose the record, not the file format, so replacing art they could never see is not
+     * overriding them.
+     */
+    bool replace_legacy_art(nlohmann::json &app, const igdb::policy::game_t &record) {
+      bool changed = false;
+      auto meta = read_from_app(app);
+      if (is_legacy_igdb_art(meta.background_image_path)) {
+        meta.background_image_path = igdb::download_background(record, covers_root());
+        meta.present = has_any_value(meta);
+        write_to_app(app, meta);
+        changed = true;
+      }
+      if (is_legacy_igdb_art(image_path_of(app))) {
+        const auto cover = igdb::download_cover(record, covers_root());
+        if (cover.empty()) {
+          app.erase("image-path");
+        } else {
+          app["image-path"] = cover;
+        }
+        changed = true;
+      }
+      return changed;
     }
 
     /**
@@ -61,7 +115,9 @@ namespace metadata::resolver {
       merged.last_played = before.last_played;
       merged.playtime_minutes = before.playtime_minutes;
       merged.locked = before.locked;
-      merged.background_image_path = before.background_image_path;
+      merged.background_image_path = is_legacy_igdb_art(before.background_image_path) ?
+                                       std::string {} :
+                                       before.background_image_path;
 
       if (merged.background_image_path.empty()) {
         merged.background_image_path = igdb::download_background(record, covers_root());
@@ -114,12 +170,25 @@ namespace metadata::resolver {
     const auto existing = read_from_app(app);
     outcome.igdb_id = existing.igdb_id;
 
+    // An app the resolver otherwise leaves alone still gets its old JPEG art replaced, once.
+    const auto refresh_legacy_art = [&app, &existing, &outcome]() {
+      if (existing.igdb_id.empty() || !has_legacy_igdb_art(app)) {
+        return;
+      }
+      std::string error;
+      if (const auto record = igdb::fetch_game(existing.igdb_id, error)) {
+        outcome.changed = replace_legacy_art(app, *record);
+      }
+    };
+
     if (existing.locked && !force) {
       outcome.skipped_locked = true;
+      refresh_legacy_art();
       return outcome;
     }
     // Already described by IGDB and not asked to refresh: nothing to do and no request spent.
     if (!force && existing.source == "igdb" && existing.present) {
+      refresh_legacy_art();
       return outcome;
     }
 
@@ -186,6 +255,8 @@ namespace metadata::resolver {
       const auto outcome = resolve_app(app, force);
       if (outcome.skipped_locked) {
         ++summary.skipped;
+        // Skipped for its metadata, but it may still have had old art replaced.
+        summary.changed = summary.changed || outcome.changed;
         continue;
       }
       if (!outcome.error.empty()) {
