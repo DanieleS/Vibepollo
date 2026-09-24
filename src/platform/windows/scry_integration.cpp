@@ -406,13 +406,20 @@ namespace platf::scry {
       }
     }
 
+    /// Why a helper run ended, which decides whether the supervisor backs off.
+    enum class helper_end_e {
+      exited,  ///< The helper stopped on its own, or never started: a verdict on this target.
+      stopped,  ///< We stopped it, because the target changed or Vibepollo is shutting down.
+    };
+
     /**
      * @brief Run the helper against `target` until it exits or we are stopped.
      *
      * Returns when there is nothing left to read: the child died, the target
-     * changed under us, or shutdown was requested.
+     * changed under us, or shutdown was requested. Which of those it was is the
+     * return value.
      */
-    void run_helper(const std::filesystem::path &helper, const std::filesystem::path &profiles, const target_t &target) {
+    helper_end_e run_helper(const std::filesystem::path &helper, const std::filesystem::path &profiles, const target_t &target) {
       std::wstring args = L"watch --pid " + std::to_wstring(target.pid) +
                           L" --profiles \"" + profiles.wstring() + L"\"" +
                           L" --format json --tick " + std::to_wstring(std::clamp(config::scry.tick_ms, 10, 1000));
@@ -421,7 +428,7 @@ namespace platf::scry {
       ProcessHandler child(true);
       if (!child.start(helper.wstring(), args, false, &pipes)) {
         BOOST_LOG(warning) << "scry: could not start the telemetry helper";
-        return;
+        return helper_end_e::exited;
       }
 
       BOOST_LOG(info) << "scry: watching " << target.exe << " (pid " << target.pid << ") for app '" << target.slug << "'";
@@ -453,10 +460,12 @@ namespace platf::scry {
       // to pay that. The answer only changes on human timescales anyway.
       auto next_target_check = std::chrono::steady_clock::now() + SUPERVISE_INTERVAL;
 
+      auto end = helper_end_e::stopped;
       std::string buffer;
       while (!g_stop.load(std::memory_order_acquire)) {
         const auto result = pump(pipes.stdout_read.get(), buffer);
         if (result == pump_e::closed) {
+          end = helper_end_e::exited;
           break;
         }
         if (result == pump_e::data) {
@@ -489,10 +498,17 @@ namespace platf::scry {
         stderr_reader.join();
       }
       clear_snapshot();
+      return end;
     }
 
     void supervisor_loop() {
       std::optional<std::chrono::steady_clock::time_point> retry_after;
+      // The target the backoff was earned on. The backoff says "this process has no profile",
+      // which is a fact about that process and nothing else. At the start of a session the target
+      // is briefly the launcher, until the game is confirmed in the foreground; the helper fails
+      // there within a second, and holding the game to that failure delayed its telemetry by the
+      // whole backoff. Focus leaving the game for an overlay or an alt-tab did the same.
+      std::optional<target_t> failed_target;
 
       while (!g_stop.load(std::memory_order_acquire)) {
         if (!config::scry.enabled) {
@@ -511,26 +527,33 @@ namespace platf::scry {
           continue;
         }
 
-        if (retry_after && std::chrono::steady_clock::now() < *retry_after) {
+        if (retry_after && std::chrono::steady_clock::now() < *retry_after && failed_target && *failed_target == *target) {
           interruptible_wait(SUPERVISE_INTERVAL);
           continue;
         }
 
         const auto started_at = std::chrono::steady_clock::now();
-        run_helper(*helper, *profiles, *target);
+        const auto end = run_helper(*helper, *profiles, *target);
         const auto ran_for = std::chrono::steady_clock::now() - started_at;
 
-        if (ran_for < MIN_HEALTHY_RUN) {
+        // Only a helper that gave up by itself says anything about the target. One we stopped
+        // because focus moved says nothing, however soon that happened, and backing off on it
+        // would hold the game to a failure that was never its own.
+        if (end == helper_end_e::exited && ran_for < MIN_HEALTHY_RUN) {
           // It gave up almost immediately. The likeliest reason is the honest
           // one — no profile fits this game — and that will still be true a
           // millisecond from now, so back off rather than spin.
           retry_after = std::chrono::steady_clock::now() + RESPAWN_BACKOFF;
-        } else {
+          failed_target = *target;
+        } else if (end == helper_end_e::exited) {
           // A helper that ran and then stopped was doing its job until the game
-          // or the target changed. Penalising that would delay telemetry for the
-          // *next* game by half a minute for no reason.
+          // exited. Penalising that would delay telemetry for the *next* game by
+          // half a minute for no reason.
           retry_after.reset();
+          failed_target.reset();
         }
+        // A helper we stopped leaves the backoff as it was: if focus flicks back to
+        // a launcher that already failed, there is no point scanning it again.
       }
 
       clear_snapshot();
