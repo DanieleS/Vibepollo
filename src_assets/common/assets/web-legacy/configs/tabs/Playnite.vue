@@ -337,6 +337,16 @@
                   :disabled="!autoSyncEnabled"
                 />
               </div>
+              <div class="md:col-span-2">
+                <Checkbox
+                  v-model="config.playnite_sync_metadata"
+                  id="playnite_sync_metadata"
+                  :default="store.defaults.playnite_sync_metadata"
+                  :localePrefix="'playnite'"
+                  label="playnite.sync_metadata"
+                  desc="playnite.sync_metadata_desc"
+                />
+              </div>
               <n-text v-if="autoSyncEnabled" depth="3" class="md:col-span-2 playnite-help">
                 {{ policySummary }}
               </n-text>

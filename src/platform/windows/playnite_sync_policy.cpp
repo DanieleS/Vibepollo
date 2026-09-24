@@ -459,6 +459,10 @@ namespace platf::playnite::sync::policy {
     return select_recent_installed_games(installed, recent_count, recent_age_days, std::time(nullptr), excluded_ids, excluded_categories, excluded_plugins, source_flags);
   }
 
+  bool snapshot_is_complete(std::size_t received, int announced) {
+    return announced < 0 || received == static_cast<std::size_t>(announced);
+  }
+
   std::string now_iso8601_utc() {
     const auto now = std::time(nullptr);
     std::tm utc {};

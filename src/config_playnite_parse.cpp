@@ -117,11 +117,13 @@ namespace config {
   playnite_t parse_playnite(std::unordered_map<std::string, std::string> &vars) {
     playnite_t result;
 
+    consume_bool(vars, "playnite_enabled", result.enabled);
     consume_bool(vars, "playnite_auto_sync", result.auto_sync);
     consume_bool(vars, "playnite_sync_all_installed", result.sync_all_installed);
     consume_bool(vars, "playnite_autosync_require_replacement", result.autosync_require_replacement);
     consume_bool(vars, "playnite_autosync_remove_uninstalled", result.autosync_remove_uninstalled);
     consume_bool(vars, "playnite_exclude_hidden_games", result.exclude_hidden_games);
+    consume_bool(vars, "playnite_sync_metadata", result.sync_metadata);
     consume_bool(vars, "playnite_focus_exit_on_first", result.focus_exit_on_first);
     consume_bool(vars, "playnite_fullscreen_entry_enabled", result.fullscreen_entry_enabled);
 

@@ -16,7 +16,9 @@ namespace config {
   };
 
   struct playnite_t {
-    // Enabled flag removed; integration manager always runs (server up when plugin installed)
+    // Keep the legacy Windows default enabled; Linux does not parse/start
+    // Playnite and exposes it as unavailable in the Steam provider status.
+    bool enabled = true;
     bool auto_sync = true;  // enable automatic sync from Playnite
     bool sync_all_installed = false;  // include every installed game regardless of filters
     int recent_games = 10;  // N most recent games
@@ -61,6 +63,13 @@ namespace config {
     // When true, games flagged as hidden in Playnite are never auto-synced, and
     // auto-synced apps whose games become hidden are removed.
     bool exclude_hidden_games = true;
+
+    // When true, the descriptive metadata Playnite holds for a game (description, genres,
+    // companies, release date, scores, background art) is written onto the synced app unless
+    // IGDB or the user already claimed it. When false, Playnite never writes those fields, so
+    // they are IGDB's (or nobody's) from the start. Activity data (last played, playtime) is
+    // always synced, since only Playnite watched the game run.
+    bool sync_metadata = true;
 
     // When true, only purge auto-synced games that no longer qualify
     // if there is a qualifying replacement to fill the slot. When false,

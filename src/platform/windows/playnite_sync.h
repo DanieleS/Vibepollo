@@ -8,6 +8,7 @@
 
 #include "src/confighttp.h"
 #include "src/file_handler.h"
+#include "src/game_metadata.h"
 #include "src/platform/common.h"
 #include "src/platform/windows/image_convert.h"
 

@@ -409,7 +409,8 @@
       file_upload      = _operation << 2,  // Allow upload files to host
       file_dwnload     = _operation << 3,  // Allow download files from host
       server_cmd       = _operation << 4,  // Allow execute server cmd
-      _all_opeiations  = clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd,
+      telemetry_read   = _operation << 5,  // Allow receiving game-memory telemetry
+      _all_opeiations  = clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd | telemetry_read,
 
       _action          = _operation << 8,  // Action permission group
       list             = _action << 0,     // Allow list apps
@@ -439,7 +440,8 @@
       file_upload: 0x00040000,
       file_dwnload: 0x00080000,
       server_cmd: 0x00100000,
-      _all_operations: 0x001f0000,
+      telemetry_read: 0x00200000,
+      _all_operations: 0x003f0000,
 
       // Action permission group
       list: 0x01000000,
@@ -451,7 +453,7 @@
       // Special permissions
       _default: 0x03000000,
       _no: 0x00000000,
-      _all: 0x071f1f00,
+      _all: 0x073f1f00,
     };
 
     const permissionGroups = [
@@ -485,6 +487,10 @@
           },
           {
             name: 'server_cmd',
+            suppressed_by: [],
+          },
+          {
+            name: 'telemetry_read',
             suppressed_by: [],
           },
         ],

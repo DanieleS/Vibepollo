@@ -62,7 +62,8 @@ namespace crypto {
     file_upload = _operation << 2,  // Allow upload files to host
     file_dwnload = _operation << 3,  // Allow download files from host
     server_cmd = _operation << 4,  // Allow execute server cmd
-    _all_opeiations = clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd,
+    telemetry_read = _operation << 5,  // Allow receiving game-memory telemetry
+    _all_opeiations = clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd | telemetry_read,
 
     _action = _operation << 8,  // Action permission group
     list = _action << 0,  // Allow list apps
@@ -74,6 +75,10 @@ namespace crypto {
     _default = view | list,  // Default permissions for new clients
     _no = 0,  // No permissions are granted
     _all = _all_inputs | _all_opeiations | _all_actions,  // All current permissions
+    // What a client gets when it is granted everything without anyone choosing: the first client
+    // paired, and imported devices that carry no permission mask. Everything except telemetry,
+    // which ships a game's memory off the machine and is only ever granted per client, on purpose.
+    _all_unrequested = _all_inputs | clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd | _all_actions,
   };
 
   inline constexpr PERM

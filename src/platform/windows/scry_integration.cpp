@@ -1,0 +1,865 @@
+/**
+ * @file src/platform/windows/scry_integration.cpp
+ * @brief Supervises the `scry` telemetry helper and accumulates what it reports.
+ */
+#include "scry_integration.h"
+
+#ifdef _WIN32
+
+  #include "src/config.h"
+  #include "src/crypto.h"
+  #include "src/httpcommon.h"
+  #include "src/logging.h"
+  #include "src/platform/common.h"
+  #include "src/platform/windows/foreground_app.h"
+  #include "src/platform/windows/ipc/process_handler.h"
+  #include "src/platform/windows/misc.h"
+  #include "src/process.h"
+  #include "src/sync.h"
+
+  #include <algorithm>
+  #include <atomic>
+  #include <chrono>
+  #include <condition_variable>
+  #include <cctype>
+  #include <deque>
+  #include <filesystem>
+  #include <fstream>
+  #include <functional>
+  #include <memory>
+  #include <mutex>
+  #include <string>
+  #include <string_view>
+  #include <thread>
+  #include <unordered_set>
+  #include <vector>
+
+  #include <windows.h>
+
+namespace platf::scry {
+
+  using namespace std::chrono_literals;
+
+  namespace {
+
+    /// How often the supervisor re-asks "what should I be attached to?". The
+    /// answer changes on human timescales (a game launches, a launcher hands off
+    /// to the real executable), so a second is generous and costs nothing.
+    constexpr auto SUPERVISE_INTERVAL = 1s;
+
+    /// After the helper exits on its own, wait this long before trying again.
+    /// The common reason is the honest one — no profile fits this game — and
+    /// respawning that in a tight loop would burn CPU scanning memory to reach
+    /// the same conclusion forever.
+    constexpr auto RESPAWN_BACKOFF = 30s;
+
+    /// A helper that survived at least this long was working, not failing, so
+    /// its exit does not earn the backoff above.
+    constexpr auto MIN_HEALTHY_RUN = 5s;
+
+    /// How long a reader parks when its pipe has nothing to say. Small enough
+    /// that the exit checks around it stay responsive, large enough that an idle
+    /// game costs nothing.
+    constexpr auto POLL_INTERVAL = 25ms;
+
+    /// A line longer than this is not something the helper is documented to
+    /// produce; treat the stream as garbage rather than growing a buffer without
+    /// bound on a misbehaving child.
+    constexpr std::size_t MAX_LINE_BYTES = 1u << 20;
+
+    /// The process the helper should be reading.
+    struct target_t {
+      DWORD pid {0};
+      std::string exe;
+      std::string slug;
+
+      bool operator==(const target_t &other) const {
+        return pid == other.pid && exe == other.exe && slug == other.slug;
+      }
+    };
+
+    sync_util::sync_t<snapshot_t> g_snapshot;
+
+    /// Monotonic across the whole process lifetime, never per-attach. A consumer
+    /// remembers the last revision it acted on, and two games in quick
+    /// succession must not be able to produce the same number twice — which is
+    /// exactly what a counter restarting at 1 on every attach would do.
+    std::atomic<std::uint64_t> g_revision {0};
+
+    /// Stamp the snapshot as changed. Callers must already hold its lock.
+    void bump(snapshot_t &snapshot) {
+      snapshot.revision = g_revision.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+
+    std::thread g_thread;
+    std::mutex g_cv_mutex;
+    std::condition_variable g_cv;
+    std::atomic<bool> g_stop {false};
+
+    /// How many frames a subscriber may fall behind before we stop keeping its
+    /// backlog. Diffs are small, so this is generous in bytes while still being
+    /// a hard bound: a client that stalls cannot grow our memory without limit.
+    constexpr std::size_t MAX_QUEUED_FRAMES = 256;
+
+    /// One subscriber's mailbox. Held by shared_ptr so a subscription that is
+    /// being destroyed cannot be written to by the supervisor mid-teardown.
+    struct subscriber_t {
+      std::deque<frame_t> queue;
+    };
+
+    std::mutex g_subs_mutex;
+    std::condition_variable g_subs_cv;
+    std::vector<std::shared_ptr<subscriber_t>> g_subs;
+
+    /// Lock order throughout this file: the snapshot lock is taken *before*
+    /// @ref g_subs_mutex, never the other way round. Publishing happens while
+    /// the snapshot is still held, which is what guarantees that frames enter
+    /// every mailbox in the same order their revisions were stamped.
+    frame_t snapshot_frame(const snapshot_t &snap) {
+      nlohmann::json body {
+        {"attached", snap.attached},
+      };
+      if (snap.attached) {
+        body["slug"] = snap.slug;
+        body["process"] = snap.process;
+        body["profile"] = snap.profile;
+        body["values"] = snap.values;
+        if (!snap.contract_version.empty()) {
+          nlohmann::json contract {{"version", snap.contract_version}};
+          if (!snap.contract_id.empty()) {
+            contract["id"] = snap.contract_id;
+          }
+          body["contract"] = std::move(contract);
+        }
+      }
+      return frame_t {snap.revision, "snapshot", std::move(body)};
+    }
+
+    /// Hand @p frame to every subscriber. Called with the snapshot lock held.
+    void publish(const snapshot_t &snap, const frame_t &frame) {
+      std::lock_guard lg {g_subs_mutex};
+      for (auto &sub : g_subs) {
+        if (sub->queue.size() >= MAX_QUEUED_FRAMES) {
+          // This subscriber is not draining. Replacing its backlog with the
+          // current picture is the one safe answer: dropping frames from a
+          // stream of diffs would leave it rendering values that never existed,
+          // and the snapshot already accounts for this frame.
+          sub->queue.clear();
+          sub->queue.push_back(snapshot_frame(snap));
+          continue;
+        }
+        sub->queue.push_back(frame);
+      }
+      g_subs_cv.notify_all();
+    }
+
+    class subscription_impl_t final: public subscription_t {
+    public:
+      explicit subscription_impl_t(std::shared_ptr<subscriber_t> sub):
+          _sub {std::move(sub)} {
+      }
+
+      ~subscription_impl_t() override {
+        std::lock_guard lg {g_subs_mutex};
+        std::erase(g_subs, _sub);
+      }
+
+      std::optional<frame_t> next(std::chrono::milliseconds timeout) override {
+        std::unique_lock lk {g_subs_mutex};
+        if (!g_subs_cv.wait_for(lk, timeout, [this] {
+              return !_sub->queue.empty() || g_stop.load(std::memory_order_acquire);
+            })) {
+          return std::nullopt;
+        }
+        if (_sub->queue.empty()) {
+          return std::nullopt;
+        }
+        frame_t frame = std::move(_sub->queue.front());
+        _sub->queue.pop_front();
+        return frame;
+      }
+
+      bool ended() const override {
+        return g_stop.load(std::memory_order_acquire);
+      }
+
+    private:
+      std::shared_ptr<subscriber_t> _sub;
+    };
+
+    /// Sleep that wakes early when the supervisor is asked to stop.
+    void interruptible_wait(std::chrono::milliseconds duration) {
+      std::unique_lock<std::mutex> lk(g_cv_mutex);
+      g_cv.wait_for(lk, duration, [] {
+        return g_stop.load(std::memory_order_acquire);
+      });
+    }
+
+    /// `tools/scry.exe`, next to sunshine.exe — the same layout every other
+    /// bundled helper uses.
+    std::optional<std::filesystem::path> helper_path() {
+      wchar_t module_path[MAX_PATH] = {};
+      if (!GetModuleFileNameW(nullptr, module_path, _countof(module_path))) {
+        return std::nullopt;
+      }
+      std::filesystem::path helper = std::filesystem::path(module_path).parent_path() / L"tools" / L"scry.exe";
+      std::error_code ec;
+      if (!std::filesystem::exists(helper, ec)) {
+        return std::nullopt;
+      }
+      return helper;
+    }
+
+    /// The scry settings, copied in one go.
+    ///
+    /// A hot apply rewrites config::scry in place: it resets it to the defaults
+    /// and parses the file again, under the apply gate. Read without the gate,
+    /// the supervisor could copy profiles_dir while it was being written, which
+    /// is undefined behaviour on a std::string, or see `enabled` false for the
+    /// instant between the reset and the parse and drop a running game.
+    struct settings_t {
+      bool enabled {false};
+      std::string profiles_dir;
+      int tick_ms {50};
+    };
+
+    settings_t read_settings() {
+      auto gate = config::acquire_apply_read_gate();
+      return settings_t {config::scry.enabled, config::scry.profiles_dir, config::scry.tick_ms};
+    }
+
+    /// Profiles dropped into the configured folder by hand, in file-name order.
+    /// They are handed to the helper ahead of the registry's, so a profile tried
+    /// here wins over the published one for the same game.
+    std::vector<std::filesystem::path> local_profiles(const std::string &configured) {
+      std::vector<std::filesystem::path> found;
+      if (configured.empty()) {
+        return found;
+      }
+      const std::filesystem::path dir = platf::from_utf8(configured);
+      std::error_code ec;
+      for (std::filesystem::directory_iterator it {dir, ec}, end; !ec && it != end; it.increment(ec)) {
+        if (it->is_regular_file(ec) && it->path().extension() == L".json") {
+          found.push_back(it->path());
+        }
+      }
+      std::sort(found.begin(), found.end());
+      return found;
+    }
+
+    /**
+     * Profiles published by scry-profiles, fetched for one executable at a time.
+     *
+     * The registry is an index.json on GitHub Pages naming, for each profile, the
+     * executable it matches, its file and its sha256. Only the profiles for the
+     * executable about to be read are downloaded, never the whole registry, and
+     * they are kept under appdata so a game read once keeps working offline.
+     *
+     * The index is fetched again once a day, and once per run for an executable
+     * it does not list, in case a profile for it was published since. Failed
+     * fetches are spaced out, so a machine with no network does not try every
+     * second the supervisor looks.
+     */
+    namespace registry {
+      constexpr std::string_view BASE_URL = "https://danieles.github.io/scry-profiles/";
+      constexpr auto INDEX_MAX_AGE = std::chrono::hours(24);
+      constexpr auto RETRY_AFTER_FAILURE = std::chrono::minutes(5);
+
+      std::optional<std::chrono::steady_clock::time_point> last_failed_fetch;
+      std::unordered_set<std::string> refetched_for;
+
+      std::filesystem::path dir() {
+        return platf::appdata() / "scry-registry";
+      }
+
+      std::string lower(std::string text) {
+        for (auto &c : text) {
+          c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return text;
+      }
+
+      std::optional<std::string> read_file(const std::filesystem::path &path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+          return std::nullopt;
+        }
+        return std::string {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+      }
+
+      std::string sha256_hex(const std::string &bytes) {
+        static constexpr char digits[] = "0123456789abcdef";
+        const auto digest = crypto::hash(bytes);
+        std::string hex;
+        hex.reserve(digest.size() * 2);
+        for (const auto byte : digest) {
+          hex.push_back(digits[byte >> 4]);
+          hex.push_back(digits[byte & 0x0F]);
+        }
+        return hex;
+      }
+
+      /// The index names files as URL paths. Anything but a plain relative path
+      /// under profiles/ is refused, so a bad index can fail a lookup but can
+      /// never make the host write outside its own directory.
+      bool is_plain_profile_path(const std::string &file) {
+        if (file.rfind("profiles/", 0) != 0 || file.size() <= 5 || file.substr(file.size() - 5) != ".json") {
+          return false;
+        }
+        if (file.find("..") != std::string::npos || file.find('\\') != std::string::npos || file.find(':') != std::string::npos) {
+          return false;
+        }
+        return std::all_of(file.begin(), file.end(), [](char c) {
+          return std::isalnum(static_cast<unsigned char>(c)) || c == '/' || c == '-' || c == '_' || c == '.';
+        });
+      }
+
+      std::optional<nlohmann::json> parse_index(const std::optional<std::string> &text) {
+        if (!text) {
+          return std::nullopt;
+        }
+        auto index = nlohmann::json::parse(*text, nullptr, false);
+        if (index.is_discarded() || !index.is_object() || index.value("format", 0) != 1 || !index.contains("profiles") || !index["profiles"].is_array()) {
+          return std::nullopt;
+        }
+        return index;
+      }
+
+      std::optional<nlohmann::json> fetch_index() {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_failed_fetch && now - *last_failed_fetch < RETRY_AFTER_FAILURE) {
+          return std::nullopt;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(dir(), ec);
+        const auto path = dir() / "index.json";
+        // download_file writes next to the target and renames it into place only
+        // when the transfer succeeded, so a failed fetch leaves the old index.
+        if (!http::download_file(std::string {BASE_URL} + "index.json", path.string())) {
+          last_failed_fetch = now;
+          return std::nullopt;
+        }
+        auto index = parse_index(read_file(path));
+        if (!index) {
+          BOOST_LOG(warning) << "scry: the profile registry index is not one this host can read";
+          last_failed_fetch = now;
+        }
+        return index;
+      }
+
+      std::vector<const nlohmann::json *> entries_for(const nlohmann::json &index, const std::string &exe) {
+        std::vector<const nlohmann::json *> matching;
+        const auto wanted = lower(exe);
+        for (const auto &entry : index["profiles"]) {
+          if (entry.is_object() && entry.contains("process") && entry["process"].is_string() && lower(entry["process"].get<std::string>()) == wanted) {
+            matching.push_back(&entry);
+          }
+        }
+        return matching;
+      }
+
+      /// The published profiles for @p exe, downloaded if missing or changed.
+      std::vector<std::filesystem::path> profiles_for(const std::string &exe) {
+        std::vector<std::filesystem::path> found;
+        if (exe.empty()) {
+          return found;
+        }
+
+        const auto index_path = dir() / "index.json";
+        std::error_code ec;
+        const auto modified = std::filesystem::last_write_time(index_path, ec);
+        const bool fresh = !ec && std::filesystem::file_time_type::clock::now() - modified < INDEX_MAX_AGE;
+
+        auto index = fresh ? parse_index(read_file(index_path)) : fetch_index();
+        if (!index) {
+          // No network, or a failed fetch: whatever was fetched before still serves.
+          index = parse_index(read_file(index_path));
+        }
+        if (index && entries_for(*index, exe).empty() && refetched_for.insert(lower(exe)).second) {
+          if (auto refreshed = fetch_index()) {
+            index = std::move(refreshed);
+          }
+        }
+        if (!index) {
+          return found;
+        }
+
+        for (const auto *entry : entries_for(*index, exe)) {
+          const auto file = entry->value("file", std::string {});
+          const auto expected = lower(entry->value("sha256", std::string {}));
+          if (!is_plain_profile_path(file) || expected.empty()) {
+            continue;
+          }
+          const auto local = dir() / std::filesystem::path(platf::from_utf8(file)).make_preferred();
+          auto bytes = read_file(local);
+          if (!bytes || sha256_hex(*bytes) != expected) {
+            std::filesystem::create_directories(local.parent_path(), ec);
+            if (!http::download_file(std::string {BASE_URL} + file, local.string())) {
+              continue;
+            }
+            bytes = read_file(local);
+            if (!bytes || sha256_hex(*bytes) != expected) {
+              // Pages caches for a few minutes, so a new index can briefly name a
+              // profile the CDN still serves the old copy of. Try again later.
+              BOOST_LOG(warning) << "scry: registry profile " << file << " does not match its hash";
+              std::filesystem::remove(local, ec);
+              continue;
+            }
+            BOOST_LOG(info) << "scry: fetched registry profile " << file << " for " << exe;
+          }
+          found.push_back(local);
+        }
+        return found;
+      }
+    }  // namespace registry
+
+    /// Best-effort executable name out of a configured command line, which may be
+    /// quoted and may carry arguments. Only ever used for logging and for the
+    /// snapshot's `process` field before the helper reports the real one — the
+    /// helper is attached by pid, so getting this wrong costs a cosmetic label
+    /// and nothing else.
+    std::string executable_from_command(const std::string &command) {
+      std::string_view view = command;
+      while (!view.empty() && (view.front() == ' ' || view.front() == '\t')) {
+        view.remove_prefix(1);
+      }
+      if (!view.empty() && view.front() == '"') {
+        view.remove_prefix(1);
+        if (const auto end = view.find('"'); end != std::string_view::npos) {
+          view = view.substr(0, end);
+        }
+      } else if (const auto space = view.find(' '); space != std::string_view::npos) {
+        view = view.substr(0, space);
+      }
+      return std::filesystem::path(std::string {view}).filename().string();
+    }
+
+    /**
+     * @brief Decide which process the helper should read.
+     *
+     * The process Vibepollo launched is frequently *not* the game: Steam, Epic
+     * and Playnite all spawn the real executable and may outlive or precede it.
+     * Rather than re-solve that here, this reuses the identity Vibepollo already
+     * maintains for display and HDR policy — the foreground app, when it has been
+     * confirmed to belong to the running app — and falls back to the launched
+     * process only when there is no better answer.
+     */
+    std::optional<target_t> resolve_target() {
+      const auto app = proc::proc.running_app_state();
+      if (!app.has_active_app) {
+        return std::nullopt;
+      }
+
+      target_t target;
+      // The app name is the stable handle Vibepollo has for "which game is this".
+      // Phase 2 replaces it with a registry slug; nothing else here changes.
+      target.slug = app.name;
+
+      const auto foreground = platf::foreground_app::snapshot();
+      if (foreground.matches_active_app && foreground.foreground_pid != 0 && !foreground.foreground_exe.empty()) {
+        target.pid = foreground.foreground_pid;
+        target.exe = std::filesystem::path(foreground.foreground_exe).filename().string();
+        return target;
+      }
+
+      if (app.root_pid != 0) {
+        target.pid = static_cast<DWORD>(app.root_pid);
+        target.exe = executable_from_command(app.command);
+        return target;
+      }
+
+      return std::nullopt;
+    }
+
+    enum class pump_e {
+      data,  ///< Bytes were appended to the buffer.
+      idle,  ///< The pipe is open but has nothing to say right now.
+      closed,  ///< End of stream: the child exited or the pipe broke.
+    };
+
+    /**
+     * @brief Move whatever is available from `pipe` into `buffer`, without blocking.
+     *
+     * A blocking `ReadFile` would be a trap here: scry stays **silent** on a tick
+     * where nothing changed, which for a paused game is every tick. A reader
+     * parked in `ReadFile` would then never notice that the game exited, that the
+     * target changed, or that we are shutting down — and shutdown would hang
+     * waiting to join it. So the pipe is peeked first and read only when it has
+     * something, leaving the caller free to check its own conditions in between.
+     */
+    pump_e pump(HANDLE pipe, std::string &buffer) {
+      DWORD available = 0;
+      if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
+        return pump_e::closed;
+      }
+      if (available == 0) {
+        return pump_e::idle;
+      }
+      char chunk[4096];
+      DWORD read = 0;
+      const DWORD want = std::min<DWORD>(available, sizeof(chunk));
+      if (!ReadFile(pipe, chunk, want, &read, nullptr) || read == 0) {
+        return pump_e::closed;
+      }
+      buffer.append(chunk, read);
+      return pump_e::data;
+    }
+
+    /// Split complete lines out of `buffer`, handing each to `on_line`.
+    void drain_lines(std::string &buffer, const std::function<void(std::string_view)> &on_line) {
+      std::size_t start = 0;
+      for (std::size_t nl = buffer.find('\n', start); nl != std::string::npos; nl = buffer.find('\n', start)) {
+        std::string_view line(buffer.data() + start, nl - start);
+        if (!line.empty() && line.back() == '\r') {
+          line.remove_suffix(1);
+        }
+        if (!line.empty()) {
+          on_line(line);
+        }
+        start = nl + 1;
+      }
+      buffer.erase(0, start);
+      if (buffer.size() > MAX_LINE_BYTES) {
+        BOOST_LOG(warning) << "scry: helper produced an implausibly long line; dropping the buffer";
+        buffer.clear();
+      }
+    }
+
+    /**
+     * @brief Apply one JSON event from the helper to the shared snapshot.
+     *
+     * Unknown event types are ignored on purpose — that is the helper's
+     * documented compatibility rule, and it is what lets a newer scry add events
+     * without this code having to know about them.
+     */
+    void apply_event(const nlohmann::json &event, const target_t &target) {
+      const auto type = event.value("event", std::string {});
+
+      if (type == "attached") {
+        // Read before the snapshot is touched, and tolerantly: `profile_file` is
+        // optional in scry and may arrive as null, and json::value() throws on a
+        // null where a string is expected. A throw half-way through the update
+        // below would leave a snapshot marked attached with half its fields.
+        const auto text = [&event](const char *key, const std::string &fallback) {
+          const auto it = event.find(key);
+          return it != event.end() && it->is_string() ? it->get<std::string>() : fallback;
+        };
+        const auto process = text("process", target.exe);
+        const auto profile = text("profile", std::string {});
+        const auto profile_file = text("profile_file", std::string {});
+
+        auto lg = g_snapshot.lock();
+        auto &snap = g_snapshot.raw;
+        snap.attached = true;
+        snap.slug = target.slug;
+        snap.process = process;
+        snap.profile = profile;
+        snap.profile_file = profile_file;
+        snap.contract_id.clear();
+        snap.contract_version.clear();
+        if (auto it = event.find("contract"); it != event.end() && it->is_object()) {
+          if (auto id = it->find("id"); id != it->end() && id->is_string()) {
+            snap.contract_id = id->get<std::string>();
+          }
+          if (auto version = it->find("version"); version != it->end() && version->is_string()) {
+            snap.contract_version = version->get<std::string>();
+          }
+        }
+        // scry before 0.1.0-alpha.4 announces only the integer, which was always the major.
+        if (snap.contract_version.empty()) {
+          if (auto it = event.find("contract_version"); it != event.end() && it->is_number_unsigned()) {
+            snap.contract_version = std::to_string(it->get<std::uint32_t>()) + ".0";
+          }
+        }
+        snap.values = nlohmann::json::object();
+        bump(snap);
+        // A new game is a new picture, not a change to the old one.
+        publish(snap, snapshot_frame(snap));
+        std::string contract = "none";
+        if (!snap.contract_version.empty()) {
+          contract = (snap.contract_id.empty() ? std::string {"(no id)"} : snap.contract_id) + " " + snap.contract_version;
+        }
+        BOOST_LOG(info) << "scry: attached to " << snap.process << " with profile '" << snap.profile
+                        << "' (contract " << contract << ")";
+        return;
+      }
+
+      if (type == "values") {
+        const auto values = event.find("values");
+        if (values == event.end() || !values->is_object()) {
+          return;
+        }
+        auto lg = g_snapshot.lock();
+        auto &snap = g_snapshot.raw;
+        if (!snap.attached) {
+          // Values before an attach would be values we cannot label. Drop them.
+          return;
+        }
+        // The helper sends only what changed; the full picture is ours to keep.
+        for (const auto &[name, value] : values->items()) {
+          snap.values[name] = value;
+        }
+        bump(snap);
+        // Subscribers get the diff verbatim rather than the merged picture: it is
+        // what the game actually did this tick, and at these sizes resending the
+        // whole picture every tick is the difference between a few hundred bytes
+        // and tens of kilobytes.
+        publish(snap, frame_t {snap.revision, "diff", *values});
+        return;
+      }
+
+      if (type == "detached") {
+        auto lg = g_snapshot.lock();
+        g_snapshot.raw = snapshot_t {};
+        // Stamped even though the picture is now empty: a subscriber has to be
+        // able to tell "the game ended" from "the game went quiet", and an
+        // unnumbered frame would break the ordering everything else relies on.
+        bump(g_snapshot.raw);
+        publish(g_snapshot.raw, frame_t {g_snapshot.raw.revision, "detached", nlohmann::json::object()});
+        return;
+      }
+    }
+
+    /// Clear the shared picture. Called whenever the helper is no longer a
+    /// trustworthy source — it exited, the target changed, the feature was
+    /// switched off — so that a consumer never renders a dead game's numbers.
+    void clear_snapshot() {
+      auto lg = g_snapshot.lock();
+      const bool was_attached = g_snapshot.raw.attached;
+      g_snapshot.raw = snapshot_t {};
+      if (was_attached) {
+        // Only worth saying when there was something to end. Subscribers are
+        // told for the same reason the `detached` event is forwarded: whatever
+        // they are rendering is now a dead game's numbers.
+        bump(g_snapshot.raw);
+        publish(g_snapshot.raw, frame_t {g_snapshot.raw.revision, "detached", nlohmann::json::object()});
+      }
+    }
+
+    /// Why a helper run ended, which decides whether the supervisor backs off.
+    enum class helper_end_e {
+      exited,  ///< The helper stopped on its own, or never started: a verdict on this target.
+      stopped,  ///< We stopped it, because the target changed or Vibepollo is shutting down.
+    };
+
+    /**
+     * @brief Run the helper against `target` until it exits or we are stopped.
+     *
+     * Returns when there is nothing left to read: the child died, the target
+     * changed under us, or shutdown was requested. Which of those it was is the
+     * return value.
+     */
+    helper_end_e run_helper(const std::filesystem::path &helper, const std::vector<std::filesystem::path> &profiles, const target_t &target, int tick_ms) {
+      // Each profile goes as its own --profile, in the order given: when more
+      // than one fits, scry takes the first, so the hand-placed ones come first.
+      // Paths go through the same escaping as every other command line here.
+      std::wstring args = L"watch --pid " + std::to_wstring(target.pid);
+      for (const auto &profile : profiles) {
+        args += L" --profile " + escape_argument(profile.wstring());
+      }
+      args += L" --format json --tick " + std::to_wstring(std::clamp(tick_ms, 10, 1000));
+
+      helper_pipes_t pipes;
+      ProcessHandler child(true);
+      if (!child.start(helper.wstring(), args, false, &pipes)) {
+        BOOST_LOG(warning) << "scry: could not start the telemetry helper";
+        return helper_end_e::exited;
+      }
+
+      BOOST_LOG(info) << "scry: watching " << target.exe << " (pid " << target.pid << ") for app '" << target.slug << "'";
+
+      // Diagnostics are a separate stream by design: merging them into stdout
+      // would corrupt the JSON the parser below depends on. They are the only
+      // place the fail-safe explains itself ("no profile fits"), so they are
+      // logged rather than discarded.
+      std::atomic<bool> readers_stop {false};
+      std::thread stderr_reader([raw = pipes.stderr_read.get(), &readers_stop]() {
+        std::string buffer;
+        while (!readers_stop.load(std::memory_order_acquire)) {
+          const auto result = pump(raw, buffer);
+          if (result == pump_e::closed) {
+            break;
+          }
+          if (result == pump_e::idle) {
+            std::this_thread::sleep_for(POLL_INTERVAL);
+            continue;
+          }
+          drain_lines(buffer, [](std::string_view line) {
+            BOOST_LOG(debug) << "scry: " << line;
+          });
+        }
+      });
+
+      // Re-checking the target costs a foreground-window query and a lock on
+      // `proc`; the read loop spins every POLL_INTERVAL, which is far too often
+      // to pay that. The answer only changes on human timescales anyway.
+      auto next_target_check = std::chrono::steady_clock::now() + SUPERVISE_INTERVAL;
+
+      auto end = helper_end_e::stopped;
+      std::string buffer;
+      while (!g_stop.load(std::memory_order_acquire)) {
+        const auto result = pump(pipes.stdout_read.get(), buffer);
+        if (result == pump_e::closed) {
+          end = helper_end_e::exited;
+          break;
+        }
+        if (result == pump_e::data) {
+          drain_lines(buffer, [&](std::string_view line) {
+            auto event = nlohmann::json::parse(line, nullptr, false);
+            if (event.is_discarded() || !event.is_object()) {
+              BOOST_LOG(warning) << "scry: helper wrote a line that is not a JSON object; ignoring it";
+              return;
+            }
+            // One event the parser did not expect, a null where a string was
+            // assumed, must cost that event and nothing more. Uncaught, it would
+            // leave this thread and take the whole host down with it.
+            try {
+              apply_event(event, target);
+            } catch (const std::exception &e) {
+              BOOST_LOG(warning) << "scry: could not apply a helper event: " << e.what();
+            }
+          });
+        } else {
+          std::this_thread::sleep_for(POLL_INTERVAL);
+        }
+
+        // A target that changed out from under us (the game exited, the user
+        // switched to a different one) makes this helper stale immediately.
+        if (const auto now = std::chrono::steady_clock::now(); now >= next_target_check) {
+          next_target_check = now + SUPERVISE_INTERVAL;
+          const auto current = resolve_target();
+          if (!current || !(*current == target)) {
+            break;
+          }
+        }
+      }
+
+      readers_stop.store(true, std::memory_order_release);
+      child.terminate();
+      if (stderr_reader.joinable()) {
+        stderr_reader.join();
+      }
+      clear_snapshot();
+      return end;
+    }
+
+    void supervisor_loop() {
+      std::optional<std::chrono::steady_clock::time_point> retry_after;
+      // The target the backoff was earned on. The backoff says "this process has no profile",
+      // which is a fact about that process and nothing else. At the start of a session the target
+      // is briefly the launcher, until the game is confirmed in the foreground; the helper fails
+      // there within a second, and holding the game to that failure delayed its telemetry by the
+      // whole backoff. Focus leaving the game for an overlay or an alt-tab did the same.
+      std::optional<target_t> failed_target;
+
+      while (!g_stop.load(std::memory_order_acquire)) {
+        const auto settings = read_settings();
+        if (!settings.enabled) {
+          clear_snapshot();
+          interruptible_wait(SUPERVISE_INTERVAL);
+          continue;
+        }
+
+        const auto helper = helper_path();
+        const auto target = resolve_target();
+
+        if (!helper || !target) {
+          clear_snapshot();
+          interruptible_wait(SUPERVISE_INTERVAL);
+          continue;
+        }
+
+        auto profiles = local_profiles(settings.profiles_dir);
+        for (auto &published : registry::profiles_for(target->exe)) {
+          profiles.push_back(std::move(published));
+        }
+        if (profiles.empty()) {
+          clear_snapshot();
+          interruptible_wait(SUPERVISE_INTERVAL);
+          continue;
+        }
+
+        if (retry_after && std::chrono::steady_clock::now() < *retry_after && failed_target && *failed_target == *target) {
+          interruptible_wait(SUPERVISE_INTERVAL);
+          continue;
+        }
+
+        const auto started_at = std::chrono::steady_clock::now();
+        const auto end = run_helper(*helper, profiles, *target, settings.tick_ms);
+        const auto ran_for = std::chrono::steady_clock::now() - started_at;
+
+        // Only a helper that gave up by itself says anything about the target. One we stopped
+        // because focus moved says nothing, however soon that happened, and backing off on it
+        // would hold the game to a failure that was never its own.
+        if (end == helper_end_e::exited && ran_for < MIN_HEALTHY_RUN) {
+          // It gave up almost immediately. The likeliest reason is the honest
+          // one — no profile fits this game — and that will still be true a
+          // millisecond from now, so back off rather than spin.
+          retry_after = std::chrono::steady_clock::now() + RESPAWN_BACKOFF;
+          failed_target = *target;
+        } else if (end == helper_end_e::exited) {
+          // A helper that ran and then stopped was doing its job until the game
+          // exited. Penalising that would delay telemetry for the *next* game by
+          // half a minute for no reason.
+          retry_after.reset();
+          failed_target.reset();
+        }
+        // A helper we stopped leaves the backoff as it was: if focus flicks back to
+        // a launcher that already failed, there is no point scanning it again.
+      }
+
+      clear_snapshot();
+    }
+
+    struct deinit_t: public ::platf::deinit_t {
+      ~deinit_t() override {
+        g_stop.store(true, std::memory_order_release);
+        g_cv.notify_all();
+        // Subscribers park in next() with a timeout; without this they would sit
+        // out the rest of it before noticing that shutdown began.
+        g_subs_cv.notify_all();
+        if (g_thread.joinable()) {
+          g_thread.join();
+        }
+        clear_snapshot();
+      }
+    };
+
+  }  // namespace
+
+  std::unique_ptr<::platf::deinit_t> start() {
+    g_stop.store(false, std::memory_order_release);
+    g_thread = std::thread(supervisor_loop);
+    return std::make_unique<deinit_t>();
+  }
+
+  bool enabled() {
+    return read_settings().enabled;
+  }
+
+  snapshot_t latest() {
+    auto lg = g_snapshot.lock();
+    return g_snapshot.raw;
+  }
+
+  std::unique_ptr<subscription_t> subscribe() {
+    auto sub = std::make_shared<subscriber_t>();
+    {
+      // Both locks, in the file's order, so that registering and reading the
+      // opening snapshot are one step. Split them and a frame stamped in between
+      // is either lost or delivered twice — and with diffs, both are wrong.
+      auto lg = g_snapshot.lock();
+      sub->queue.push_back(snapshot_frame(g_snapshot.raw));
+      std::lock_guard sl {g_subs_mutex};
+      g_subs.push_back(sub);
+    }
+    return std::make_unique<subscription_impl_t>(std::move(sub));
+  }
+
+  bool helper_available() {
+    return helper_path().has_value();
+  }
+
+}  // namespace platf::scry
+
+#endif  // _WIN32

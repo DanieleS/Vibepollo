@@ -27,9 +27,15 @@ location by modifying the configuration file.
 |---------|-------------------------------------------------|
 | Docker  | @code{}/config@endcode                          |
 | FreeBSD | @code{}~/.config/sunshine@endcode               |
-| Linux   | @code{}~/.config/sunshine@endcode               |
+| Linux (native package) | @code{}/var/lib/vibepollo@endcode |
+| Linux (standalone) | @code{}~/.config/vibepollo@endcode (or `$XDG_CONFIG_HOME/vibepollo`) |
 | macOS   | @code{}~/.config/sunshine@endcode               |
 | Windows | @code{}%ProgramFiles%\\Sunshine\\config@endcode |
+
+Native Linux packages share one machine profile across the login screen and desktop.
+Edit settings through the Web UI; use `vibepollo paths` to locate files and
+`sudo vibepollo logs` for diagnostics. Package upgrades import the selected desktop
+user's legacy `~/.config/vibepollo` profile once and preserve existing machine settings.
 
 Although it is recommended to use the configuration UI, it is possible manually configure Sunshine by
 editing the `conf` file in a text editor. Use the examples as reference.
@@ -361,7 +367,8 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td rowspan="6">Choices</td>
         <td>ds4</td>
         <td>DualShock 4 controller (PS4)
-            @note{This option applies to Windows only.}</td>
+            @note{This option applies to Windows and Linux. On Linux it uses UHID and includes
+            rumble, the touchpad, motion sensors, battery reporting, and the lightbar.}</td>
     </tr>
     <tr>
         <td>ds5</td>
@@ -372,6 +379,57 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>switch</td>
         <td>Switch Pro controller
             @note{This option applies to FreeBSD and Linux only.}</td>
+    </tr>
+    <tr>
+        <td>vhf</td>
+        <td>Vibepollo's own virtual gamepad driver, instead of ViGEmBus, choosing the controller
+            automatically
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. It presents a DualSense to clients that report a PlayStation
+            controller, or when motion_as_ds4 or touchpad_as_ds4 applies, and an Xbox Series
+            controller otherwise. On an older driver it falls back to a generic HID pad that
+            publishes the DirectInput Physical Interface Device report set, so force feedback still
+            works in DirectInput games.}</td>
+    </tr>
+    <tr>
+        <td>vhf_switch</td>
+        <td>Switch Pro Controller on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. Includes motion sensors, battery reporting, rumble, and the
+            Capture button. This controller has no analog triggers, so trigger travel is reported
+            as ZL and ZR presses, and it has no touchpad.}</td>
+    </tr>
+    <tr>
+        <td>vhf_xbox</td>
+        <td>Xbox Series controller on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. Along with vhf_xbox_one, this is a virtual gamepad option
+            Windows places on the XInput path, so it is one of the two that games supporting only
+            XInput can see. It has rumble and impulse triggers, but no touchpad, motion, or
+            battery reporting.}</td>
+    </tr>
+    <tr>
+        <td>vhf_xbox_one</td>
+        <td>Xbox One controller on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. It reaches the XInput path the same way vhf_xbox does, and is
+            recognised by Windows on its own product ID rather than a generic one, which can help
+            with software that identifies controllers by generation. It is otherwise identical to
+            vhf_xbox except that an Xbox One pad has no Share button.}</td>
+    </tr>
+    <tr>
+        <td>vhf_ds4</td>
+        <td>DualShock 4 on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. Includes the touchpad, motion sensors, battery reporting, and
+            the lightbar.}</td>
+    </tr>
+    <tr>
+        <td>vhf_ds5</td>
+        <td>DualSense on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. Includes the touchpad, motion sensors, battery reporting, the
+            lightbar, the player and microphone LEDs, and the adaptive triggers.}</td>
     </tr>
     <tr>
         <td>x360</td>
@@ -822,6 +880,37 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### audio_sink_capture_only
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            On Windows, capture the explicitly selected [audio_sink](#audio_sink)
+            without changing any default output device. Route the desired application's
+            audio to that device in Windows before connecting. Capture stays on that
+            endpoint if the Windows default changes during the stream.
+            <br>
+            Requires a non-empty audio_sink. Virtual sink selection still takes precedence:
+            leave virtual_sink empty and enable host audio in the client if you have an
+            automatically detected virtual audio device. Other platforms ignore this option.
+            When disabled, selecting an Audio Sink retains the existing behavior of switching
+            Windows default outputs for the stream and restoring them afterward.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">disabled</td>
+    </tr>
+    <tr>
+        <td>Example (Windows)</td>
+        <td colspan="2">@code{}
+            audio_sink = Speakers (High Definition Audio Device)
+            audio_sink_capture_only = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### virtual_sink
 
 <table>
@@ -912,7 +1001,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             <br>
             **FreeBSD/Linux + VA-API:**
             <br>
-            Unlike with *amdvce* and *nvenc*, it doesn't matter if video encoding is done on a different GPU.
+            Unlike with AMD AMF encoders and *nvenc*, it doesn't matter if video encoding is done on a different GPU.
             @code{}
             ls /dev/dri/renderD*  # to find all devices capable of VAAPI
             # replace ``renderD129`` with the device from above to list the name and capabilities of the device
@@ -1143,6 +1232,73 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### virtual_display_outputs
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Linux-only list of DRM connector names reserved for private streaming displays.
+            Separate names with commas, or provide a JSON string array. Leave this empty to
+            auto-discover outputs created by the packaged <code>vibeshine-vkms.service</code>.
+            The Linux DRM driver, connector broker, and service assets are supplied by the
+            bundled <code>libvirtualdisplay</code> dependency.
+            Explicit connector names are useful for a forced-EDID or hardware dummy output.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Empty (auto-discover the managed VKMS pool)</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            virtual_display_outputs = Virtual-1, Virtual-2
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Linux setup</td>
+        <td colspan="2">@code{}
+            sudo vibepollo driver install
+            sudo systemctl enable --now vibeshine-vkms.service
+            @endcode
+            Native packages and <code>vibeshine-drm-setup.service</code> attempt this installation
+            automatically; use the first command to install or retry it manually. The privileged
+            helper always uses the fixed, root-owned
+            <code>/usr/libexec/vibeshine</code> path, independent of the application install prefix.
+            Replacing the module file does not replace a module already loaded by the compositor.
+            Compare <code>modinfo -F version vibeshine_drm</code> with
+            <code>cat /sys/module/vibeshine_drm/version</code> and reboot before testing when they differ.
+            The module supports Linux 6.16 or newer and exposes four independent virtual connectors
+            with a deterministic HDR10 EDID, BT.2020/PQ metadata, 8-16 bits per component, and
+            10-bit RGB plane formats. Vibepollo enables one only for a stream, applies the requested
+            mode, layout, and HDR state through KScreen, captures that exact connector, and restores
+            the prior topology afterward.
+            KDE Plasma/KWin and <code>kscreen-doctor</code> are required for managed topology.
+            Vibepollo uses direct DRM/KMS capture for managed HDR output so the 10-bit scanout reaches
+            the encoder. The custom driver also notifies capture after completed presentation changes and
+            exports the exact pinned primary-plane DMA-BUF for that sequence. Sparse changes are captured
+            immediately, while faster changes are coalesced to the stream's requested maximum frame rate
+            without re-querying KMS state. Managed outputs expose no cursor or overlay planes, so KWin
+            composites the complete monitor image into that primary framebuffer. An older module without
+            this ABI is rejected rather than polled. KWin ScreenCast remains the recommended compositor
+            capture path for SDR.
+            <br><br>
+            If the custom module cannot be built or loaded (including on older kernels or when
+            the kernel rejects an untrusted module signature), managed virtual displays remain unavailable.
+            Vibepollo deliberately does not fall back to CPU-backed stock <code>vkms</code> scanout.
+            Arch Linux and CachyOS packages use DKMS to sign future rebuilds with a persistent local
+            key and verify the embedded signer before accepting the module. Stock Arch and CachyOS
+            kernels need no separate signing step: accepting the normal package-install confirmation
+            is enough, including with Secure Boot through Limine or systemd-boot. Only a custom kernel
+            that enforces trusted module signatures requires shim. The package installation detects
+            this and launches the one-time signing-key authorization prompt automatically; reboot and
+            approve the pending firmware confirmations once. Future updates remain automatic. Install
+            the matching kernel headers before retrying a failed module build.
+        </td>
+    </tr>
+</table>
+
 ### virtual_display_layout
 
 <table>
@@ -1187,6 +1343,15 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### remote_monitor_confirm_app_replacement
+
+Protect a running app while Vibepollo advertises the host as available for
+warning-free Remote Input and Remote Monitor attachment. Selecting a different
+normal app is rejected once and temporarily advertises the running app as
+resumable to that paired client, allowing Moonlight to show its native close-app
+warning on the next attempt. The confirmation window is 60 seconds. Disable
+this option to replace the running app immediately. The default is `true`.
+
 ### dd_configuration_option
 
 <table>
@@ -1194,7 +1359,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Perform mandatory verification and additional configuration for the display device.
-            @note{Applies to Windows only.}
+            @note{Applies to Windows and to Linux private displays managed through KScreen.}
         </td>
     </tr>
     <tr>
@@ -1240,7 +1405,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Perform additional resolution configuration for the display device.
             @note{"Optimize game settings" must be enabled in Moonlight for this option to work.}
-            @note{Applies to Windows only.}
+            @note{On Linux, this applies to private displays managed through KScreen.}
         </td>
     </tr>
     <tr>
@@ -1276,7 +1441,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Specify manual resolution to be used.
             @note{[dd_resolution_option](#dd_resolution_option) must be set to `manual`}
-            @note{Applies to Windows only.}
+            @note{On Linux, this applies to private displays managed through KScreen.}
         </td>
     </tr>
     <tr>
@@ -1298,7 +1463,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Perform additional refresh rate configuration for the display device.
-            @note{Applies to Windows only.}
+            @note{On Linux, this applies to private displays managed through KScreen.}
         </td>
     </tr>
     <tr>
@@ -1338,7 +1503,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Specify manual refresh rate to be used.
             @note{[dd_refresh_rate_option](#dd_refresh_rate_option) must be set to `manual`}
-            @note{Applies to Windows only.}
+            @note{On Linux, this applies to private displays managed through KScreen.}
         </td>
     </tr>
     <tr>
@@ -1361,7 +1526,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Perform additional HDR configuration for the display device.
-            @note{Applies to Windows only.}
+            @note{On Linux 6.16 or newer, the managed <code>vibeshine_drm</code> output advertises HDR10 and 10-bit formats. Managed display creation fails if that driver is unavailable rather than using CPU-backed stock VKMS.}
         </td>
     </tr>
     <tr>
@@ -1392,7 +1557,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Override the HDR request coming from the client.
-            @note{Applies to Windows only.}
+            @note{Linux applies this to private displays managed through KScreen.}
         </td>
     </tr>
     <tr>
@@ -1428,7 +1593,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Additional delay in milliseconds to wait before reverting configuration when the app has been closed or the last session terminated.
             Main purpose is to provide a smoother transition when quickly switching between apps.
-            @note{Applies to Windows only.}
+            @note{On Linux, this delay also governs restoration of the physical desktop.}
         </td>
     </tr>
     <tr>
@@ -1452,7 +1617,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             When enabled, display configuration is reverted upon disconnect of all clients instead of app close or last session termination.
             This can be useful for returning to physical usage of the host machine without closing the active app.
             @warning{Some applications may not function properly when display configuration is changed while active.}
-            @note{Applies to Windows only.}
+            @note{On Linux, this restores the physical desktop and releases the private display.}
         </td>
     </tr>
     <tr>
@@ -1692,7 +1857,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @note{First entry to be matched in the list is the one that will be used.}
             @tip{`requested_resolution` and `final_resolution` can be omitted for `refresh_rate_only` group.}
             @tip{`requested_fps` and `final_refresh_rate` can be omitted for `resolution_only` group.}
-            @note{Applies to Windows only.}
+            @note{Linux applies remapped modes to private displays managed through KScreen.}
         </td>
     </tr>
     <tr>
@@ -2363,7 +2528,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            The file used by new Vibeshine features to persist web authentication tokens and notification state.
+            The file used by new Vibepollo features to persist web authentication tokens and notification state.
             If left unset, it defaults to <code>vibeshine_state.json</code> in the same directory as other Sunshine data.
         </td>
     </tr>
@@ -2567,7 +2732,16 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="6">Choices</td>
+        <td rowspan="10">Choices</td>
+        <td>gamescope</td>
+        <td>Capture the Gamescope compositor's main output through PipeWire in SDR.
+            Automatically preferred when Gamescope is available. Supports downscaling
+            within the physical output. HDR requires the version-matched Vibepollo Gamescope
+            capture patch and a working Main10 hardware encoder; stock Gamescope remains SDR.
+            Independent virtual modes are unavailable.
+            @note{Applies to Linux only.}</td>
+    </tr>
+    <tr>
         <td>nvfbc</td>
         <td>Use NVIDIA Frame Buffer Capture to capture direct to GPU memory. This is usually the fastest method for
             NVIDIA cards. NvFBC does not have native Wayland support and does not work with XWayland.
@@ -2582,11 +2756,23 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>kms</td>
         <td>DRM/KMS screen capture from the kernel. This requires that Sunshine has `cap_sys_admin` capability.
+            Managed Linux private HDR sessions use this path automatically to preserve 10-bit scanout,
+            even when KWin is selected globally for SDR capture.
+            With the <code>vibeshine_drm</code> presentation ABI, capture is change-driven, imports the exact
+            pinned DMA-BUF associated with each completed sequence, and coalesces bursts to the
+            client-requested maximum frame rate. Ordinary KMS drivers retain fixed-rate polling; older
+            Vibepollo DRM modules without the frame-export ABI are rejected.
             @note{Applies to Linux only.}</td>
     </tr>
     <tr>
         <td>kwin</td>
-        <td>Capture with KDE/KWin Wayland compositor via KDE screencasting.
+        <td>Capture with KDE/KWin Wayland compositor via KDE screencasting. This is recommended for
+            managed private displays in SDR; managed HDR sessions switch to direct DRM/KMS capture.
+            @note{Applies to Linux only.}</td>
+    </tr>
+    <tr>
+        <td>portal</td>
+        <td>Capture a selected Wayland display through the XDG Desktop Portal and PipeWire.
             @note{Applies to Linux only.}</td>
     </tr>
     <tr>
@@ -2658,22 +2844,36 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="7">Choices</td>
+        <td rowspan="8">Choices</td>
         <td>nvenc</td>
-        <td>For NVIDIA graphics cards</td>
+        <td>For NVIDIA graphics cards. Uses Vibepollo's native NVENC implementation on Windows and
+            on CUDA-enabled Linux builds. On Linux it is tried first during automatic selection.</td>
+    </tr>
+    <tr>
+        <td>nvenc_legacy</td>
+        <td>Legacy FFmpeg-based NVIDIA NVENC encoder. Select this explicitly on Linux to roll back
+            from the native implementation. Existing @code{}nvenc_experimental@endcode settings
+            are accepted as a compatibility alias for @code{}nvenc@endcode.
+            @note{Applies to Linux only.}</td>
     </tr>
     <tr>
         <td>quicksync</td>
         <td>For Intel graphics cards</td>
     </tr>
     <tr>
-        <td>amdvce</td>
-        <td>For AMD graphics cards (native AMF encoder)</td>
+        <td>amdvce_ffmpeg</td>
+        <td>For AMD graphics cards. This is the supported FFmpeg-based AMF encoder and the
+            implementation used by automatic selection on Windows.
+            @note{Existing configurations using @code{}amdvce_legacy@endcode are accepted as
+            a compatibility alias for @code{}amdvce_ffmpeg@endcode. The former native
+            @code{}amdvce@endcode value is accepted as an alias for
+            @code{}amdvce_experimental@endcode.}</td>
     </tr>
     <tr>
-        <td>amdvce_legacy</td>
-        <td>Explicit rollback to the FFmpeg-based AMD AMF encoder. Never selected automatically —
-            automatic probing and `amdvce` fail closed instead of silently falling back.
+        <td>amdvce_experimental</td>
+        <td>Experimental native AMD AMF encoder. It is not selected automatically, has limited
+            hardware test coverage, and may not work with older GPUs or driver versions. Explicit
+            selection fails closed instead of silently changing encoder implementations.
             @note{Applies to Windows only.}</td>
     </tr>
     <tr>
@@ -2691,9 +2891,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
-## Frame Limiter (Windows)
+## Frame Limiter
 
-These options integrate with Windows tooling to manage frame pacing and related behavior during a stream.
+These options integrate with Proton and MangoHUD on Linux and RTSS or NVIDIA Control Panel on Windows to
+manage frame pacing and related behavior during a stream.
 They appear in the Frame Limiter section of the settings UI.
 
 ### frame_limiter_enable
@@ -2733,13 +2934,25 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            frame_limiter_provider = rtss
+            frame_limiter_provider = mangohud
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="4">Choices</td>
+        <td rowspan="7">Choices</td>
         <td>auto</td>
-        <td>Auto-detect and prefer RTSS when available, otherwise fall back to NVIDIA Control Panel.</td>
+        <td>On Linux, use Proton's DXVK/VKD3D limiter and present the MangoHUD overlay. On Windows, prefer RTSS when available and otherwise fall back to NVIDIA Control Panel.</td>
+    </tr>
+    <tr>
+        <td>mangohud</td>
+        <td>Use MangoHUD on Linux. Vibepollo enables it for launched games and supplies the stream-derived FPS limit.</td>
+    </tr>
+    <tr>
+        <td>mangohud-proton</td>
+        <td>Use Proton's DXVK/VKD3D limiter for managed Steam games and external Proton launches and keep the MangoHUD overlay visible. This limiter supports frame-generated output.</td>
+    </tr>
+    <tr>
+        <td>proton</td>
+        <td>Use Proton's DXVK/VKD3D limiter for managed Steam games and external Proton launches without presenting MangoHUD. This limiter supports frame-generated output.</td>
     </tr>
     <tr>
         <td>rtss</td>
@@ -2755,14 +2968,29 @@ They appear in the Frame Limiter section of the settings UI.
     </tr>
 </table>
 
+On native Linux, an active stream also prepares launch hooks in writable Proton
+installations discovered through Steam. This applies the selected Proton or
+MangoHUD provider to games started from Steam or another launcher, even when the
+game is not a Vibepollo application. Existing `user_settings.py` code and file
+permissions are preserved. The hook is inert when no stream is active and after
+host shutdown; it does not persist an FPS limit in Proton's configuration.
+
+These are launch-time renderer settings: start the game after the stream connects.
+A game already running retains its previous settings until restarted, including
+when the stream ends. Read-only Proton installations, native Linux games launched
+outside Vibepollo, and containers with a separate network namespace are not
+covered by this Proton hook. Native games launched by Vibepollo retain the
+existing MangoHUD integration. Newly installed Proton versions in known libraries
+are detected during the stream. The host log reports hook readiness or failure.
+
 ### frame_limiter_fps_limit
 
 <table>
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Optional FPS limit to apply while streaming. RTSS supports fractional values with up to
-            three decimal places; NVIDIA Control Panel rounds them to the nearest whole FPS.
+            Optional FPS limit to apply while streaming. MangoHUD and RTSS support fractional values
+            with up to three decimal places; NVIDIA Control Panel rounds them to the nearest whole FPS.
             Set to 0 to use a client display-mode override when present, otherwise the stream's requested FPS.
         </td>
     </tr>
@@ -2774,6 +3002,88 @@ They appear in the Frame Limiter section of the settings UI.
         <td>Example</td>
         <td colspan="2">@code{}
             frame_limiter_fps_limit = 59.94
+            @endcode</td>
+    </tr>
+</table>
+
+### mangohud_limiter_method
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Linux-only timing used when <code>frame_limiter_provider = mangohud</code>.
+            <code>early</code> waits before presentation for smoother pacing at the cost of
+            more latency. <code>late</code> waits after presentation for lower latency, but
+            cannot limit frame-generated output. The Proton limiter supports frame generation.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}late@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            mangohud_limiter_method = early
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="2">Choices</td>
+        <td>early</td><td>Smoother frame pacing with more latency.</td>
+    </tr>
+    <tr><td>late</td><td>Lower latency; does not limit frame-generated output.</td></tr>
+</table>
+
+### mangohud_preset
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Linux-only MangoHUD metrics and layout preset used for games launched during a stream.
+            Use <code>custom</code> to retain the metrics from the user's MangoHud configuration,
+            or select one of MangoHud's standard built-in presets.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}custom@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            mangohud_preset = 3
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="5">Choices</td>
+        <td>custom</td><td>Use the metrics and layout from the user's MangoHud configuration.</td>
+    </tr>
+    <tr><td>1</td><td>FPS only.</td></tr>
+    <tr><td>2</td><td>Horizontal.</td></tr>
+    <tr><td>3</td><td>Extended.</td></tr>
+    <tr><td>4</td><td>Detailed.</td></tr>
+</table>
+
+### mangohud_always_show_graph
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Linux-only option that keeps the MangoHud overlay visible and enables its live
+            frame-time graph for every managed game launch.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}disabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            mangohud_always_show_graph = enabled
             @endcode</td>
     </tr>
 </table>
@@ -2827,7 +3137,8 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            RTSS sync limiter mode used when applying frame limits.
+            RTSS sync limiter mode used when applying frame limits. Virtual-display streams use NVIDIA Reflex automatically unless
+            @code{}rtss_allow_virtual_display_override@endcode is enabled. An explicit per-app or per-client RTSS mode override still takes precedence.
         </td>
     </tr>
     <tr>
@@ -2856,6 +3167,30 @@ They appear in the Frame Limiter section of the settings UI.
     <tr>
         <td>nvidia reflex</td>
         <td>NVIDIA Reflex sync limiter (when supported).</td>
+    </tr>
+</table>
+
+### rtss_allow_virtual_display_override
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Allows @code{}rtss_frame_limit_type@endcode to replace the automatic NVIDIA Reflex mode for virtual-display streams.
+            Keep this disabled unless you accept the trade-off: Async, Front-edge Sync, Back-edge Sync, or any other non-Reflex
+            mode can cause massive latency when a game uses DLSS Frame Generation. Mark a game as @code{}Frame generation ->
+            Game provided@endcode to keep Reflex for that app. Explicit per-app or per-client RTSS mode overrides remain authoritative.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}disabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            rtss_allow_virtual_display_override = enabled
+            @endcode</td>
     </tr>
 </table>
 
@@ -2893,7 +3228,303 @@ They appear in the Frame Limiter section of the settings UI.
 
 @note{Legacy configurations may still use @code{rtss_disable_vsync_ullm}. Sunshine continues to accept the old key and maps it to @code{frame_limiter_disable_vsync}.}
 
+## Game Telemetry
+
+Reads live values out of a running game — health, party, score, whatever a
+profile names — and forwards them to clients that support a second screen.
+
+The reading is done by @code{scry}, a bundled helper in @code{tools/}, run as a
+separate process rather than inside Sunshine. It is **read-only**: it can observe
+a game's memory but has no way to modify it, so it cannot crash or alter the
+game it watches. It is launched in the signed-in user's session with that user's
+own token, not with the service's privileges.
+
+Values are delivered over the paired HTTPS connection as a stream of events: one
+complete snapshot when a client connects, then one event per tick carrying only
+what changed.
+
+Nothing is sent unless three things are true at once: the feature is enabled
+here, the client asking is the one currently streaming, and that client has been
+granted the **Receive game telemetry** permission. Windows only.
+
+### scry_enabled
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Enable game telemetry.
+            <br><br>
+            <b>Notes</b>:
+            <ul>
+                <li>Windows only.</li>
+                <li>Each client must also hold the <b>Receive game telemetry</b> permission; enabling this alone sends nothing.</li>
+                <li>Requires a profile that fits the running game, either from the scry-profiles registry or in @code{scry_profiles_dir}. With no profile that fits, no telemetry is produced — deliberately, since a profile that does not fit the game's memory is refused rather than guessed at.</li>
+            </ul>
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}disabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            scry_enabled = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### scry_profiles_dir
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Directory holding per-game telemetry profiles you add by hand.
+            <br><br>
+            You do not need to put anything here for games the <a href="https://github.com/DanieleS/scry-profiles">scry-profiles</a> registry covers. When a game starts, Vibepollo downloads the registry's index and only the profiles for that game's executable, checks each against its hash, and keeps them in a @code{scry-registry} directory alongside the Sunshine configuration, so they keep working offline. A profile in this directory is tried before the registry's, which is how to try one before it is published.
+            <br><br>
+            Every profile in the directory is a candidate. Which one is used is decided by testing each against the running game's memory, so extra or outdated profiles cost a failed test rather than wrong readings.
+            <br><br>
+            If empty, defaults to a @code{scry-profiles} directory alongside the Sunshine configuration.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            scry_profiles_dir = C:\ProgramData\Vibepollo\scry-profiles
+            @endcode</td>
+    </tr>
+</table>
+
+### scry_tick_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            How often the helper reads the game, in milliseconds.
+            <br><br>
+            Every tick that changes something reaches the client, and a tick that changes nothing costs nothing — the helper stays silent. Lowering this makes updates more frequent and smaller, not larger: what is sent is the difference since the last tick, so no tick can be skipped without leaving a client rendering values the game never held.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}50@endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">@code{}10 - 1000@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            scry_tick_ms = 50
+            @endcode</td>
+    </tr>
+</table>
+
+## Game Metadata
+
+Descriptions, genres, release dates, scores and cover art shown by clients. These can come from
+whichever launcher owns a game — Playnite reports what its own metadata add-ons found — but that
+leaves every library uneven: a game outside any store has nothing at all, and two games from two
+stores are described in two different ways.
+
+Pointing Vibepollo at [IGDB](https://www.igdb.com/) instead describes every game from one source.
+IGDB belongs to Twitch and uses Twitch credentials, so it needs a free application registered at
+[dev.twitch.tv](https://dev.twitch.tv/console/apps). Both halves of that credential are yours: the
+client ID is kept in this configuration file, and the client secret in a file of its own, because
+reading the settings over the API returns this file as it stands.
+
+A game is matched on its store ID where it has one — Steam, GOG, Epic, the Microsoft Store and
+itch.io are all indexed by IGDB — which is exact and cannot pick the wrong game. Ubisoft Connect,
+the EA app and Battle.net have no IGDB IDs, so their games fall back to a title search that only
+accepts an exact match. Anything still unmatched can be linked by hand from the app's page, and
+anything edited by hand is left alone by every later automatic pass.
+
+Off by default: looking a library up means telling a third party what is in it.
+
+### igdb_enabled
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Fetch game metadata from IGDB.
+            <br><br>
+            <b>Notes</b>:
+            <ul>
+                <li>Requires @code{igdb_client_id} and a client secret stored in @code{igdb_secret_file}.</li>
+                <li>Metadata a user has edited by hand is never overwritten, whether this is on or off.</li>
+                <li>Playtime and last-played are not taken from IGDB. Those come from whatever actually launches the game, which is the only thing that can know them.</li>
+            </ul>
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}disabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_enabled = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_client_id
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Client ID of a Twitch application, from <a href="https://dev.twitch.tv/console/apps">dev.twitch.tv</a>.
+            <br><br>
+            This half of the credential is not sensitive and is kept here. The paired secret is not; see @code{igdb_secret_file}.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_client_id = abcdefghijklmnopqrstuvwxyz0123
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_secret_file
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            File holding the Twitch client secret: one line, nothing else.
+            <br><br>
+            The secret is deliberately not a configuration option. Reading the configuration over the API returns this file as it stands, so a secret in it would be handed to anything allowed to read settings. Setting it through the web UI writes this file with owner-only permissions and never reads it back.
+            <br><br>
+            If empty, defaults to an @code{igdb_secret} file alongside the other per-machine state. A relative path is taken against that same directory. The value is used as written: do not quote it or double its backslashes.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_secret_file = C:\ProgramData\Vibepollo\igdb_secret
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_auto_resolve
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Look up games shortly after they appear in the library, rather than waiting to be asked.
+            <br><br>
+            Games that already carry IGDB metadata, and games edited by hand, are skipped and cost no request.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}enabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_auto_resolve = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_allow_name_match
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Fall back to searching by title for games with no store ID that IGDB indexes.
+            <br><br>
+            A title has to match exactly once case, punctuation and edition suffixes are set aside. A near miss is left undescribed rather than guessed at, because the wrong summary and the wrong cover are worse than none. Turning this off restricts matching to store IDs only.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}enabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_allow_name_match = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_cache_dir
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Directory holding fetched IGDB records. Downloaded covers and hero art are kept with the rest of the library art in the covers directory, and clearing the cache leaves them in place.
+            <br><br>
+            A cache hit costs no request, which is what keeps a library scan inside IGDB's limit of four requests a second on every run after the first.
+            <br><br>
+            If empty, defaults to an @code{igdb-cache} directory alongside the other per-machine state. A relative path is taken against that same directory. The value is used as written: do not quote it or double its backslashes.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_cache_dir = C:\ProgramData\Vibepollo\igdb-cache
+            @endcode</td>
+    </tr>
+</table>
+
+### igdb_cache_ttl_days
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            How long a cached record stays usable before it is fetched again, in days.
+            <br><br>
+            Summaries, genres and ratings drift slowly, so this can be generous. Zero disables the cache entirely, which means every lookup is a request.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}30@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            igdb_cache_ttl_days = 30
+            @endcode</td>
+    </tr>
+</table>
+
 ## NVIDIA NVENC Encoder
+
+The options in this section are shared by both NVENC implementations. On Linux, @code{nvenc} talks
+directly to the NVIDIA Video Codec SDK and is preferred during automatic probing, while
+@code{nvenc_legacy} uses FFmpeg as a rollback path.
 
 ### nvenc_preset
 
@@ -3063,6 +3694,8 @@ They appear in the Frame Limiter section of the settings UI.
             Set it to disabled to prevent split-frame encoding even when the driver would normally use it automatically.
             @note{Applies to NVENC HEVC or AV1 only. H.264 does not use split-frame encoding.}
             @note{Requires NVENC API 12.1 or newer.}
+            @note{On Linux, both the legacy FFmpeg @code{nvenc_legacy} encoder and the native
+            @code{nvenc} encoder honor the configured auto, enabled, or disabled mode.}
         </td>
     </tr>
     <tr>
@@ -3113,46 +3746,6 @@ They appear in the Frame Limiter section of the settings UI.
         <td colspan="2">@code{}
             nvenc_realtime_hags = enabled
             @endcode</td>
-    </tr>
-</table>
-
-### nvenc_split_encode
-
-<table>
-    <tr>
-        <td>Description</td>
-        <td colspan="2">
-            Split the encoding of each video frame over multiple NVENC hardware units.
-            Significantly reduces encoding latency with a marginal compression efficiency penalty.
-            This option is ignored if your GPU has a singular NVENC unit.
-            @note{This option only applies when using NVENC [encoder](#encoder) with HEVC or AV1.}
-            @note{Applies to Windows only.}
-        </td>
-    </tr>
-    <tr>
-        <td>Default</td>
-        <td colspan="2">@code{}
-            driver_decides
-            @endcode</td>
-    </tr>
-    <tr>
-        <td>Example</td>
-        <td colspan="2">@code{}
-            nvenc_split_encode = driver_decides
-            @endcode</td>
-    </tr>
-    <tr>
-        <td rowspan="3">Choices</td>
-        <td>disabled</td>
-        <td>Disabled</td>
-    </tr>
-    <tr>
-        <td>driver_decides</td>
-        <td>The NVIDIA driver will automatically enable split frame encoding when the following conditions are met: 2+ NVENC units, resolution is at least 4K, and the preset is P1-P4.</td>
-    </tr>
-    <tr>
-        <td>enabled</td>
-        <td>Enabled</td>
     </tr>
 </table>
 
@@ -3361,9 +3954,9 @@ They appear in the Frame Limiter section of the settings UI.
 or newer, which reports AMF 1.4.32. FFmpeg refuses 10-bit P010 surfaces on any older runtime, so HDR
 is not offered to clients even though Vibepollo's own AMF check only needs 1.4.23. Update your
 graphics drivers if HDR is unavailable on an AMD GPU. This limitation applies to the
-@code{amdvce_legacy} rollback encoder only; the native @code{amdvce} encoder talks to AMF directly
-and is not subject to FFmpeg's 10-bit refusal. Vibepollo carries one narrow exception for the legacy
-encoder: on a Radeon Pro 5500 XT (PCI @code{1002:7340}) running AMF 1.4.31.x, it presents 1.4.32 to
+@code{amdvce_ffmpeg} encoder only; the experimental native @code{amdvce_experimental} encoder talks to AMF
+directly and is not subject to FFmpeg's 10-bit refusal. Vibepollo carries one narrow exception for the
+FFmpeg-based encoder: on a Radeon Pro 5500 XT (PCI @code{1002:7340}) running AMF 1.4.31.x, it presents 1.4.32 to
 FFmpeg for the duration of codec validation so HEVC Main10 is not refused. The exception is applied
 automatically, has no configuration option, and does not apply to any other adapter. The detected AMF
 runtime version is written to the log on every AMD HDR HEVC attempt (search for
@@ -3376,7 +3969,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             The encoder usage profile is used to set the base set of encoding parameters.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
             @note{The other AMF options that follow will override a subset of the settings applied by your usage
             profile, but there are hidden parameters set in usage profiles that cannot be overridden elsewhere.}
         </td>
@@ -3423,7 +4016,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             The encoder rate control.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
             @warning{The `vbr_latency` option generally works best, but some bitrate overshoots may still occur.
             Enabling HRD allows all bitrate based rate controls to better constrain peak bitrate, but may result in
             encoding artifacts depending on your card.}
@@ -3480,7 +4073,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td colspan="2">
             The target quality level used by the `qvbr` rate control method, where 1 is the lowest quality and 51
             is the highest. Higher values spend more bits to preserve quality.
-            @note{This option only applies to AMD [encoders](#encoder) with `amd_rc` set to `qvbr`. Native `amdvce` automatically enables PreAnalysis with a one-frame low-latency lookahead for `qvbr`, `hqvbr`, and `hqcbr`.}
+            @note{This option only applies to AMD [encoders](#encoder) with `amd_rc` set to `qvbr`. Native `amdvce_experimental` automatically enables PreAnalysis with a one-frame low-latency lookahead for `qvbr`, `hqvbr`, and `hqcbr`.}
             @note{Leave this at `0` to keep the encoder default.}
         </td>
     </tr>
@@ -3509,7 +4102,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             Enable Hypothetical Reference Decoder (HRD) enforcement to help constrain the target bitrate.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
             @warning{HRD is known to cause encoding artifacts or negatively affect encoding quality on certain cards.}
         </td>
     </tr>
@@ -3535,7 +4128,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td colspan="2">
             The quality profile controls the tradeoff between speed and quality of encoding.
             `auto` leaves the quality property unset so the selected AMF usage preset can choose it.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
         </td>
     </tr>
     <tr>
@@ -3575,9 +4168,9 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Preanalysis can increase encoding quality at the cost of latency. Native `amdvce` uses a one-frame
+            Preanalysis can increase encoding quality at the cost of latency. Native `amdvce_experimental` uses a one-frame
             low-latency lookahead; it is enabled automatically by `qvbr`, `hqvbr`, and `hqcbr`. The setting is
-            also forwarded to `amdvce_legacy`.
+            also forwarded to `amdvce_ffmpeg`.
         </td>
     </tr>
     <tr>
@@ -3604,7 +4197,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
             allocation of more bits to smooth areas compared to more textured areas.
             `auto` leaves the property unset so the selected AMF usage preset can choose it. VBAQ is enabled
             by default.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
         </td>
     </tr>
     <tr>
@@ -3641,8 +4234,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             The entropy encoding to use.
-            @note{This option only applies when using H.264 with the amdvce
-            [encoder](#encoder).}
+            @note{This option only applies when using H.264 with an AMD [encoder](#encoder).}
         </td>
     </tr>
     <tr>
@@ -3680,7 +4272,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td colspan="2">
             Enable AV1 screen-content coding tools, which can improve efficiency and text/UI clarity for desktop and
             screen-heavy content.
-            @note{AV1 only. This option only applies to the native amdvce [encoder](#encoder) (not amdvce_legacy).}
+            @note{AV1 only. This option only applies to the native amdvce_experimental [encoder](#encoder) (not amdvce_ffmpeg).}
             @note{Leave at `auto` to use the driver default.}
         </td>
     </tr>
@@ -3718,7 +4310,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             AV1 encoding-latency tier. Lower tiers finish each frame faster at the cost of higher power draw.
-            @note{AV1 only. This option only applies to the native amdvce [encoder](#encoder) (not amdvce_legacy).}
+            @note{AV1 only. This option only applies to the native amdvce_experimental [encoder](#encoder) (not amdvce_ffmpeg).}
             @note{Leave at `auto` to use the driver default.}
         </td>
     </tr>
@@ -4111,7 +4703,128 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
     </tr>
 </table>
 
+## Steam Integration
+
+### steam_enabled
+
+Enables local Steam library discovery, synchronization, and launch support. Disabled by default on all platforms; it can be combined with `playnite_enabled` or used by itself.
+
+Default: `false`
+
+### steam_auto_sync
+
+Synchronizes the games selected by the Steam policy into `apps.json` when
+configuration is applied and checks for manifest, local play-history, library,
+metadata, and artwork changes every 30 seconds while Vibepollo is running.
+Steam-managed entries use stable Steam IDs; manual and Playnite-managed entries
+are preserved.
+
+Default: `false`
+
+### steam_sync_all_installed
+
+Synchronizes every installed Steam game. Disable this to use the recent-game
+count and age policy instead.
+
+Default: `false`
+
+### steam_recent_games
+
+Maximum number of installed games to synchronize, ordered by Steam's local
+`LastPlayed` timestamp, when `steam_sync_all_installed` is disabled. Set to `0`
+to disable recent-game synchronization. Exclusions and tool filtering apply
+before the limit.
+
+Default: `10`
+
+### steam_recent_max_age_days
+
+Excludes games last played more than this many days ago from recent-game
+synchronization. Set to `0` for no age limit.
+
+Default: `30`
+
+### steam_autosync_remove_uninstalled
+
+When enabled, Steam-managed entries whose installed manifest disappears are
+removed during synchronization. Manual and Playnite-managed entries are never
+removed by this provider. Recent-only synchronization always removes managed
+games that leave the selected recent set so the configured limit remains
+effective.
+
+Default: `true`
+
+### steam_exclude_games
+
+JSON array of Steam app IDs (or objects containing `id` and optional `name`) to
+exclude from Steam synchronization. A legacy comma-separated list is accepted
+as well. Object names are used only when no ID is supplied, so a game rename
+cannot accidentally exclude a different app. Example:
+
+`steam_exclude_games = [{"id":"228980","name":"Steamworks Common Redistributables"},{"id":"570"}]`
+
+Steam compatibility/runtime/tool manifests are also excluded by default based
+on their manifest type and known runtime IDs. Set `steam_include_tools = true`
+to import those records intentionally.
+
+### steam_include_tools
+
+Includes Steam manifests marked as tools, runtimes, configuration, DLC, music,
+or video. This is intended for users who deliberately want those records in
+their catalog.
+
+Default: `false`
+
+The manual application picker shows installed, importable Steam games by
+default, matching the Playnite picker. Vibeshine also reads Steam's local user
+play-history and `appinfo.vdf` caches to rank installed games for recent-game
+synchronization without requiring a Steam Web API key or a public profile.
+
+## Lutris Integration
+
+### lutris_enabled
+
+Enables local Lutris library discovery, synchronization, and launch support on
+Linux. Steam remains enabled independently and is authoritative for Steam games.
+
+Default: `true` on Linux
+
+### lutris_auto_sync
+
+Synchronizes installed Lutris games into `apps.json` when configuration is
+applied and checks the Lutris database every 30 seconds.
+
+Default: `true`
+
+### lutris_autosync_remove_uninstalled
+
+Removes Lutris-managed applications when their installed record disappears.
+Manual, Steam-managed, and Playnite-managed entries are preserved.
+
+Default: `true`
+
+### lutris_exclude_games
+
+JSON array of Lutris numeric game IDs, or objects containing `id` and optional
+`name`, to exclude from synchronization. A legacy comma-separated list is also
+accepted.
+
+### lutris_include_steam
+
+Includes Lutris records backed by Steam. This is disabled by default because
+the direct Steam provider has richer metadata and lifecycle information. If
+enabled, a direct Steam entry with the same Steam app ID wins, so duplicate
+catalog entries are not created.
+
+Default: `false`
+
 ## Playnite Integration
+
+### playnite_enabled
+
+Enables Playnite library synchronization and launch support on Windows. Disable this setting to use Steam by itself, or leave both providers enabled to combine their catalogs. Playnite is unavailable on Linux.
+
+Default: `true` on Windows
 
 ### playnite_sync_all_installed
 
@@ -4174,6 +4887,32 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
     </tr>
 </table>
 
+### playnite_sync_metadata
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td>
+            Controls whether the descriptive metadata Playnite holds for a game (description, genres,
+            developers and publishers, release date, community and critic scores, background art) is
+            written onto the synced application. When <code>true</code>, Playnite describes a game
+            unless IGDB or a manual edit already claimed it. Set it to <code>false</code> to keep
+            Playnite out of those fields entirely, so new games stay undescribed until IGDB
+            (see <a href="#igdb_enabled">igdb_enabled</a>) fills them in; games Playnite already
+            described keep their current metadata until an IGDB pass with "Re-fetch everything" replaces it.
+            Activity data (last played, playtime) is always synced, since only Playnite knows it.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td>@code{}true@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td>@code{}playnite_sync_metadata = false@endcode</td>
+    </tr>
+</table>
+
 ### playnite_sync_plugins
 
 <table>
@@ -4228,23 +4967,23 @@ playnite_exclude_categories = ["Steam", {"id": "deck", "name": "Steam Deck"}]
 
 ### amd_ltr_frames
 
-Sets the number of long-term reference frames used by the native AMD encoder. Leave this at the automatic default unless a client or driver-specific recovery workflow requires a fixed value.
+Sets the number of long-term reference frames used by the experimental native AMD encoder. Leave this at the automatic default unless a client or driver-specific recovery workflow requires a fixed value.
 
 ### amd_input_queue_size
 
-Sets the native AMD encoder input queue depth. A positive explicit value overrides automatic low-latency queue selection.
+Sets the experimental native AMD encoder input queue depth. A positive explicit value overrides automatic low-latency queue selection.
 
 ### amd_smart_access_video
 
-Controls AMD SmartAccess Video when the installed AMF runtime exposes that capability. Use `auto` to leave the driver default unchanged.
+Controls SmartAccess Video for the experimental native AMD encoder when the installed AMF runtime exposes that capability. Use `auto` to leave the driver default unchanged.
 
 ### amd_lowlatency_mode
 
-Controls AMD's native encoder low-latency mode. Use `auto` to leave the driver default unchanged.
+Controls the experimental native AMD encoder's low-latency mode. Use `auto` to leave the driver default unchanged.
 
 ### amd_high_motion_quality_boost
 
-Controls AMD's high-motion quality boost. Use `auto` to leave the driver default unchanged.
+Controls high-motion quality boost for the experimental native AMD encoder. Use `auto` to leave the driver default unchanged.
 
 ### dd_paused_virtual_display_timeout_secs
 
@@ -4252,7 +4991,7 @@ Sets how long a paused virtual display may remain ready before the display helpe
 
 ### dd_virtual_display_scale
 
-Sets the virtual-display scale override. Leave it unset or at the automatic setting to use the recommended scale for the requested display mode.
+Sets the virtual-display scale override. The default, `0` (Retain), keeps your chosen scale for future streams. On Windows, connect to the virtual display and choose **Scale** in **Settings > System > Display**; subsequent streams using that virtual display retain your choice. Choose an explicit percentage to change desktop scaling without changing the requested pixel resolution. On Windows, scaling is applied through the DPI setter without changing the virtual monitor's reported physical size. The optional `-1` setting chooses a scale based on resolution.
 
 ### dd_wa_hdr_toggle
 
@@ -4332,7 +5071,7 @@ Controls whether Vibepollo advertises itself for local-network discovery.
 
 ### enable_input_only_mode
 
-Allows clients to connect in input-only mode without starting a video stream.
+Enables the Remote Input entry for new input-only sessions. Defaults to enabled when absent to preserve existing synthetic Remote Input access. Set `disabled` to hide the entry and reject cached Remote Input launches. Existing sessions can still disconnect; Remote Monitor and game sessions are unaffected.
 
 ### enable_pairing
 
@@ -4372,7 +5111,7 @@ Enables legacy application ordering for clients and integrations that require it
 
 ### limit_framerate
 
-Limits capture and encoding to the requested stream frame rate.
+When enabled, limits encoding to the launch-requested stream cadence while retaining the separately announced capture cadence used by Artemis Warp. Fractional frame rates are preserved. When disabled, encoding follows the announced cadence. Warp bitrate compensation remains subject to `max_bitrate`.
 
 ### nvenc_intra_refresh
 
@@ -4402,3 +5141,30 @@ Sets the maximum network packet size used for streaming. Set `0` to use the defa
   <summary></summary>
   [TOC]
 </details>
+
+
+## Remote Monitor lifecycle
+
+### remote_monitor_mute_audio
+
+Send picture and input without sending game or desktop audio to the Remote Monitor client.
+
+Accepts `enabled` or `disabled`.
+
+### remote_monitor_disconnect_on_stream_end
+
+Remove the client's extra monitor when its stream finishes. Leave this off to keep the monitor ready for Resume.
+
+Accepts `enabled` or `disabled`.
+
+### remote_monitor_disconnect_on_client_disconnect
+
+Remove the extra monitor as soon as the client connection drops or you use Disconnect, even if the monitor was waiting for Resume.
+
+Accepts `enabled` or `disabled`.
+
+### remote_monitor_terminate_on_first_request
+
+Moonlight needs Vibepollo to advertise the host as available to extra clients so it can show the running game and Terminate control. Leave this off to require launching Terminate twice; the original game client is not affected.
+
+Accepts `enabled` or `disabled`.

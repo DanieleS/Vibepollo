@@ -205,6 +205,7 @@ namespace http {
 
   std::string unique_id;
   uuid_util::uuid_t uuid;
+  bool credentials_created_this_run = false;
   net::net_e origin_web_ui_allowed;
 
 #ifdef _WIN32
@@ -224,8 +225,17 @@ namespace http {
       config::nvhttp.pkey = (dir / ("pkey-"s + unique_id)).string();
     }
 
-    if ((!fs::exists(config::nvhttp.pkey) || !fs::exists(config::nvhttp.cert)) &&
-        create_creds(config::nvhttp.pkey, config::nvhttp.cert)) {
+    const bool had_credential_material = fs::exists(config::nvhttp.pkey) || fs::exists(config::nvhttp.cert);
+    if ((!fs::exists(config::nvhttp.pkey) || !fs::exists(config::nvhttp.cert))) {
+      if (create_creds(config::nvhttp.pkey, config::nvhttp.cert)) {
+        return -1;
+      }
+      credentials_created_this_run = !had_credential_material;
+    }
+    // Credential inspection precedes nvhttp pairing-state startup. Restore its
+    // snapshot here, before malformed state could abort startup or enable setup.
+    if (!clean_slate && !statefile::recover_credentials(config::sunshine.credentials_file)) {
+      BOOST_LOG(error) << "Credential state and its recovery copy are unavailable; refusing credential setup.";
       return -1;
     }
     switch (user_creds_state(config::sunshine.credentials_file)) {
@@ -397,7 +407,10 @@ namespace http {
       return -1;
     }
 
-    fs::permissions(cert_path, fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read | fs::perms::owner_write, fs::perm_options::replace, err_code);
+    // Keep the certificate owner-only. Only this process reads it (clients
+    // receive it during pairing), and the Linux machine host refuses to start
+    // when anything under its state directory is readable by other accounts.
+    fs::permissions(cert_path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, err_code);
 
     if (err_code) {
       BOOST_LOG(error) << "Couldn't change permissions of ["sv << config::nvhttp.cert << "] :"sv << err_code.message();
@@ -421,9 +434,12 @@ namespace http {
       return false;
     }
 
-    FILE *fp = fopen(file.c_str(), "wb");
+    // The body lands next to the target and is renamed over it only once the transfer is
+    // complete, so a failed or cut-off download never leaves a file that reads as a good one.
+    const std::string partial = file + ".part";
+    FILE *fp = fopen(partial.c_str(), "wb");
     if (!fp) {
-      BOOST_LOG(error) << "Couldn't open ["sv << file << ']';
+      BOOST_LOG(error) << "Couldn't open ["sv << partial << ']';
       curl_easy_cleanup(curl);
       return false;
     }
@@ -435,6 +451,12 @@ namespace http {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    // An HTTP error status is a failed download, not a file: without this the error page is
+    // written out and reported as success. The timeouts keep a stalled server from holding
+    // the caller forever.
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 #ifdef _WIN32
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
 #endif
@@ -443,8 +465,20 @@ namespace http {
       BOOST_LOG(error) << "Couldn't download ["sv << url << ", code:" << result << ']';
     }
     curl_easy_cleanup(curl);
-    fclose(fp);
-    return result == CURLE_OK;
+    const bool closed = fclose(fp) == 0;
+
+    std::error_code ec;
+    if (result != CURLE_OK || !closed) {
+      fs::remove(partial, ec);
+      return false;
+    }
+    fs::rename(partial, file, ec);
+    if (ec) {
+      BOOST_LOG(error) << "Couldn't move download into ["sv << file << "]: "sv << ec.message();
+      fs::remove(partial, ec);
+      return false;
+    }
+    return true;
   }
 
   bool configure_curl_tls(CURL *curl) {

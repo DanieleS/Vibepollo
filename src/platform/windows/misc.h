@@ -49,6 +49,13 @@ namespace platf {
   }
 
   /**
+   * @brief Quote/escape an argument according to the Windows parsing convention.
+   * @param argument The raw argument to process.
+   * @return An argument string suitable for use by CreateProcess().
+   */
+  std::wstring escape_argument(const std::wstring &argument);
+
+  /**
    * @brief Check if the current process is running under the SYSTEM account.
    */
   bool is_running_as_system();
@@ -66,12 +73,6 @@ namespace platf {
   bool is_lock_screen_active();
 
   /**
-   * @brief Check whether the active input desktop is the normal interactive desktop.
-   * @return true when the current desktop is Default, false otherwise.
-   */
-  bool is_default_input_desktop_active();
-
-  /**
    * @brief Cache the interactive user's screen saver enabled state before launching an app.
    * @details Repeated calls preserve the first captured value until it is restored.
    */
@@ -81,6 +82,10 @@ namespace platf {
    * @brief Restore the screen saver enabled state cached by cache_screen_saver_state().
    */
   void restore_screen_saver_state();
+
+  // Register a pause worker before restoring immediately. Invoke the returned
+  // completion once it exits, or if it cannot start; active resumes are kept.
+  std::function<void()> deferred_screen_saver_restore();
 
   /**
    * @brief Launch a process with user impersonation (for use when running as SYSTEM).
@@ -160,6 +165,14 @@ namespace platf {
    * @return true if the ViGEmBus driver file is present, false otherwise.
    */
   bool is_vigem_installed(std::string *version_out = nullptr);
+
+  /**
+   * @brief Check whether Vibeshine's own virtual gamepad driver is usable.
+   * @details Probes the driver's private control interface, so it reports what a stream would
+   *          actually get rather than merely whether files are present.
+   * @return true when a virtual controller can be created without ViGEmBus.
+   */
+  bool is_virtual_gamepad_driver_available();
 
   /**
    * @brief Check whether the Sunshine Vulkan HDR implicit layer is registered for the system.

@@ -114,7 +114,7 @@ const defaultGroups = [
       mouse: 'enabled',
       high_resolution_scrolling: 'enabled',
       native_pen_touch: 'enabled',
-      enable_input_only_mode: 'disabled',
+      enable_input_only_mode: 'enabled',
       forward_rumble: 'enabled',
       keybindings: '[0x10,0xA0,0x11,0xA2,0x12,0xA4]',
       ds5_inputtino_randomize_mac: true,
@@ -125,6 +125,7 @@ const defaultGroups = [
     name: 'Audio/Video',
     options: {
       audio_sink: '',
+      audio_sink_capture_only: 'disabled',
       virtual_sink: '',
       install_steam_audio_drivers: 'enabled',
       stream_audio: 'enabled',
@@ -135,6 +136,11 @@ const defaultGroups = [
       output_name: '',
       virtual_display_mode: 'per_client',
       virtual_display_layout: 'exclusive',
+      remote_monitor_mute_audio: false,
+      remote_monitor_disconnect_on_stream_end: false,
+      remote_monitor_disconnect_on_client_disconnect: false,
+      remote_monitor_terminate_on_first_request: false,
+      remote_monitor_confirm_app_replacement: true,
       dd_configuration_option: 'verify_only',
       dd_resolution_option: 'auto',
       dd_manual_resolution: '',
@@ -153,7 +159,7 @@ const defaultGroups = [
       dd_use_sunshine_virtual_display_driver: true,
       vulkan_hdr_layer: true,
       dd_activate_virtual_display: false,
-      dd_virtual_display_scale: -1,
+      dd_virtual_display_scale: 0,
       dd_virtual_display_permanent_count: 0,
       dd_mode_remapping: {
         mixed: [] as Array<Record<string, string>>,
@@ -217,6 +223,7 @@ const defaultGroups = [
       playnite_autosync_require_replacement: true,
       playnite_autosync_remove_uninstalled: true,
       playnite_exclude_hidden_games: true,
+      playnite_sync_metadata: true,
       playnite_focus_attempts: 3,
       playnite_focus_timeout_secs: 15,
       playnite_focus_exit_on_first: false,
@@ -254,10 +261,31 @@ const defaultGroups = [
       frame_limiter_enable: false,
       frame_limiter_provider: 'auto',
       frame_limiter_fps_limit: 0,
+      mangohud_limiter_method: 'late',
       frame_limiter_auto_virtual_framegen: 'enabled',
       rtss_install_path: '',
       rtss_frame_limit_type: 'async',
       frame_limiter_disable_vsync: false,
+    },
+  },
+  {
+    id: 'telemetry',
+    name: 'Game Telemetry',
+    options: {
+      scry_enabled: false,
+      scry_profiles_dir: '',
+      scry_tick_ms: 50,
+    },
+  },
+  {
+    id: 'metadata',
+    name: 'Game Metadata',
+    options: {
+      igdb_enabled: false,
+      igdb_client_id: '',
+      igdb_auto_resolve: true,
+      igdb_allow_name_match: true,
+      igdb_cache_ttl_days: 30,
     },
   },
   {
@@ -613,6 +641,9 @@ export const useConfigStore = defineStore('config', () => {
       if (!Object.prototype.hasOwnProperty.call(data, 'frame_limiter_provider')) {
         (data as Record<string, unknown>)['frame_limiter_provider'] = 'auto';
       }
+      if (!Object.prototype.hasOwnProperty.call(data, 'mangohud_limiter_method')) {
+        (data as Record<string, unknown>)['mangohud_limiter_method'] = 'late';
+      }
       const virtualCaptureKey = 'frame_limiter_auto_virtual_framegen';
       if (!Object.prototype.hasOwnProperty.call(data, virtualCaptureKey)) {
         (data as Record<string, unknown>)[virtualCaptureKey] = 'enabled';
@@ -650,6 +681,7 @@ export const useConfigStore = defineStore('config', () => {
       'playnite_autosync_require_replacement',
       'playnite_autosync_remove_uninstalled',
       'playnite_exclude_hidden_games',
+      'playnite_sync_metadata',
       'playnite_focus_exit_on_first',
       'playnite_fullscreen_entry_enabled',
     ];

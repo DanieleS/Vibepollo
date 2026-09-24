@@ -70,6 +70,10 @@ namespace platf::playnite::sync {
   const Game *match_app_against_indexes(const nlohmann::json &app, const std::unordered_map<std::string, GameRef> &by_id, const std::unordered_map<std::string, GameRef> &by_exe, const std::unordered_map<std::string, GameRef> &by_dir, const std::unordered_map<std::string, GameRef> &by_unique_name);
   void mark_app_as_playnite_auto(nlohmann::json &app, int flags);
   void add_missing_auto_entries(nlohmann::json &root, const std::vector<Game> &selected, const std::unordered_set<std::string> &matched_ids, const std::unordered_map<std::string, int> &source_flags, bool &changed, MetadataUpdater metadata_updater = nullptr);
+  // Whether a closed snapshot holds the whole library. The plugin announces how many games it
+  // sent; any other number arriving means a batch was lost on the way. A negative count is a
+  // plugin too old to announce one, which is trusted as it always was.
+  bool snapshot_is_complete(std::size_t received, int announced);
   // library_complete tells whether all_games is a full library snapshot; when false, auto apps
   // missing from it are kept because the rest of the library may simply not have arrived yet.
   void autosync_reconcile(nlohmann::json &root, const std::vector<Game> &all_games, bool library_complete, int recentN, int recent_age_days, int delete_after_days, bool require_replacement, bool sync_all_installed, const std::vector<std::string> &categories, const std::vector<std::string> &include_plugins, const std::vector<std::string> &exclude_categories, const std::vector<std::string> &exclude_ids, const std::vector<std::string> &exclude_plugins, bool remove_uninstalled, bool exclude_hidden, bool &changed, std::size_t &matched_out, bool manage_membership = true, MetadataUpdater metadata_updater = nullptr);
