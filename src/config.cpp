@@ -1136,6 +1136,7 @@ namespace config {
     const audio_t default_audio = audio;
     const stream_t default_stream = stream;
     const input_t default_input = input;
+    const igdb_t default_igdb = igdb;
     const frame_limiter_t default_frame_limiter = frame_limiter;
     const rtss_t default_rtss = rtss;
     const lossless_scaling_t default_lossless_scaling = lossless_scaling;
@@ -1155,6 +1156,10 @@ namespace config {
       audio = default_audio;
       stream = default_stream;
       input = default_input;
+      // Reset like every other section: the web UI omits keys that hold their default, so a
+      // setting turned back to its default is absent from the file and would otherwise keep
+      // the value it had before the hot apply.
+      igdb = default_igdb;
       frame_limiter = default_frame_limiter;
       rtss = default_rtss;
       lossless_scaling = default_lossless_scaling;
