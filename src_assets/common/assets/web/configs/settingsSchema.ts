@@ -1271,4 +1271,19 @@ export const settingsDestinations: Array<{
     platform: 'linux',
     keys: ['mangohud_preset', 'mangohud_always_show_graph', 'overlay'],
   },
+  {
+    // Not a library provider, so it has no #integration- anchor: the section is there on every
+    // host, and its own settings form owns these keys.
+    labelKey: 'ui.metadata.title',
+    to: '/integrations#game-metadata',
+    keys: [
+      'igdb_enabled',
+      'igdb_client_id',
+      'igdb_secret_file',
+      'igdb_auto_resolve',
+      'igdb_allow_name_match',
+      'igdb_cache_dir',
+      'igdb_cache_ttl_days',
+    ],
+  },
 ];

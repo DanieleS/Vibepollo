@@ -2194,7 +2194,7 @@ function libraryRequest(
          here rather than in the component, because the classes it needs are scoped to this
          file and would style nothing from inside a child. -->
     <section class="integration-list" :aria-label="t('ui.metadata.title')">
-      <article class="integration-row" aria-labelledby="integration-metadata">
+      <article id="game-metadata" class="integration-row" aria-labelledby="integration-metadata">
         <span class="integration-row__icon" aria-hidden="true">
           <UiIcon name="library" :size="20" />
         </span>
@@ -2203,7 +2203,7 @@ function libraryRequest(
             <h2 id="integration-metadata">{{ t('ui.metadata.title') }}</h2>
           </div>
           <p>{{ t('ui.metadata.description') }}</p>
-          <MetadataSettings :platform="system.metadata?.platform || ''" />
+          <MetadataSettings />
         </div>
       </article>
     </section>
