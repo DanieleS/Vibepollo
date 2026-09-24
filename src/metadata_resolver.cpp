@@ -324,9 +324,10 @@ namespace metadata::resolver {
      * @brief Run one pass without holding the apps file across the network.
      *
      * Resolving takes as long as IGDB takes, which is far too long to hold a lock every app
-     * endpoint needs. So the pass works on a copy, then re-reads the file and copies the
-     * results onto whatever is there now -- an app the user deleted or renamed meanwhile keeps
-     * the user's version, and only metadata is carried over.
+     * endpoint needs. So the pass works on a copy, then re-reads the file and carries over
+     * only what it changed, through merge_resolved: an app the user deleted meanwhile stays
+     * deleted, one the user edited or re-linked keeps the user's version, and playtime a
+     * library sync wrote in the meantime is not rolled back to the copy's.
      */
     void run_pass(bool force) {
       nlohmann::json snapshot;
@@ -334,9 +335,11 @@ namespace metadata::resolver {
         std::lock_guard apps_lock {confighttp::apps_file_mutex()};
         snapshot = read_apps_file();
       }
-      if (!snapshot.is_object()) {
+      if (!snapshot.is_object() || !snapshot.contains("apps") || !snapshot["apps"].is_array()) {
         return;
       }
+      // What the pass started from, so the write-back can tell what the pass itself changed.
+      const auto original = snapshot;
       const auto summary = resolve_all(snapshot, force);
       if (!summary.changed) {
         return;
@@ -349,6 +352,10 @@ namespace metadata::resolver {
       if (!current.is_object() || !current.contains("apps") || !current["apps"].is_array()) {
         return;
       }
+      // resolve_all edits nodes in place and never reorders them, so the same index names the
+      // same app before and after the pass.
+      const auto &before_apps = original["apps"];
+      const auto &after_apps = snapshot["apps"];
       bool changed = false;
       for (auto &app : current["apps"]) {
         if (!app.is_object()) {
@@ -358,21 +365,13 @@ namespace metadata::resolver {
         if (key.empty()) {
           continue;
         }
-        for (const auto &resolved : snapshot["apps"]) {
-          if (!resolved.is_object() || node_key(resolved) != key) {
+        for (std::size_t index = 0; index < after_apps.size() && index < before_apps.size(); ++index) {
+          if (node_key(after_apps[index]) != key) {
             continue;
           }
-          const auto meta = read_from_app(resolved);
-          if (meta.source != "igdb") {
-            break;
+          if (before_apps[index] != after_apps[index]) {
+            changed = merge_resolved(app, before_apps[index], after_apps[index]) || changed;
           }
-          write_to_app(app, meta);
-          // The cover follows the record only where the resolver was allowed to set one.
-          if (auto it = resolved.find("image-path"); it != resolved.end() && it->is_string() &&
-                                                     cover_is_ours_to_set(app)) {
-            app["image-path"] = *it;
-          }
-          changed = true;
           break;
         }
       }
