@@ -204,10 +204,27 @@ namespace platf::scry {
       return helper;
     }
 
+    /// The scry settings, copied in one go.
+    ///
+    /// A hot apply rewrites config::scry in place: it resets it to the defaults
+    /// and parses the file again, under the apply gate. Read without the gate,
+    /// the supervisor could copy profiles_dir while it was being written, which
+    /// is undefined behaviour on a std::string, or see `enabled` false for the
+    /// instant between the reset and the parse and drop a running game.
+    struct settings_t {
+      bool enabled {false};
+      std::string profiles_dir;
+      int tick_ms {50};
+    };
+
+    settings_t read_settings() {
+      auto gate = config::acquire_apply_read_gate();
+      return settings_t {config::scry.enabled, config::scry.profiles_dir, config::scry.tick_ms};
+    }
+
     /// Where per-game profiles live. Configurable because Phase 1 has no
     /// registry: a user (or a support tech) drops profiles in a folder by hand.
-    std::optional<std::filesystem::path> profiles_dir() {
-      const auto &configured = config::scry.profiles_dir;
+    std::optional<std::filesystem::path> profiles_dir(const std::string &configured) {
       if (configured.empty()) {
         return std::nullopt;
       }
@@ -455,13 +472,13 @@ namespace platf::scry {
      * changed under us, or shutdown was requested. Which of those it was is the
      * return value.
      */
-    helper_end_e run_helper(const std::filesystem::path &helper, const std::filesystem::path &profiles, const target_t &target) {
+    helper_end_e run_helper(const std::filesystem::path &helper, const std::filesystem::path &profiles, const target_t &target, int tick_ms) {
       // The path goes through the same escaping as every other command line here. Wrapped in bare
       // quotes, a directory entered with a trailing backslash ended the argument with \" — a
       // literal quote under the argv rules — and swallowed the rest of the line into the path.
       std::wstring args = L"watch --pid " + std::to_wstring(target.pid) +
                           L" --profiles " + escape_argument(profiles.wstring()) +
-                          L" --format json --tick " + std::to_wstring(std::clamp(config::scry.tick_ms, 10, 1000));
+                          L" --format json --tick " + std::to_wstring(std::clamp(tick_ms, 10, 1000));
 
       helper_pipes_t pipes;
       ProcessHandler child(true);
@@ -557,14 +574,15 @@ namespace platf::scry {
       std::optional<target_t> failed_target;
 
       while (!g_stop.load(std::memory_order_acquire)) {
-        if (!config::scry.enabled) {
+        const auto settings = read_settings();
+        if (!settings.enabled) {
           clear_snapshot();
           interruptible_wait(SUPERVISE_INTERVAL);
           continue;
         }
 
         const auto helper = helper_path();
-        const auto profiles = profiles_dir();
+        const auto profiles = profiles_dir(settings.profiles_dir);
         const auto target = resolve_target();
 
         if (!helper || !profiles || !target) {
@@ -579,7 +597,7 @@ namespace platf::scry {
         }
 
         const auto started_at = std::chrono::steady_clock::now();
-        const auto end = run_helper(*helper, *profiles, *target);
+        const auto end = run_helper(*helper, *profiles, *target, settings.tick_ms);
         const auto ran_for = std::chrono::steady_clock::now() - started_at;
 
         // Only a helper that gave up by itself says anything about the target. One we stopped
@@ -625,6 +643,10 @@ namespace platf::scry {
     g_stop.store(false, std::memory_order_release);
     g_thread = std::thread(supervisor_loop);
     return std::make_unique<deinit_t>();
+  }
+
+  bool enabled() {
+    return read_settings().enabled;
   }
 
   snapshot_t latest() {

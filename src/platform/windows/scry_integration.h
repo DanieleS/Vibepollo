@@ -142,6 +142,11 @@ namespace platf::scry {
   std::unique_ptr<::platf::deinit_t> start();
 
   /**
+   * @brief Whether telemetry is switched on, read consistently with a config hot apply.
+   */
+  bool enabled();
+
+  /**
    * @brief The current picture. Thread-safe; cheap enough to poll.
    */
   snapshot_t latest();

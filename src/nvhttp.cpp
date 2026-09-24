@@ -5911,7 +5911,7 @@ namespace nvhttp {
       return;
     }
 
-    if (!config::scry.enabled || !named_cert_p) {
+    if (!platf::scry::enabled() || !named_cert_p) {
       response->write(SimpleWeb::StatusCode::client_error_not_found);
       response->close_connection_after_response = true;
       return;
@@ -5961,7 +5961,7 @@ namespace nvhttp {
         // The permission and the feature were checked when the stream opened,
         // but either can be taken away while it runs: revoking "Receive game
         // telemetry" for a client has to stop what it is already receiving.
-        if (!config::scry.enabled || !has_client_perm(get_client_snapshot_by_uuid(uuid), PERM::telemetry_read)) {
+        if (!platf::scry::enabled() || !has_client_perm(get_client_snapshot_by_uuid(uuid), PERM::telemetry_read)) {
           return;
         }
 
