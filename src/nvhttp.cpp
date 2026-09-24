@@ -2163,7 +2163,7 @@ namespace nvhttp {
                   named_cert_p->uuid = uuid_util::uuid_t::generate().string();
                   named_cert_p->display_mode = "";
                   named_cert_p->output_name_override.clear();
-                  named_cert_p->perm = PERM::_all;
+                  named_cert_p->perm = PERM::_all_unrequested;
                   named_cert_p->enable_legacy_ordering = true;
                   named_cert_p->allow_client_commands = true;
                   named_cert_p->always_use_virtual_display = false;
@@ -2186,7 +2186,7 @@ namespace nvhttp {
               named_cert_p->output_name_override = el.value("output_name_override", "");
               named_cert_p->virtual_display_mode_override = el.value("virtual_display_mode", "");
               named_cert_p->virtual_display_layout_override = el.value("virtual_display_layout", "");
-              named_cert_p->perm = (PERM) (util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t) PERM::_all)) & PERM::_all;
+              named_cert_p->perm = (PERM) (util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t) PERM::_all_unrequested)) & PERM::_all;
               // Imported Vibeshine pairings use a boolean instead of Apollo's
               // permission mask. Never reactivate a disabled imported client.
               if (!util::get_non_string_json_value<bool>(el, "enabled", true)) {
@@ -3208,7 +3208,7 @@ namespace nvhttp {
           first_client = client_root.named_devices.empty();
         }
         if (first_client) {
-          named_cert_p->perm = PERM::_all;
+          named_cert_p->perm = PERM::_all_unrequested;
         } else {
           named_cert_p->perm = PERM::_default;
         }
