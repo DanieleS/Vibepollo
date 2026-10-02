@@ -754,7 +754,7 @@ namespace egl {
     if (xrgb.direct_import_required) {
       static std::atomic_bool warned {false};
       if (!warned.exchange(true, std::memory_order_relaxed)) {
-        BOOST_LOG(warning) << "Managed Vibeshine framebuffer rejected direct GPU import (fourcc="
+        BOOST_LOG(warning) << "Managed virtual framebuffer rejected direct GPU import (fourcc="
                            << util::hex(xrgb.fourcc).to_string_view() << ", modifier="
                            << util::hex(xrgb.modifier).to_string_view()
                            << "); using the linear CPU upload fallback.";

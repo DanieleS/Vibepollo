@@ -42,7 +42,9 @@ namespace VDISPLAY {
 
 #endif
 
+#define VIRTUAL_DISPLAY_UUID "8902CB19-674A-403D-A587-41B092E900BA"
 #define FALLBACK_DESKTOP_UUID "EAAC6159-089A-46A9-9E24-6436885F6610"
+#define REMOTE_INPUT_UUID "8CB5C136-DA67-4F99-B4A1-F9CD35005CF4"
 #define TERMINATE_APP_UUID "E16CBE1B-295D-4632-9A76-EC4180C857D3"
 
 namespace bp = boost_process_shim;
@@ -217,6 +219,8 @@ namespace proc {
         _apps(std::move(apps)) {
     }
 
+    void launch_input_only();
+
     int execute(const ctx_t &_app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
 
     /**
@@ -280,6 +284,9 @@ namespace proc {
     bp::environment _env;
     std::shared_ptr<rtsp_stream::launch_session_t> _launch_session;
     std::shared_ptr<config::input_t> _saved_input_config;
+    // Entries inserted by a prior stream must not leak into a later launch,
+    // while values loaded from apps.json remain explicit user configuration.
+    std::unordered_set<std::string> _stream_owned_environment_keys;
     std::vector<ctx_t> _apps;
     ctx_t _app;
     std::chrono::steady_clock::time_point _app_launch_time;
@@ -295,7 +302,6 @@ namespace proc {
     std::shared_ptr<platf::steam::lifecycle::process_controller> _steam_process_controller;
     bool _steam_tracking_active {false};
     bool _steam_tracking_associated {false};
-    platf::steam::lifecycle::exit_latch _steam_tracking_exit;
     std::chrono::steady_clock::time_point _steam_tracking_deadline {};
     std::chrono::steady_clock::time_point _steam_last_tracking_poll {};
 
@@ -376,6 +382,8 @@ namespace proc {
 
   extern proc_t proc;
 
+  extern int input_only_app_id;
+  extern std::string input_only_app_id_str;
   extern int terminate_app_id;
   extern std::string terminate_app_id_str;
 }  // namespace proc

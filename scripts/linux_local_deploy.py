@@ -38,6 +38,7 @@ CONTROLLER = 'vibepollo-session-controller.service'
 SOCKET = 'vibepollo-session-exec.socket'
 HELPERS = (
     'app-supervisor', 'display-power', 'global-limiter.py', 'host',
+    'package-preflight',
     'kwin-session-environment', 'machine-host', 'profile-import', 'provider-scan',
     'session-broker', 'session-controller', 'session-exec', 'steam-launch',
 )
@@ -48,16 +49,19 @@ FIXED = {
     'usr/bin/vibepollo', 'usr/bin/vibepollo-mangohud',
     'usr/lib/libvibeshine-kwin-gpu.so',
     'usr/lib/modules-load.d/60-sunshine.conf',
+    'usr/lib/modules-load.d/70-vibeshine-ds5.conf',
     'usr/lib/udev/rules.d/60-sunshine.rules',
     'usr/lib/udev/rules.d/70-vibepollo-uinput.rules',
     'usr/lib/sysusers.d/vibepollo.conf', 'usr/lib/sysusers.d/vibeshine-vkms.conf',
     'usr/lib/firewalld/services/vibepollo.xml', 'etc/ufw/applications.d/vibepollo',
     'usr/share/pipewire/pipewire.conf.d/50-vibepollo-audio.conf',
     'usr/share/metainfo/io.github.Nonary.vibepollo.metainfo.xml',
+    'usr/share/vibepollo/arch-package-hooks',
+    'usr/share/libalpm/hooks/00-vibepollo-quiesce.hook',
 }
 FIXED.update(f'usr/libexec/vibeshine/vibepollo-{name}' for name in HELPERS)
 FIXED.update(f'usr/libexec/vibeshine/vibeshine-{name}' for name in
-             ('drm-install', 'vkms', 'vkms-peercred', 'vkms-quiesce'))
+             ('drm-install', 'ds5-install', 'vkms', 'vkms-peercred', 'vkms-quiesce'))
 FIXED.update(f'usr/libexec/vibeshine/{name}' for name in
              ('vibepollo-profile-normalize.py', 'pairing_migration.py'))
 FIXED.update(f'usr/lib/systemd/system/{name}' for name in UNITS)
@@ -120,7 +124,7 @@ def allowed(name):
         name in FIXED or name in OPTIONAL or (name.startswith('usr/bin/vibepollo-') and
                          VERSION.fullmatch(name.removeprefix('usr/bin/vibepollo-')) is not None) or
         name.startswith(('usr/share/vibepollo/', 'usr/lib/vibepollo/')) or
-        re.fullmatch(r'usr/src/vibeshine-drm-[1-9][0-9]*\.[0-9]+\.[0-9]+/[^/]+', name) is not None
+        re.fullmatch(r'usr/src/vibeshine-(?:drm|ds5)-[1-9][0-9]*\.[0-9]+\.[0-9]+/[^/]+', name) is not None
     )
 
 
@@ -149,6 +153,10 @@ def inspect_archive(archive, version):
     required.update(f'usr/src/vibeshine-drm-{version.split("-")[0]}/{name}' for name in
                     ('Makefile', 'build-module', 'dkms.conf', 'vkms_drv.c',
                      'vibeshine_drm_uapi.h', 'vibeshine_drm_version.h', 'vibeshine_drm_vrr.h'))
+    required.update(f'usr/src/vibeshine-ds5-{version.split("-")[0]}/{name}' for name in
+                    ('Makefile', 'build-module', 'dkms.conf', 'vibeshine_ds5_main.c',
+                     'vibeshine_ds5_gadget.c', 'vibeshine_ds5_udc.c',
+                     'vibeshine_ds5.h', 'vibeshine_ds5_uapi.h'))
     if required - members.keys():
         raise DeployError(f'Missing artifacts: {sorted(required - members.keys())}')
     for name in required:
@@ -161,8 +169,8 @@ def inspect_archive(archive, version):
         raise DeployError('Expected exactly one versioned public executable')
     drivers = {name.split('/')[2] for name in members if name.startswith('usr/src/') and
                not members[name].isdir()}
-    if drivers != {f'vibeshine-drm-{version.split("-")[0]}'}:
-        raise DeployError('Expected exactly one matching versioned DRM source tree')
+    if drivers != {f'vibeshine-{kind}-{version.split("-")[0]}' for kind in ("drm", "ds5")}:
+        raise DeployError('Expected exactly one matching versioned source tree for each driver')
     # No file may be used as another member's parent (including the public symlink).
     for name in members:
         for parent in PurePosixPath(name).parents:
@@ -536,7 +544,7 @@ def install_mode(name, _source_mode=0):
     if name == 'usr/lib/libvibeshine-kwin-gpu.so':
         return 0o4755
     if (name.startswith('usr/bin/') or name.startswith('usr/libexec/vibeshine/') or
-            re.fullmatch(r'usr/src/vibeshine-drm-[0-9.]+/build-module', name)):
+            re.fullmatch(r'usr/src/vibeshine-(?:drm|ds5)-[0-9.]+/build-module', name)):
         return 0o755
     return 0o644
 
@@ -554,16 +562,18 @@ def driver_preflight(candidate, version):
 
 def driver_allowed(name):
     return safe_name(name) and bool(re.fullmatch(
-        r'(?:usr/src/vibeshine-drm-[0-9][A-Za-z0-9._+-]*(?:/.*)?|'
-        r'var/lib/(?:dkms/vibeshine-drm|vibeshine-drm)(?:/.*)?|'
-        r'usr/lib/modules/[A-Za-z0-9._+-]+/(?:[^/]+/)*vibeshine_drm\.ko(?:\.(?:zst|xz|gz))?)', name))
+        r'(?:usr/src/vibeshine-(?:drm|ds5)-[0-9][A-Za-z0-9._+-]*(?:/.*)?|'
+        r'var/lib/(?:dkms/vibeshine-(?:drm|ds5)|vibeshine-drm)(?:/.*)?|'
+        r'usr/lib/modules/[A-Za-z0-9._+-]+/(?:[^/]+/)*vibeshine_(?:drm|ds5)\.ko(?:\.(?:zst|xz|gz))?)', name))
 
 
 def driver_inventory(root=Path('/'), owner=0):
     """Only this module's state; never follow DKMS build/source symlinks."""
     files, directories = set(), {}
-    roots = list((root / 'usr/src').glob('vibeshine-drm-*'))
-    roots += [root / 'var/lib/dkms/vibeshine-drm', root / 'var/lib/vibeshine-drm']
+    roots = [path for kind in ('drm', 'ds5')
+             for path in (root / 'usr/src').glob(f'vibeshine-{kind}-*')]
+    roots += [root / 'var/lib/dkms/vibeshine-drm', root / 'var/lib/dkms/vibeshine-ds5',
+              root / 'var/lib/vibeshine-drm']
     guard = Files(root, root=root, owner=owner, validator=driver_allowed)
     def visit(path):
         name = str(path.relative_to(root))
@@ -596,8 +606,9 @@ def driver_inventory(root=Path('/'), owner=0):
             if path.is_symlink():
                 raise DeployError(f'Driver state root is a symlink: {path}')
             visit(path)
-    for path in (root / 'usr/lib/modules').glob('*/**/vibeshine_drm.ko*'):
-        visit(path)
+    for kind in ('drm', 'ds5'):
+        for path in (root / 'usr/lib/modules').glob(f'*/**/vibeshine_{kind}.ko*'):
+            visit(path)
     return files, directories
 
 
@@ -720,14 +731,16 @@ def restore_driver(directory, state, root=Path('/'), owner=0):
 
 
 def driver_needs_reboot():
-    loaded = Path('/sys/module/vibeshine_drm')
-    if not loaded.exists():
-        return False
-    for field in ('version', 'srcversion'):
-        result = run('modinfo', '-F', field, 'vibeshine_drm', check=False)
-        value = result.stdout.strip()
-        if result.returncode or not value or not (loaded / field).is_file() or (loaded / field).read_text().strip() != value:
-            return True
+    for module in ('vibeshine_drm', 'vibeshine_ds5'):
+        loaded = Path('/sys/module') / module
+        if not loaded.exists():
+            continue
+        fields = ('version', 'srcversion') if module == 'vibeshine_drm' else ('srcversion',)
+        for field in fields:
+            result = run('modinfo', '-F', field, module, check=False)
+            value = result.stdout.strip()
+            if result.returncode or not value or not (loaded / field).is_file() or (loaded / field).read_text().strip() != value:
+                return True
     return False
 
 
@@ -750,8 +763,6 @@ def install_driver(directory, manifest):
         returncodes.append(code)
         if code not in (0, 4):
             raise DeployError(f'Driver installation failed for {kernel} ({code}); see output above')
-    manifest['driver']['after'] = driver_state()
-    write_json(directory / 'transaction.json', manifest)
     helper = Path('/usr/libexec/vibeshine/vibeshine-drm-install').read_text()
     source_ids = re.findall(r'^MODULE_SOURCE_ID="([0-9a-f]{64})"$', helper, re.M)
     if len(source_ids) != 1:
@@ -764,9 +775,28 @@ def install_driver(directory, manifest):
         markers = [Path('/var/lib/vibeshine-drm') / f'{kind}-{installed}-{kernel}' for kind in ('dkms', 'direct')]
         if not any(path.is_file() and (path.read_text().splitlines() or [''])[0] == identity for path in markers):
             raise DeployError(f'Driver source/signing identity was not updated for {kernel}')
+    # The DS5 helper targets uname by default. Build each backed-up kernel,
+    # but load the module only for the running kernel.
+    ds5_wrapper = ('source /usr/libexec/vibeshine/vibeshine-ds5-install || exit; '
+                   'readonly deploy_kernel="$1"; '
+                   'current_kernel_release() { printf "%s\\n" "$deploy_kernel"; }; '
+                   'if [[ "$deploy_kernel" != "$(uname -r)" ]]; then load_module() { return 0; }; fi; '
+                   'main install')
+    for kernel in manifest['driver']['kernels']:
+        print(f'Building/installing Vibeshine DS5 for {kernel}', flush=True)
+        code = driver_command(['/usr/bin/bash', '-c', ds5_wrapper, 'vibeshine-ds5-upgrade', kernel])
+        returncodes.append(code)
+        if code not in (0, 4):
+            raise DeployError(f'DualSense USB driver installation failed for {kernel} ({code}); see output above')
+        installed_source = run('modinfo', '-k', kernel, '-F', 'srcversion', 'vibeshine_ds5').stdout.strip()
+        if not installed_source:
+            raise DeployError(f'DualSense USB driver is missing for {kernel}')
+    manifest['driver']['after'] = driver_state()
+    write_json(directory / 'transaction.json', manifest)
     if 4 in returncodes or driver_needs_reboot():
         return True
     run('modprobe', 'vibeshine_drm', 'create_default_dev=0')
+    run('/usr/libexec/vibeshine/vibeshine-ds5-install', 'status')
     return driver_needs_reboot()
 
 
@@ -939,12 +969,48 @@ def rollback(directory, manifest):
 
 
 def stop_legacy_user_hosts():
-    # Run as the invoking desktop user, only after installation confirmation.
+    # Stop conflicts after confirmation, but keep boot enablement until the
+    # package has installed successfully. A refused sudo or failed pre-hook
+    # must not permanently disable the prior user service.
+    previous = []
     for unit in ('sunshine.service', 'vibeshine.service', HOST):
         active = run('systemctl', '--user', 'is-active', '--quiet', unit, check=False).returncode == 0
         enabled = run('systemctl', '--user', 'is-enabled', '--quiet', unit, check=False).returncode == 0
-        if active or enabled:
-            run('systemctl', '--user', 'disable', '--now', unit)
+        if active:
+            run('systemctl', '--user', 'stop', unit)
+        previous.append((unit, enabled))
+    return previous
+
+
+def refuse_live_applications(args):
+    # Installation stops the host, and the controller then stops every app it
+    # launched. On the development host, stopping a running game together with
+    # the capture host has preceded whole-GPU NVIDIA hangs (2026-09-16 and
+    # 2026-09-18), so never do that to a live session without being told to.
+    if args.allow_disruption:
+        return
+    # The broker launches apps in the seat owner's user manager. A different
+    # administrator must not silently inspect only their own empty manager.
+    active = run('loginctl', 'show-seat', 'seat0', '-p', 'ActiveSession', '--value', check=False)
+    if active.returncode:
+        raise DeployError('Could not identify the active seat0 session; pass --allow-disruption to install anyway')
+    session = active.stdout.strip()
+    if session:
+        if not re.fullmatch(r'[A-Za-z0-9_-]+', session):
+            raise DeployError('Invalid active seat0 session; pass --allow-disruption to install anyway')
+        owner = run('loginctl', 'show-session', session, '-p', 'Name', '--value', check=False)
+        if owner.returncode or owner.stdout.strip() != pwd.getpwuid(os.getuid()).pw_name:
+            raise DeployError('The active seat0 session belongs to another account; run deployment as that desktop user or pass --allow-disruption')
+    result = run('systemctl', '--user', 'list-units', '--plain', '--no-legend', '--no-pager',
+                 '--state=active', 'vibepollo-app-*.service', check=False)
+    if result.returncode:
+        raise DeployError('Could not list running Vibepollo applications; '
+                          'pass --allow-disruption to install anyway')
+    running = [line.split()[0] for line in result.stdout.splitlines() if line.strip()]
+    if running:
+        raise DeployError('A streamed application is still running (' + ', '.join(running) + '). '
+                          'Quit it or end the stream, then rerun with --skip-build; '
+                          'or pass --allow-disruption to stop it during installation')
 
 
 def arch_package_version(version):
@@ -1318,6 +1384,7 @@ def finalize(directory, manifest):
             if expected and metadata(Path('/') / name) != manifest['installed_metadata'][name]:
                 raise DeployError(f'Payload metadata changed since installation: {name}')
         run('/usr/libexec/vibeshine/vibeshine-drm-install', 'status')
+        run('/usr/libexec/vibeshine/vibeshine-ds5-install', 'status')
         start_controller()
         result, detail = readiness(manifest['timeout'])
         if result not in ('healthy', 'waiting-session'):
@@ -1457,6 +1524,10 @@ def configure_command(args, build, cache):
         raise DeployError('CUDA is enabled but nvcc was not found; pass --cuda-root or explicitly use --cuda off')
     command = ['cmake', '-S', str(REPO), '-B', str(build), '-G', 'Ninja',
                '-DCMAKE_BUILD_TYPE=RelWithDebInfo', '-DCMAKE_INSTALL_PREFIX=/usr',
+               # A build type alone does not repair empty or -O0 flags in an
+               # existing cache. Host framing also needs release optimization.
+               '-DCMAKE_C_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG',
+               '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG',
                f'-DBUILD_VERSION={args.version}', '-DBUILD_VIBESHINE_KWIN_GPU_BRIDGE=ON',
                '-DSUNSHINE_ASSETS_DIR=/usr/share/vibepollo', '-DSUNSHINE_EXECUTABLE_PATH=/usr/bin/vibepollo',
                f'-DSUNSHINE_ENABLE_CUDA={"ON" if cuda else "OFF"}', '-DSUNSHINE_ENABLE_PORTAL=ON',
@@ -1465,6 +1536,7 @@ def configure_command(args, build, cache):
         if value:
             command.append(f'-D{key}={value}')
     if cuda:
+        command.append('-DCMAKE_CUDA_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG')
         command.append(f'-DCUDA_TOOLKIT_ROOT_DIR={Path(root).resolve()}')
         command.append(f'-DCMAKE_CUDA_COMPILER={Path(root).resolve() / "bin/nvcc"}')
         host = args.cuda_host_compiler or cache.get('CMAKE_CUDA_HOST_COMPILER') or cxx
@@ -1501,14 +1573,19 @@ def confirm_install():
 def install_confirmed_package(package, args):
     if not args.yes and not confirm_install():
         raise DeployError('Installation cancelled; the local package was retained')
-    stop_legacy_user_hosts()
+    legacy_user_units = stop_legacy_user_hosts()
     # Consent above covers this exact package and conflicting host replacement.
     # Carry it through sudo so pacman does not ask a second time.
-    return subprocess.call([
+    result = subprocess.call([
         'sudo', '/usr/bin/python3', '-I', str(Path(__file__).resolve()),
         '_package_install', str(package), digest(package), '--version', args.version,
         '--timeout', str(args.timeout), '--yes',
     ])
+    if result == 0:
+        for unit, enabled in legacy_user_units:
+            if enabled:
+                run('systemctl', '--user', 'disable', unit)
+    return result
 
 
 def version_probe_environment(work):
@@ -1561,7 +1638,7 @@ def build_install(args):
         enforce_tests(build, args.enforce, args.jobs)
         environment = dict(os.environ, DESTDIR=str(work / 'stage'))
         subprocess.run(['cmake', '--install', str(build)], env=environment, check=True)
-        version_environment = version_probe_environment(work)
+        version_environment = dict(os.environ, XDG_CONFIG_HOME=str(work / 'version-config'))
         # Vibepollo parses defaults before --version. Seed only this isolated
         # probe profile from the staged payload, never an installed host's data.
         probe_profile = work / 'version-config' / 'vibepollo'
@@ -1582,6 +1659,8 @@ def build_install(args):
             shutil.copyfile(archive_path, destination)
             print(f'Validated candidate: {destination}\nSHA256: {digest(destination)}\nNo system files or services changed.')
             return 0
+        # Checked after the build, since a game can start while it runs.
+        refuse_live_applications(args)
         if not package_install:
             driver_preflight(work / 'stage', args.version)
         if package_install:
@@ -1621,6 +1700,8 @@ def parse_arguments(argv=None):
     install.add_argument('--stage-only', action='store_true', help='Build/stage without sudo or service changes')
     install.add_argument('--enforce', action='store_true', help='Run all tests and stop installation on any failure')
     install.add_argument('--yes', action='store_true')
+    install.add_argument('--allow-disruption', action='store_true',
+                         help='Install even while a streamed application is running; it will be stopped')
     internal = commands.add_parser('_install', help=argparse.SUPPRESS)
     internal.add_argument('archive', type=Path)
     internal.add_argument('sha256')

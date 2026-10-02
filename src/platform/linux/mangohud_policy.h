@@ -208,7 +208,11 @@ namespace platf::mangohud {
 
     std::uint32_t limit_millihz = stream_policy.frame_limit_millihz > 0 ?
                                       stream_policy.frame_limit_millihz :
-                                      framegen::normalize_refresh_millihz(stream_policy.fps);
+                                      (stream_policy.fps > 0 ?
+                                         framegen::saturating_refresh_millihz(
+                                           static_cast<std::uint32_t>(stream_policy.fps), 1000
+                                         ) :
+                                         0);
     if (stream_policy.lossless_rtss_limit && *stream_policy.lossless_rtss_limit > 0) {
       limit_millihz = framegen::saturating_refresh_millihz(
         static_cast<std::uint32_t>(*stream_policy.lossless_rtss_limit), 1000

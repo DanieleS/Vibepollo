@@ -9,6 +9,7 @@
 #endif
 
 // standard includes
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -61,6 +62,7 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/video.h"
+#include "packaging/linux/vibepollo-session-stream-environment.h"
 #ifdef __linux__
   #include "src/platform/linux/display_backend.h"
   #include "src/platform/linux/private_display_capture_policy.h"
@@ -431,7 +433,40 @@ namespace platf {
         // The capability-bearing helper resolves the administrator-authorized
         // working directory. The network host supplies only the exact command
         // to match, never a caller-selected filesystem location.
-        args = {"app", cmd};
+        const auto environment_value = [&env](std::string_view name) {
+          const auto it = std::find_if(env.cbegin(), env.cend(), [name](const auto &entry) {
+            return entry.get_name() == name;
+          });
+          return it == env.cend() ? std::string {} : it->to_string();
+        };
+        const bool wayland_hdr_compatibility =
+          environment_value("SUNSHINE_CLIENT_HDR") == "true" &&
+          environment_value("ENABLE_HDR_WSI") == "1";
+        args = {wayland_hdr_compatibility ? "app-wayland-hdr" : "app", cmd};
+        // The broker clears the network host's environment. Send only the
+        // supported stream metadata as literal assignments; user/session and
+        // loader settings remain broker-owned, and cmd still matches the
+        // administrator's exact command manifest.
+        size_t stream_environment_bytes = 0;
+        for (const auto &field : vibepollo_stream_environment_fields) {
+          const auto it = std::find_if(env.cbegin(), env.cend(), [&field](const auto &entry) {
+            return entry.get_name() == field.name;
+          });
+          if (it == env.cend()) continue;
+          const auto value = it->to_string();
+          // Empty optional toggles/numeric settings must not turn a bootstrap
+          // request into a failed launch. Text fields preserve empty values.
+          if (value.empty() && field.type != VIBEPOLLO_STREAM_TEXT) continue;
+          auto assignment = std::string {field.name} + '=' + value;
+          if (!vibepollo_stream_environment_entry_is_safe(assignment.c_str(), nullptr) ||
+              assignment.size() + 1 > VIBEPOLLO_STREAM_ENVIRONMENT_MAX_BYTES - stream_environment_bytes) {
+            BOOST_LOG(error) << "Invalid session launch metadata: " << field.name;
+            ec = std::make_error_code(std::errc::invalid_argument);
+            return bp::child();
+          }
+          stream_environment_bytes += assignment.size() + 1;
+          args.emplace_back(std::move(assignment));
+        }
       }
     } else {
       std::vector<std::string> parts;
@@ -1275,6 +1310,14 @@ namespace platf {
   }
 #endif
 
+  bool pyrowave_capture_supported() {
+#ifdef SUNSHINE_BUILD_CUDA
+    return !sources[source::NVFBC];
+#else
+    return true;
+#endif
+  }
+
   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
 #ifdef SUNSHINE_BUILD_GAMESCOPE
     if (sources[source::GAMESCOPE]) {
@@ -1418,17 +1461,14 @@ namespace platf {
     }
 
     if (sources[source::KMS]) {
+      BOOST_LOG(info) << "Screencasting with KMS"sv;
       // A dormant private connector is activated immediately before encoder
       // probing. Refresh its connector-to-CRTC map so pre-login capture does
       // not reuse the physical-output enumeration recorded at startup.
       if (linux_private_display::is_private_output(display_name)) {
         (void) kms_display_names(hwdevice_type);
       }
-      auto kms = kms_display(hwdevice_type, display_name, config);
-      if (kms) {
-        BOOST_LOG(info) << "Screencasting with KMS"sv;
-      }
-      return kms;
+      return kms_display(hwdevice_type, display_name, config);
     }
 #endif
 
@@ -1575,10 +1615,6 @@ namespace platf {
       const bool outputs_available = verify_kms();
       sources[source::KMS] = linux_private_display_capture::enable_kms(config::video.capture == "kms", outputs_available);
       if (sources[source::KMS] && !outputs_available) {
-        // A paused compositor or dormant virtual connector can have no active
-        // framebuffer at startup. Keep the explicit backend selected so each
-        // later enumeration retries KMS after scanout recovers. This does not
-        // declare an output ready; capture still requires a real framebuffer.
         BOOST_LOG(warning) << "KMS has no active capture output yet; retaining the requested backend for recovery."sv;
       }
     }

@@ -72,6 +72,7 @@ export const clientOverrideableKeys = new Set([
   'native_pen_touch',
   'keybindings',
   'ds5_inputtino_randomize_mac',
+  'proton_dualsense_compatibility',
   'audio_sink',
   'audio_sink_capture_only',
   'virtual_sink',
@@ -104,6 +105,7 @@ export const clientOverrideableKeys = new Set([
   'minimum_fps_target',
   'fec_percentage',
   'video_max_batch_size_kb',
+  'pyrowave_critical_fec_percentage',
   'qp',
   'min_threads',
   'hevc_mode',
@@ -301,10 +303,14 @@ const frameLimiterOptions = [
   option('auto', '_common.auto'),
   option('rtss', 'ui.settings.options.frame_limiter_provider.rtss'),
   option('nvidia-control-panel', 'ui.settings.options.frame_limiter_provider.nvidia'),
+  option('proton', 'ui.settings.options.frame_limiter_provider.proton'),
+  option('mangohud-proton', 'ui.settings.options.frame_limiter_provider.mangohudProton'),
   option('none', 'ui.settings.options.frame_limiter_provider.none'),
 ];
 
+// Fastest to slowest virtual-screen refresh; VRR is Windows only.
 const frameGenerationOptions = [
+  option('vrr', 'ui.settings.options.frame_generation.vrr'),
   option('enabled', 'ui.settings.options.frame_generation.automatic'),
   option('legacy', 'ui.settings.options.frame_generation.compatibility'),
   option('disabled', 'ui.settings.options.frame_generation.off'),
@@ -396,6 +402,12 @@ const virtualDisplayCustomizationFields = (): SettingsField[] => [
     labelKey: 'ui.settings.fields.dd_virtual_display_scale.label',
     descriptionKey: 'ui.settings.fields.dd_virtual_display_scale.description',
     platform: ['windows', 'linux'],
+    visibleWhen: { key: 'virtual_display_mode', notEquals: 'disabled' },
+  }),
+  boolean('wayland_hdr_compatibility', {
+    platform: 'linux',
+    labelKey: 'ui.settings.fields.wayland_hdr_compatibility.label',
+    descriptionKey: 'ui.settings.fields.wayland_hdr_compatibility.description',
     visibleWhen: { key: 'virtual_display_mode', notEquals: 'disabled' },
   }),
 ];
@@ -523,37 +535,23 @@ export const settingsCategories: SettingsCategory[] = [
         visibleWhen: { key: 'virtual_display_mode', notEquals: 'disabled' },
         fields: [
           select('frame_limiter_auto_virtual_framegen', frameGenerationOptions, {
+            labelKey: 'ui.settings.fields.frame_limiter_auto_virtual_framegen.label',
+            recommended: true,
+            visibleWhen: { key: 'virtual_display_mode', notEquals: 'disabled' },
+          }),
+          boolean('rtss_allow_virtual_display_override', {
+            labelKey: 'ui.settings.fields.rtss_allow_virtual_display_override.label',
+            descriptionKey: 'ui.settings.fields.rtss_allow_virtual_display_override.description',
+            warningKey: 'ui.settings.fields.rtss_allow_virtual_display_override.warning',
             platform: 'windows',
           }),
         ],
       },
-      {
-        id: 'everyday_audio',
-        link: '/settings?category=audio',
-        fields: [
-          select('keep_sink_default', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
-          select('auto_capture_sink', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
-          boolean('stream_audio'),
-        ],
-      },
+      { id: 'everyday_audio', link: '/settings?category=audio', fields: [boolean('stream_audio')] },
       {
         id: 'everyday_input',
         link: '/settings?category=input',
         fields: [
-          select('enable_input_only_mode', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
-          select('forward_rumble', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
           boolean('controller'),
           select('gamepad', gamepadOptions, {
             platform: ['windows', 'linux'],
@@ -678,6 +676,7 @@ export const settingsCategories: SettingsCategory[] = [
             platform: 'windows',
             stacked: true,
           },
+          text('fallback_mode'),
           boolean('dd_config_revert_on_disconnect', { platform: ['windows', 'linux'] }),
           number('dd_config_revert_delay', {
             min: 0,
@@ -692,6 +691,7 @@ export const settingsCategories: SettingsCategory[] = [
             step: 1,
             platform: ['windows', 'linux'],
           }),
+          text('dd_snapshot_restore_hotkey', { platform: 'windows' }),
           text('dd_snapshot_restore_hotkey_modifiers', { platform: 'windows' }),
         ],
       },
@@ -711,6 +711,7 @@ export const settingsCategories: SettingsCategory[] = [
         id: 'pacing_limiter',
         fields: [
           ...everydayPacingFields(),
+          boolean('limit_framerate'),
           boolean('rtss_allow_virtual_display_override', {
             platform: 'windows',
             warningKey: 'ui.settings.fields.rtss_allow_virtual_display_override.warning',
@@ -756,7 +757,11 @@ export const settingsCategories: SettingsCategory[] = [
           boolean('keyboard'),
           boolean('mouse'),
           boolean('controller'),
+          boolean('enable_input_only_mode'),
+          boolean('forward_rumble'),
+          boolean('legacy_ordering'),
           select('gamepad', gamepadOptions, { platform: ['windows', 'linux'] }),
+          boolean('proton_dualsense_compatibility', { platform: 'linux' }),
           boolean('motion_as_ds4'),
           boolean('touchpad_as_ds4'),
           boolean('ds4_back_as_touchpad_click', { platform: ['windows', 'linux'] }),
@@ -785,6 +790,8 @@ export const settingsCategories: SettingsCategory[] = [
         id: 'audio_routing',
         fields: [
           boolean('stream_audio'),
+          boolean('keep_sink_default'),
+          boolean('auto_capture_sink'),
           text('audio_sink', { monospace: true, stacked: true }),
           boolean('audio_sink_capture_only', { platform: 'windows' }),
           text('virtual_sink', { monospace: true, stacked: true }),
@@ -808,6 +815,7 @@ export const settingsCategories: SettingsCategory[] = [
         id: 'video_encoder',
         fields: [
           select('encoder', [option('', '_common.auto')]),
+          boolean('ignore_encoder_probe_failure'),
           boolean('wgc_pacing_smoothing', { platform: 'windows' }),
         ],
       },
@@ -826,6 +834,7 @@ export const settingsCategories: SettingsCategory[] = [
             option('2', 'ui.settings.options.codec.eight_bit'),
             option('3', 'ui.settings.options.codec.hdr_ten_bit'),
           ]),
+          boolean('pyrowave', { platform: ['windows', 'linux'] }),
         ],
       },
       {
@@ -837,6 +846,7 @@ export const settingsCategories: SettingsCategory[] = [
           number('qp', { min: 0, max: 51, step: 1 }),
           number('fec_percentage', { min: 0, max: 255, step: 1 }),
           number('video_max_batch_size_kb', { min: 1, step: 1 }),
+          number('pyrowave_critical_fec_percentage', { min: 0, max: 255, step: 1, platform: ['windows', 'linux'] }),
         ],
       },
       ...advancedEncoderGroups,
@@ -854,6 +864,7 @@ export const settingsCategories: SettingsCategory[] = [
             option('wan', 'ui.settings.options.origin.wan'),
           ]),
           boolean('upnp', { restartRequired: true }),
+          boolean('enable_discovery'),
           select(
             'address_family',
             [
@@ -878,14 +889,7 @@ export const settingsCategories: SettingsCategory[] = [
       {
         id: 'network_security',
         fields: [
-          select('enable_pairing', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
-          select('enable_discovery', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
+          boolean('enable_pairing'),
           select('lan_encryption_mode', [
             option('0', '_common.disabled'),
             option('1', 'ui.settings.options.encryption.optional'),
@@ -910,51 +914,20 @@ export const settingsCategories: SettingsCategory[] = [
         id: 'everyday_automation',
         collapsed: true,
         fields: [
-          select('limit_framerate', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
-          select('envvar_compatibility_mode', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
-          select('legacy_ordering', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
-          select('ignore_encoder_probe_failure', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
           { key: 'global_prep_cmd', kind: 'command-preparations', stacked: true },
-          {
-            key: 'global_state_cmd',
-            kind: 'command-preparations',
-            labelKey: 'config.global_state_cmd',
-            descriptionKey: 'config.global_state_cmd_desc',
-            stacked: true,
-          },
-          {
-            key: 'server_cmd',
-            kind: 'server-commands',
-            labelKey: 'config.server_cmd',
-            descriptionKey: 'config.server_cmd_desc',
-            stacked: true,
-          },
+          { key: 'global_state_cmd', kind: 'command-preparations', labelKey: 'config.global_state_cmd', descriptionKey: 'config.global_state_cmd_desc', stacked: true },
+          { key: 'server_cmd', kind: 'server-commands', labelKey: 'config.server_cmd', descriptionKey: 'config.server_cmd_desc', stacked: true },
         ],
       },
       {
         id: 'host_identity',
         fields: [
-          select('hide_tray_controls', [
-            option('enabled', '_common.enabled'),
-            option('disabled', '_common.disabled'),
-          ]),
           extendedField('locale'),
           extendedField('update_check_interval'),
-          text('fallback_mode'),
           text('sunshine_name', { placeholderKey: 'ui.settings.placeholders.host_name' }),
           boolean('system_tray'),
+          boolean('hide_tray_controls'),
+          boolean('envvar_compatibility_mode'),
           boolean('notify_pre_releases'),
           select('min_log_level', [
             option('0', 'ui.settings.options.log_level.verbose'),
@@ -1040,19 +1013,6 @@ export const settingsCategories: SettingsCategory[] = [
 ];
 
 export const settingsDefaults: Record<string, unknown> = {
-  enable_pairing: 'enabled',
-  enable_discovery: 'enabled',
-  hide_tray_controls: 'disabled',
-  keep_sink_default: 'enabled',
-  auto_capture_sink: 'enabled',
-  enable_input_only_mode: 'enabled',
-  forward_rumble: 'enabled',
-  limit_framerate: 'enabled',
-  envvar_compatibility_mode: 'disabled',
-  legacy_ordering: 'disabled',
-  ignore_encoder_probe_failure: 'disabled',
-  fallback_mode: '1920x1080x60',
-
   ...extendedDefaults,
   gamepad: 'auto',
   virtual_display_mode: 'per_client',
@@ -1102,6 +1062,7 @@ export const settingsDefaults: Record<string, unknown> = {
   dd_display_helper_engine: 'auto',
   vulkan_hdr_layer: true,
   dd_wa_dummy_plug_hdr10: false,
+  wayland_hdr_compatibility: false,
   dd_config_revert_on_disconnect: false,
   dd_config_revert_delay: 3000,
   dd_always_restore_from_golden: true,
@@ -1110,6 +1071,7 @@ export const settingsDefaults: Record<string, unknown> = {
   dd_snapshot_restore_hotkey_modifiers: 'ctrl+alt+shift',
   keyboard: true,
   mouse: true,
+  proton_dualsense_compatibility: true,
   motion_as_ds4: true,
   touchpad_as_ds4: true,
   ds4_back_as_touchpad_click: true,
@@ -1123,17 +1085,31 @@ export const settingsDefaults: Record<string, unknown> = {
   audio_sink_capture_only: false,
   virtual_sink: '',
   encoder: '',
+  enable_pairing: true,
+  enable_discovery: true,
+  hide_tray_controls: false,
+  enable_input_only_mode: false,
+  forward_rumble: true,
+  keep_sink_default: true,
+  auto_capture_sink: true,
+  fallback_mode: '1920x1080x60',
+  limit_framerate: true,
+  envvar_compatibility_mode: false,
+  legacy_ordering: false,
+  ignore_encoder_probe_failure: false,
   nvenc_preset: 1,
   qsv_preset: 'medium',
   amd_quality: 'balanced',
   wgc_pacing_smoothing: true,
   hevc_mode: 0,
   av1_mode: 0,
+  pyrowave: true,
   max_bitrate: 0,
   minimum_fps_target: 20,
   qp: 28,
   fec_percentage: 20,
   video_max_batch_size_kb: 64,
+  pyrowave_critical_fec_percentage: 20,
   rtss_install_path: '',
   rtss_frame_limit_type: 'async',
   lossless_scaling_path: '',
@@ -1150,8 +1126,6 @@ export const settingsDefaults: Record<string, unknown> = {
   notify_pre_releases: false,
   min_log_level: 2,
   global_prep_cmd: [],
-  global_state_cmd: [],
-  server_cmd: [],
   session_history_enabled: true,
   session_history_ttl_days: 0,
   session_history_db_size_limit_mb: 0,

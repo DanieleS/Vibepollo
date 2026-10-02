@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import socket
 import stat
+import subprocess
 import tarfile
 import tempfile
 from types import SimpleNamespace
@@ -31,6 +32,10 @@ def package(extra=(), omit=()):
     names.update('usr/src/vibeshine-drm-1.19.0/' + name for name in
                  ('Makefile', 'build-module', 'dkms.conf', 'vkms_drv.c',
                   'vibeshine_drm_uapi.h', 'vibeshine_drm_vrr.h'))
+    names.update('usr/src/vibeshine-ds5-1.19.0/' + name for name in
+                 ('Makefile', 'build-module', 'dkms.conf', 'vibeshine_ds5_main.c',
+                  'vibeshine_ds5_gadget.c', 'vibeshine_ds5_udc.c',
+                  'vibeshine_ds5.h', 'vibeshine_ds5_uapi.h'))
     with tarfile.open(fileobj=stream, mode='w:gz') as archive:
         for name in sorted(names - set(omit)):
             entry = tarfile.TarInfo(name)
@@ -47,10 +52,23 @@ def package(extra=(), omit=()):
     return tarfile.open(fileobj=stream, mode='r:gz')
 
 
+class InstallerShellTests(unittest.TestCase):
+    def test_installer_shell_contract(self):
+        result = subprocess.run(
+            ['bash', str(ROOT / 'tests/unit/platform/linux/test_linux_installer.sh')],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class ArchiveTests(unittest.TestCase):
     def test_local_package_must_include_driver_helper_and_build_sources(self):
         self.assertNotIn('usr/libexec/vibeshine/vibepollo-drm-install', deploy.FIXED)
-        for missing in ('usr/libexec/vibeshine/vibeshine-drm-install',
+        self.assertNotIn('usr/libexec/vibeshine/vibepollo-ds5-install', deploy.FIXED)
+        for missing in ('usr/libexec/vibeshine/vibeshine-ds5-install',
+                        'usr/lib/modules-load.d/70-vibeshine-ds5.conf',
+                        'usr/src/vibeshine-ds5-1.19.0/vibeshine_ds5_gadget.c',
+                        'usr/src/vibeshine-ds5-1.19.0/dkms.conf',
+                        'usr/libexec/vibeshine/vibeshine-drm-install',
                         'usr/libexec/vibeshine/vibepollo-global-limiter.py',
                         'usr/src/vibeshine-drm-1.19.0/Makefile',
                         'usr/src/vibeshine-drm-1.19.0/build-module',
@@ -110,14 +128,6 @@ class ArchiveTests(unittest.TestCase):
 
 
 class SharedBuildTests(unittest.TestCase):
-    def test_version_probe_cannot_use_or_migrate_the_installed_profile(self):
-        with mock.patch.dict(os.environ, {'CONFIGURATION_DIRECTORY': '/var/lib',
-                                          'VIBEPOLLO_MIGRATE_CONFIG': '1'}):
-            environment = deploy.version_probe_environment(Path('/tmp/probe'))
-        self.assertNotIn('CONFIGURATION_DIRECTORY', environment)
-        self.assertEqual(environment['XDG_CONFIG_HOME'], '/tmp/probe/version-config')
-        self.assertEqual(environment['VIBEPOLLO_MIGRATE_CONFIG'], '0')
-
     def test_resume_flags_select_actions_without_transaction_ids(self):
         for prefix in ([], ['install']):
             for flag, command in [('--part2', 'finalize'), ('--recover', 'rollback')]:
@@ -216,6 +226,30 @@ class SharedBuildTests(unittest.TestCase):
             command = deploy.configure_command(self.args(cuda='off'), ROOT / 'build', {'SUNSHINE_ENABLE_CUDA': 'ON'})
             self.assertIn('-DSUNSHINE_ENABLE_CUDA=OFF', command)
 
+    def test_release_build_overrides_unoptimized_cached_flags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'bin').mkdir()
+            (root / 'bin/nvcc').write_bytes(b'fixture')
+            for cuda in ('on', 'off'):
+                for old_flags in (None, '', '-O0 -g'):
+                    with self.subTest(cuda=cuda, old_flags=old_flags):
+                        cache = {} if old_flags is None else {
+                            f'CMAKE_{language}_FLAGS_RELWITHDEBINFO': old_flags
+                            for language in ('C', 'CXX', 'CUDA')}
+                        with mock.patch.dict(os.environ, {}, clear=True):
+                            command = deploy.configure_command(
+                                self.args(cuda=cuda, cuda_root=temporary), root / 'build', cache)
+                        # Apply the actual CMake cache overrides to the old settings.
+                        configured = dict(cache)
+                        for argument in command:
+                            if argument.startswith('-D'):
+                                key, value = argument[2:].split('=', 1)
+                                configured[key.split(':', 1)[0]] = value
+                        for language in ('C', 'CXX') + (('CUDA',) if cuda == 'on' else ()):
+                            self.assertEqual(configured.get(f'CMAKE_{language}_FLAGS_RELWITHDEBINFO'),
+                                             '-O2 -g -DNDEBUG')
+
     def test_stage_only_platform_check_does_not_need_systemd(self):
         with mock.patch.object(deploy.sys, 'platform', 'linux'), \
                 mock.patch.object(deploy.sys, 'version_info', (3, 11)), \
@@ -259,6 +293,47 @@ class NativePackageTests(unittest.TestCase):
                     self.assertEqual(deploy.install_confirmed_package(candidate, args), 0)
                     self.assertEqual(confirm.call_count, 0 if assume_yes else 1)
                     self.assertIn('--yes', install.call_args.args[0])
+
+    def test_running_streamed_application_blocks_installation(self):
+        args = SimpleNamespace(allow_disruption=False)
+        listing = 'vibepollo-app-2-473489.service loaded active running [systemd-run] steam-launch\n'
+
+        def run_for_seat(*command, **_kwargs):
+            if command[:2] == ('loginctl', 'show-seat'):
+                return SimpleNamespace(returncode=0, stdout='42\n')
+            if command[:2] == ('loginctl', 'show-session'):
+                return SimpleNamespace(returncode=0, stdout=deploy.pwd.getpwuid(deploy.os.getuid()).pw_name + '\n')
+            return SimpleNamespace(returncode=0, stdout=listing)
+
+        with mock.patch.object(deploy, 'run', side_effect=run_for_seat) as run:
+            with self.assertRaisesRegex(deploy.DeployError, r'vibepollo-app-2-473489\.service.*--allow-disruption'):
+                deploy.refuse_live_applications(args)
+        self.assertIn(mock.call('systemctl', '--user', 'list-units', '--plain', '--no-legend',
+                                '--no-pager', '--state=active', 'vibepollo-app-*.service',
+                                check=False), run.call_args_list)
+        with mock.patch.object(deploy, 'run', side_effect=lambda *command, **kwargs:
+                               SimpleNamespace(returncode=0, stdout='' if command[0] == 'systemctl' else
+                                               '42\n' if command[1] == 'show-seat' else
+                                               deploy.pwd.getpwuid(deploy.os.getuid()).pw_name + '\n')):
+            deploy.refuse_live_applications(args)
+        # A different active seat owner must never be checked through this user's manager.
+        with mock.patch.object(deploy, 'run', side_effect=lambda *command, **kwargs:
+                               SimpleNamespace(returncode=0, stdout='42\n' if command[1] == 'show-seat' else
+                                               'another-user\n')) as run:
+            with self.assertRaisesRegex(deploy.DeployError, 'another account'):
+                deploy.refuse_live_applications(args)
+            self.assertFalse(any(call.args[0] == 'systemctl' for call in run.call_args_list))
+        with mock.patch.object(deploy, 'run', return_value=SimpleNamespace(returncode=1, stdout='')):
+            with self.assertRaisesRegex(deploy.DeployError, '--allow-disruption'):
+                deploy.refuse_live_applications(args)
+        args.allow_disruption = True
+        with mock.patch.object(deploy, 'run') as run:
+            deploy.refuse_live_applications(args)
+        run.assert_not_called()
+
+    def test_allow_disruption_is_an_install_option(self):
+        self.assertTrue(deploy.parse_arguments(['install', '--allow-disruption']).allow_disruption)
+        self.assertFalse(deploy.parse_arguments(['install']).allow_disruption)
 
     def test_installer_output_and_failure_status_are_retained(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -345,10 +420,29 @@ class NativePackageTests(unittest.TestCase):
                    SimpleNamespace(returncode=1)]
         with mock.patch.object(deploy, 'run', side_effect=results) as run:
             deploy.stop_legacy_user_hosts()
-        self.assertIn(mock.call('systemctl', '--user', 'disable', '--now', 'sunshine.service'),
+        self.assertIn(mock.call('systemctl', '--user', 'stop', 'sunshine.service'),
                       run.call_args_list)
-        self.assertNotIn(mock.call('systemctl', '--user', 'disable', '--now', deploy.HOST),
+        self.assertNotIn(mock.call('systemctl', '--user', 'disable', '--now', 'sunshine.service'),
                          run.call_args_list)
+        self.assertNotIn(mock.call('systemctl', '--user', 'stop', deploy.HOST),
+                         run.call_args_list)
+
+    def test_user_service_enablement_changes_only_after_successful_package_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / 'candidate.pkg.tar.gz'
+            candidate.write_bytes(b'fixture')
+            args = SimpleNamespace(yes=True, version=VERSION, timeout=30)
+            previous = [('sunshine.service', True), ('vibeshine.service', False)]
+            for status in (1, 0):
+                with self.subTest(status=status), \
+                        mock.patch.object(deploy, 'stop_legacy_user_hosts', return_value=previous), \
+                        mock.patch.object(deploy.subprocess, 'call', return_value=status), \
+                        mock.patch.object(deploy, 'run') as run:
+                    self.assertEqual(deploy.install_confirmed_package(candidate, args), status)
+                    disables = [call for call in run.call_args_list
+                                if call.args[:3] == ('systemctl', '--user', 'disable')]
+                    self.assertEqual(disables, [] if status else
+                                     [mock.call('systemctl', '--user', 'disable', 'sunshine.service')])
 
     def test_package_resume_never_calls_file_rollback(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -636,6 +730,16 @@ class PolicyTests(unittest.TestCase):
         with mock.patch.object(Path, 'exists', return_value=True), \
                 mock.patch.object(deploy, 'run', return_value=mock.Mock(stdout='not found', returncode=1)):
             self.assertTrue(deploy.driver_needs_reboot())
+
+    def test_stale_loaded_dualsense_module_requires_reboot(self):
+        disk = [mock.Mock(stdout=value, returncode=0) for value in
+                ('1.19.0', 'drm-source', 'new-ds5-source')]
+        with mock.patch.object(Path, 'exists', return_value=True), \
+                mock.patch.object(Path, 'is_file', return_value=True), \
+                mock.patch.object(Path, 'read_text', side_effect=['1.19.0', 'drm-source', 'old-ds5-source']), \
+                mock.patch.object(deploy, 'run', side_effect=disk) as run:
+            self.assertTrue(deploy.driver_needs_reboot())
+        self.assertEqual(run.call_args.args[-1], 'vibeshine_ds5')
 
     def test_driver_cancellation_does_not_allow_rollback_with_surviving_workers(self):
         process = mock.Mock(pid=123)

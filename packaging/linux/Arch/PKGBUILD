@@ -54,7 +54,7 @@ depends=(
   'numactl'
   'openssl'
   'opus'
-  'python'
+  'python>=3.9'
   'socat'
   'udev'
   'util-linux'
@@ -91,7 +91,7 @@ optdepends=(
 )
 
 provides=('sunshine')
-conflicts=('sunshine' 'vibeshine')
+conflicts=('sunshine')
 
 source=("$pkgname::git+@GITHUB_CLONE_URL@#commit=${_commit}")
 sha256sums=('SKIP')

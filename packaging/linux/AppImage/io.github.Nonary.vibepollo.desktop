@@ -2,7 +2,7 @@
 Categories=RemoteAccess;Network;
 Comment=@PROJECT_DESCRIPTION@
 Exec=vibepollo
-Icon=apollo
+Icon=io.github.Nonary.vibepollo
 Keywords=vibepollo;gamestream;stream;moonlight;remote play;
 Name=@PROJECT_NAME@
 Terminal=true

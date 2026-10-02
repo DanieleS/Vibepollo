@@ -67,8 +67,6 @@ namespace nvhttp {
    */
   void start();
 
-  void notify_remote_input_transport_lost(std::string_view client_uuid, std::uint64_t generation);
-
   std::string
     get_arg(const args_t &args, const char *name, const char *default_value = nullptr);
 
@@ -312,14 +310,6 @@ namespace nvhttp {
    * publication; final teardown holds it through its shared cleanup decision.
    */
   std::mutex &stream_lifecycle_mutex();
-
-  /**
-   * @brief Request an asynchronous Force Close teardown from a control-plane caller.
-   *
-   * The request is queued on the blocking lifecycle worker so tray/UI callbacks
-   * never wait on stream joins, process termination, or display cleanup.
-   */
-  void request_force_stop();
 
   /**
    * @brief Persist a per-client HDR color profile selection (Windows only).

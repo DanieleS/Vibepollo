@@ -15,7 +15,6 @@
 #include "private_display_resume_policy.h"
 #include "src/config.h"
 #include "src/display_device.h"
-#include "src/framegen_policy.h"
 #include "src/logging.h"
 #include "src/nvhttp.h"
 #include "src/platform/common.h"
@@ -1112,7 +1111,7 @@ namespace platf::linux_private_display {
         static_cast<unsigned int>(std::max(1, session.resolution_override ? session.resolution_override->width : session.width)),
         static_cast<unsigned int>(std::max(1, session.resolution_override ? session.resolution_override->height : session.height))
       };
-      refresh = display_device::Rational {framegen::normalize_refresh_millihz(std::max(1, session.fps)), 1000};
+      refresh = display_device::Rational {static_cast<unsigned int>(std::max(1, session.fps)), 1};
     }
 
     auto mode_id = best_mode_id(*target_before, resolution, refresh);
@@ -1132,7 +1131,9 @@ namespace platf::linux_private_display {
       }
       mode_id = best_mode_id(*target_before, resolution, refresh);
     }
-    if (mode_id.empty()) {
+    if (mode_id.empty() || (resolution && refresh && !prefer_highest &&
+                            is_managed_output(session.virtual_display_device_id) &&
+                            !mode_matches_refresh(*target_before, mode_id, *refresh))) {
       BOOST_LOG(error) << "Linux private display: no compatible mode is available for "
                        << session.virtual_display_device_id;
       return use_current_output();
@@ -1515,6 +1516,10 @@ namespace platf::linux_private_display {
         output = find_output(*configuration, entry.name);
         if (!output) return false;
         entry.mode_id = best_mode_id(*output, resolution, refresh);
+        if (entry.mode_id.empty() || !mode_matches_refresh(*output, entry.mode_id, refresh)) {
+          BOOST_LOG(error) << "Linux Remote Monitor: custom mode was not accepted on " << entry.name;
+          return false;
+        }
       }
     }
 

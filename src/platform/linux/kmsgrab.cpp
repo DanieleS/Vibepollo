@@ -1042,7 +1042,7 @@ namespace platf {
           if (auto result = capture_presentation_events(push_captured_image_cb, pull_free_image_cb, cursor)) {
             return *result;
           }
-          BOOST_LOG(error) << "Vibeshine DRM presentation events became unavailable; refusing fixed-rate KMS fallback."sv;
+          BOOST_LOG(error) << "Vibepollo DRM presentation events became unavailable; refusing fixed-rate KMS fallback."sv;
           presentation_mode.deactivate();
           return capture_e::error;
         }
@@ -1066,10 +1066,6 @@ namespace platf {
 
       [[nodiscard]] bool is_event_driven_capture() const override {
         return presentation_mode.event_capture_enabled();
-      }
-
-      [[nodiscard]] bool preserves_source_presentation_timestamps() const override {
-        return presentation_timestamps_validated;
       }
 
       bool is_hdr() {
@@ -1481,7 +1477,7 @@ namespace platf {
           }
         }
         if (ioctl_error != 0) {
-          BOOST_LOG(error) << "Failed to export Vibeshine DRM presentation frame: "sv << strerror(ioctl_error);
+          BOOST_LOG(error) << "Failed to export Vibepollo DRM presentation frame: "sv << strerror(ioctl_error);
           return frame_export_e::unsupported;
         }
 
@@ -1498,7 +1494,7 @@ namespace platf {
           request.reserved_u32 == 0 &&
           std::ranges::all_of(request.reserved, [](std::uint64_t value) { return value == 0; });
         if (!common_fields_valid) {
-          BOOST_LOG(error) << "Vibeshine DRM returned an invalid frame ABI response."sv;
+          BOOST_LOG(error) << "Vibepollo DRM returned an invalid frame ABI response."sv;
           return frame_export_e::unsupported;
         }
 
@@ -1511,7 +1507,7 @@ namespace platf {
                                         std::ranges::all_of(request.pitches, [](std::uint32_t value) { return value == 0; }) &&
                                         std::ranges::all_of(request.offsets, [](std::uint32_t value) { return value == 0; });
           if (!empty_descriptor) {
-            BOOST_LOG(error) << "Vibeshine DRM returned a malformed empty frame."sv;
+            BOOST_LOG(error) << "Vibepollo DRM returned a malformed empty frame."sv;
             return frame_export_e::unsupported;
           }
           pending_exported_frame.reset();
@@ -1521,7 +1517,7 @@ namespace platf {
         if (request.flags != VIBESHINE_DRM_FRAME_READY || request.sequence == 0 ||
             request.width == 0 || request.height == 0 || request.fourcc == 0 ||
             request.plane_count == 0 || request.plane_count > VIBESHINE_DRM_FRAME_MAX_PLANES) {
-          BOOST_LOG(error) << "Vibeshine DRM returned a malformed presentation frame."sv;
+          BOOST_LOG(error) << "Vibepollo DRM returned a malformed presentation frame."sv;
           return frame_export_e::unsupported;
         }
 
@@ -1530,7 +1526,7 @@ namespace platf {
           if ((active && (request.dma_buf_fds[plane] < 0 || request.sync_file_fds[plane] < -1)) ||
               (!active && (request.dma_buf_fds[plane] != -1 || request.sync_file_fds[plane] != -1 ||
                            request.pitches[plane] != 0 || request.offsets[plane] != 0))) {
-            BOOST_LOG(error) << "Vibeshine DRM returned an invalid DMA-BUF plane descriptor."sv;
+            BOOST_LOG(error) << "Vibepollo DRM returned an invalid DMA-BUF plane descriptor."sv;
             return frame_export_e::unsupported;
           }
         }
@@ -1542,7 +1538,7 @@ namespace platf {
           last_presentation_timestamp
         );
         if (!timestamp) {
-          BOOST_LOG(error) << "Vibeshine DRM returned an invalid frame presentation timestamp."sv;
+          BOOST_LOG(error) << "Vibepollo DRM returned an invalid frame presentation timestamp."sv;
           return frame_export_e::unsupported;
         }
 
@@ -1571,10 +1567,6 @@ namespace platf {
         }
 
         presentation_mode.activate();
-        // Latched only after both presentation ABIs validate, before this
-        // display is published. Capture errors must not change encoder policy
-        // for images already queued from this generation.
-        presentation_timestamps_validated = true;
         presentation_rate_limiter.reset();
         last_source_presentation_timestamp.reset();
         last_capture_delivery_timestamp.reset();
@@ -1584,7 +1576,7 @@ namespace platf {
         presentation_pending = presentation_latch.capture_ready();
         presentation_trace_sequence = presentation_sequence;
         presentation_trace_available = true;
-        BOOST_LOG(info) << "Using event-driven KMS capture for Vibeshine DRM CRTC ["sv << crtc_id << "]."sv;
+        BOOST_LOG(info) << "Using event-driven KMS capture for Vibepollo DRM CRTC ["sv << crtc_id << "]."sv;
         if (drm_timing_trace::writer().available()) {
           BOOST_LOG(info) << "Always-on DRM timing trace is buffered in "sv << drm_timing_trace::TRACE_PATH
                           << " and bounded to two 128 MiB tmpfs files."sv;
@@ -1929,9 +1921,9 @@ namespace platf {
                 ).count()
               );
 
-              // Keep presentation time for timestamp-aware client playout.
-              // The host delivery ceiling uses actual capture delivery time,
-              // independently of the source timestamp carried in RTP.
+              // Presentation time remains source metadata. Actual pacing is
+              // controlled by capture delivery, because GameStream clients do
+              // not schedule frame display from this RTP timestamp.
               img_out->frame_timestamp = captured_timestamp;
               img_out->capture_pacing_timestamp = capture_delivery_timestamp;
             }
@@ -2095,7 +2087,6 @@ namespace platf {
       std::optional<uint64_t> hdr_metadata_blob_id;
       bool direct_import_required {false};
       pacing::presentation_mode_t presentation_mode;
-      bool presentation_timestamps_validated {false};
       pacing::presentation_rate_limiter_t presentation_rate_limiter;
       bool presentation_pending {false};
       pacing::presentation_latch_t presentation_latch;
@@ -2346,6 +2337,9 @@ namespace platf {
         img->data = nullptr;
         img->pixel_pitch = 4;
 
+        img->capture_render_device = card.vulkan_device_path;
+        img->capture_offset_x = img_offset_x;
+        img->capture_offset_y = img_offset_y;
         img->sequence = 0;
         std::fill_n(img->sd.fds, 4, -1);
 

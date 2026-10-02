@@ -24,33 +24,8 @@
 
 static const char destination_prefix[] = "/var/lib/.vibepollo-profile.";
 static const char destination_suffix[] = "/incoming";
-static int open_beneath(int directory, const char *path, int flags);
-static const char *source_profiles[] = {".config/vibepollo", ".config/vibeshine", ".config/sunshine"};
-
-/* Selection happens only after permanently dropping privilege. Never silently
- * choose between two host identities, and never follow a legacy profile link. */
-static int open_source_profile(int home, const char *selection) {
-  if (!strcmp(selection, "machine-vibeshine")) {
-    return open_beneath(home, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-  }
-  int selected = -1;
-  for (unsigned i = 0; i < sizeof(source_profiles) / sizeof(source_profiles[0]); ++i) {
-    if (strcmp(selection, "auto") && strcmp(selection, source_profiles[i] + 8)) continue;
-    const int candidate = open_beneath(home, source_profiles[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (candidate < 0) {
-      if (errno == ENOENT) continue;
-      if (selected >= 0) close(selected);
-      return -1;
-    }
-    if (selected >= 0) {
-      close(selected); close(candidate); errno = EEXIST;
-      return -1;
-    }
-    selected = candidate;
-  }
-  if (selected < 0) errno = ENOENT;
-  return selected;
-}
+static const char source_relative[] = ".config/vibepollo";
+static const char legacy_source_relative[] = ".config/sunshine";
 
 enum {
   maximum_depth = 32,
@@ -148,6 +123,33 @@ static int open_beneath(int directory, const char *path, int flags) {
     .resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV,
   };
   return (int) syscall(SYS_openat2, directory, path, &how, sizeof(how));
+}
+
+static int open_desktop_profile(int home) {
+  int source = open_beneath(home, source_relative,
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  /* A canonical profile, including an empty one, is authoritative. Unsafe or
+   * inaccessible canonical paths must fail rather than import another tree. */
+  if (source < 0 && errno == ENOENT) {
+    source = open_beneath(home, legacy_source_relative,
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  }
+  return source;
+}
+
+static bool remap_legacy_configuration(int destination) {
+  struct stat attributes;
+  if (!fstatat(destination, "vibepollo.conf", &attributes, AT_SYMLINK_NOFOLLOW)) return true;
+  if (errno != ENOENT) return false;
+  if (fstatat(destination, "sunshine.conf", &attributes, AT_SYMLINK_NOFOLLOW)) return errno == ENOENT;
+  if (!S_ISREG(attributes.st_mode)) {
+    errno = EPERM;
+    return false;
+  }
+  /* Only the private imported copy is renamed, after the bounded copy and
+   * while still running as the desktop user. Never replace canonical data. */
+  return !renameat2(destination, "sunshine.conf", destination, "vibepollo.conf", RENAME_NOREPLACE) &&
+         !fsync(destination);
 }
 
 static bool same_snapshot(const struct stat *before, const struct stat *after) {
@@ -355,13 +357,9 @@ static bool destination_copy_budget(int destination, uint64_t *maximum_bytes) {
 
 int main(int argc, char **argv) {
   umask(0077);
-  const char *selection = argc == 4 ? argv[3] : "auto";
-  const bool machine_source = !strcmp(selection, "machine-vibeshine");
-  if ((argc != 3 && argc != 4) || geteuid() != 0 ||
-      (strcmp(selection, "auto") && strcmp(selection, "vibepollo") &&
-       strcmp(selection, "vibeshine") && strcmp(selection, "sunshine") && !machine_source)) {
+  if (argc != 3 || geteuid() != 0) {
     errno = EINVAL;
-    report_error("usage: vibepollo-profile-import USER /var/lib/.vibepollo-profile.XXXXXX/incoming [auto|vibepollo|vibeshine|sunshine|machine-vibeshine]");
+    report_error("usage: vibepollo-profile-import USER /var/lib/.vibepollo-profile.XXXXXX/incoming");
     return 2;
   }
   if (!close_unrelated_descriptors()) {
@@ -377,9 +375,7 @@ int main(int argc, char **argv) {
   struct passwd *account = NULL;
   if (!passwd_buffer || getpwnam_r(argv[1], &account_storage, passwd_buffer,
                                   (size_t) passwd_buffer_size, &account) ||
-      !account || account->pw_uid == 0 || (!machine_source && account->pw_uid < 1000) ||
-      (machine_source && strcmp(account->pw_name, "vibeshine")) ||
-      !account->pw_dir || account->pw_dir[0] != '/') {
+      !account || account->pw_uid < 1000 || !account->pw_dir || account->pw_dir[0] != '/') {
     free(passwd_buffer);
     errno = EINVAL;
     report_error("invalid desktop account");
@@ -394,8 +390,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  const int home = open(machine_source ? "/var/lib/vibeshine" : account->pw_dir,
-                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  const int home = open(account->pw_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   const int destination = open(argv[2], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   struct stat home_attributes, destination_attributes;
   if (home < 0 || destination < 0 || fstat(home, &home_attributes) ||
@@ -420,22 +415,20 @@ int main(int argc, char **argv) {
     free(passwd_buffer);
     return 1;
   }
-  const int source = open_source_profile(home, selection);
+  const int source = open_desktop_profile(home);
   if (source < 0) {
     const int open_error = errno;
     close(home);
     close(destination);
     free(passwd_buffer);
-    if (open_error == ENOENT && !strcmp(selection, "auto")) {
+    if (open_error == ENOENT) {
       /* A first installation has no desktop profile to import. The empty
        * staging directory becomes a fresh machine profile. */
       fprintf(stderr, "vibepollo-profile-import: no desktop profile to import; starting fresh\n");
       return 0;
     }
     errno = open_error;
-    report_error(open_error == EEXIST ?
-      "multiple legacy profiles exist; select one with sudo vibepollo migrate HOST; no identity was overwritten" :
-      "could not open the confined legacy profile");
+    report_error("could not open the confined desktop profile");
     return 1;
   }
   struct stat source_attributes;
@@ -469,7 +462,8 @@ int main(int argc, char **argv) {
     .source_device = source_attributes.st_dev,
     .destination_root = destination,
   };
-  const bool success = now && copy_directory(source, destination, 0, &budget);
+  const bool success = now && copy_directory(source, destination, 0, &budget) &&
+                       remap_legacy_configuration(destination);
   close(source);
   close(home);
   close(destination);

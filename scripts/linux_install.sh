@@ -16,14 +16,12 @@
 #   sudo bash linux_install.sh [options]
 #
 # Options:
-#   --version VERSION     Install this exact release (for example 1.19.0-beta.5).
+#   --version VERSION     Install this exact release (for example 2.0.0).
 #   --package FILE        Install a local vibepollo-*.pkg.tar.zst instead of downloading.
 #   --stable              Ignore pre-releases when picking the newest GitHub release.
 #   --no-repo             Skip the signed pacman repository and use GitHub releases.
 #   --skip-checks         Continue past failed requirement checks (not recommended).
 #   --yes                 Answer yes to pacman prompts.
-#   --source-profile HOST Choose vibepollo, vibeshine, sunshine, or machine-vibeshine
-#                         when more than one legacy profile exists.
 #   -h, --help            Show this help.
 #
 # Re-running the script is safe; it only installs what is missing.
@@ -40,6 +38,7 @@ readonly PACMAN_REPO_CONF='/etc/pacman.d/vibepollo.conf'
 readonly MIN_KERNEL_MAJOR=6
 readonly MIN_KERNEL_MINOR=16
 readonly DRM_INSTALL='/usr/libexec/vibeshine/vibeshine-drm-install'
+readonly DS5_INSTALL='/usr/libexec/vibeshine/vibeshine-ds5-install'
 readonly MACHINE_HOST='/usr/libexec/vibeshine/vibepollo-machine-host'
 
 requested_version=''
@@ -87,18 +86,7 @@ parse_args() {
       --stable) allow_prerelease=0; shift ;;
       --no-repo) use_repo=0; shift ;;
       --skip-checks) skip_checks=1; shift ;;
-      --yes)
-        pacman_confirm=(--noconfirm)
-        # libalpm ALPM_QUESTION_CONFLICT_PKG is 1 << 2. With --noconfirm,
-        # pacman normally rejects removal of conflicting installed hosts.
-        # Invert that answer only for the explicit Vibepollo transaction.
-        replacement_confirm=(--noconfirm --ask=4)
-        shift ;;
-      --source-profile)
-        [[ $# -ge 2 ]] || die '--source-profile requires a host'
-        case "$2" in vibepollo|vibeshine|sunshine|machine-vibeshine) ;; *) die 'invalid --source-profile host' ;; esac
-        export VIBEPOLLO_IMPORT_SOURCE=$2
-        shift 2 ;;
+      --yes) pacman_confirm=(--noconfirm); replacement_confirm=(--noconfirm --ask=4); shift ;;
       -h | --help) usage; exit 0 ;;
       *) die "unknown option: $1 (see --help)" ;;
     esac
@@ -337,6 +325,36 @@ EOF
   fi
 }
 
+stage_upgrade_guard() {
+  local candidate=$1 library="$workdir/arch-package-hooks" preflight="$workdir/preflight"
+  local hook_dir="$workdir/hooks"
+  [[ -f "$candidate" ]] || die "package preflight candidate is missing: $candidate"
+  command -v bsdtar >/dev/null 2>&1 || die 'bsdtar is required for the safe package preflight'
+  mkdir -p -m 700 -- "$hook_dir" || die 'could not stage the package transaction guard'
+  bsdtar -xOf "$candidate" .INSTALL > "$library" || die 'candidate has no Arch package hooks'
+  chmod 0600 "$library" || die 'could not protect the staged package hooks'
+  bash -n "$library" || die 'candidate package hooks have invalid shell syntax'
+  grep -q '^vibepollo_quiesce_or_abort() {' "$library" ||
+    die 'candidate lacks the required quiescence check'
+  printf '#!/usr/bin/bash\n. %q || exit 1\nvibepollo_quiesce_or_abort\n' "$library" > "$preflight"
+  chmod 0700 "$preflight" || die 'could not protect the transaction preflight'
+  cat > "$hook_dir/00-vibepollo-quiesce.hook" <<EOF
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = vibepollo
+
+[Action]
+Description = Safely stopping Vibepollo before package replacement
+When = PreTransaction
+Exec = $preflight
+AbortOnFail
+EOF
+  chmod 0600 "$hook_dir/00-vibepollo-quiesce.hook" || die 'could not protect the transaction hook'
+}
+
 install_from_repo() {
   configure_pacman_repo
   if ! pacman -Si vibepollo >/dev/null 2>&1; then
@@ -345,15 +363,28 @@ install_from_repo() {
     install_from_package
     return
   fi
-  prepare_driver_replacement
-  log 'Installing Vibepollo and its dependencies; no full system upgrade is requested'
+  local -a repo_target candidates
   if [[ -n "$requested_version" ]]; then
     local arch_version="${requested_version//-/}"
     arch_version="${arch_version//+/.}"
-    pacman -S "${replacement_confirm[@]}" "${driver_overwrite[@]}" "vibepollo=${arch_version}-1"
+    repo_target=("vibepollo=${arch_version}-1")
   else
-    pacman -S "${replacement_confirm[@]}" "${driver_overwrite[@]}" vibepollo
+    repo_target=(vibepollo)
   fi
+  mkdir -p -m 700 -- "$workdir/cache" || die 'could not stage the signed repository package'
+  # Download and verify the exact signed candidate before executing its hook
+  # under the package manager's transaction lock.
+  pacman -Sw "${replacement_confirm[@]}" --cachedir "$workdir/cache" "${repo_target[@]}"
+  mapfile -d '' -t candidates < <(find "$workdir/cache" -maxdepth 1 -type f \
+    -name 'vibepollo-*.pkg.tar.*' ! -name '*.sig' -print0)
+  [[ ${#candidates[@]} == 1 ]] || die 'expected exactly one verified Vibepollo package in the private cache'
+  [[ $(pacman -Qp -- "${candidates[0]}") == 'vibepollo '* ]] ||
+    die 'cached package identity is not Vibepollo'
+  stage_upgrade_guard "${candidates[0]}"
+  prepare_driver_replacement
+  log 'Installing Vibepollo and its dependencies; no full system upgrade is requested'
+  pacman -S "${replacement_confirm[@]}" "${driver_overwrite[@]}" \
+    --cachedir "$workdir/cache" --hookdir "$workdir/hooks" "${repo_target[@]}"
 }
 
 download_release_package() {
@@ -409,16 +440,26 @@ download_release_package() {
 # for the whole driver tree (or for files another package owns).
 prepare_driver_replacement() {
   # Optional roots are for isolated fixtures; production callers use no args.
-  local source_root=${1:-/usr/src} backup_root=${2:-/var/tmp}
-  local directory file owner attributes cursor status backup='' relative
+  local source_root=${1:-/usr/src} backup_root=${2:-/var/tmp} install_root=${3:-/}
+  local directory file owner attributes cursor status backup='' relative parent
+  local -a package_files=(
+    usr/lib/modules-load.d/70-vibeshine-ds5.conf
+    usr/libexec/vibeshine/vibeshine-ds5-install
+  )
   driver_overwrite=()
-  for directory in "$source_root"/vibeshine-drm-*; do
-    [[ ${directory##*/} =~ ^vibeshine-drm-[1-9][0-9]*\.[0-9]+\.[0-9]+$ ]] || continue
+  for directory in "$source_root"/vibeshine-drm-* "$source_root"/vibeshine-ds5-*; do
+    [[ ${directory##*/} =~ ^vibeshine-(drm|ds5)-[1-9][0-9]*\.[0-9]+\.[0-9]+$ ]] || continue
     [[ -d "$directory" && ! -L "$directory" ]] || continue
-    # Require the directory itself to belong to a known host package. This is
-    # not permission to adopt arbitrary files elsewhere in /usr/src.
-    owner=$(LC_ALL=C pacman -Qoq -- "$directory" 2>/dev/null) || continue
-    case "$owner" in sunshine|vibeshine|vibepollo) ;; *) continue ;; esac
+    # A manual driver repair can precede the first package containing it.
+    # Accept a known host package or an explicitly unowned exact driver tree;
+    # both still require trusted ancestry and per-file ownership checks below.
+    if owner=$(LC_ALL=C pacman -Qoq -- "$directory" 2>"$workdir/driver-owner-error"); then
+      case "$owner" in sunshine|vibeshine|vibepollo) ;; *) continue ;; esac
+    else
+      status=$?
+      [[ $status == 1 ]] && grep -Fxq -- "error: No package owns $directory" "$workdir/driver-owner-error" ||
+        die "could not establish package ownership of $directory; refusing overwrite"
+    fi
     cursor=$directory
     while [[ "$cursor" != / ]]; do
       [[ -d "$cursor" && ! -L "$cursor" ]] || die "unsafe driver source parent: $cursor"
@@ -439,7 +480,7 @@ prepare_driver_replacement() {
           die "could not establish package ownership of $file; refusing overwrite"
       fi
       if [[ -z "$backup" ]]; then
-        backup=$(mktemp -d "$backup_root/vibepollo-driver-backup.XXXXXXXX") || die 'cannot create driver backup'
+        backup=$(mktemp -d "$backup_root/vibeshine-driver-backup.XXXXXXXX") || die 'cannot create driver backup'
         chmod 700 "$backup" || die 'cannot protect driver backup'
         log "Preserving unowned legacy driver sources in $backup (retained even if installation fails)"
       fi
@@ -450,6 +491,40 @@ prepare_driver_replacement() {
       driver_overwrite+=(--overwrite "usr/src/$relative")
     done
   done
+  # Early DS5 development installs placed these package payloads manually.
+  # Adopt only the two exact paths introduced by the native package, subject to
+  # the same ownership, ancestry, backup, and byte-verification checks above.
+  for relative in "${package_files[@]}"; do
+    file="${install_root%/}/$relative"
+    [[ -e "$file" || -L "$file" ]] || continue
+    [[ -f "$file" && ! -L "$file" ]] || die "unsafe package replacement target: $file"
+    if owner=$(LC_ALL=C pacman -Qoq -- "$file" 2>"$workdir/driver-owner-error"); then
+      continue
+    else
+      status=$?
+      [[ $status == 1 ]] && grep -Fxq -- "error: No package owns $file" "$workdir/driver-owner-error" ||
+        die "could not establish package ownership of $file; refusing overwrite"
+    fi
+    cursor=${file%/*}
+    while [[ "$cursor" != / ]]; do
+      [[ -d "$cursor" && ! -L "$cursor" ]] || die "unsafe package replacement parent: $cursor"
+      attributes=$(stat -c '%u %a' -- "$cursor") || die "cannot inspect $cursor"
+      read -r owner status <<<"$attributes"
+      [[ "$owner" == "$EUID" && "$status" =~ ^[0-7]{3,4}$ ]] &&
+        (( (8#$status & 0022) == 0 )) || die "untrusted package replacement parent: $cursor"
+      cursor=${cursor%/*}; [[ -n "$cursor" ]] || cursor=/
+    done
+    if [[ -z "$backup" ]]; then
+      backup=$(mktemp -d "$backup_root/vibeshine-driver-backup.XXXXXXXX") || die 'cannot create driver backup'
+      chmod 700 "$backup" || die 'cannot protect driver backup'
+      log "Preserving unowned legacy install files in $backup (retained even if installation fails)"
+    fi
+    parent=${relative%/*}
+    mkdir -p -m 700 -- "$backup/$parent" || die 'cannot create package-file backup directory'
+    cp -a -- "$file" "$backup/$relative" || die "cannot back up $file"
+    cmp -s -- "$file" "$backup/$relative" || die "package file changed during backup: $file"
+    driver_overwrite+=(--overwrite "$relative")
+  done
 }
 
 install_from_package() {
@@ -457,17 +532,16 @@ install_from_package() {
   local identity
   identity=$(pacman -Qp -- "$local_package") || die 'could not inspect the local package'
   [[ "$identity" == 'vibepollo '* && "$identity" != *$'\n'* ]] || die 'local package is not Vibepollo'
+  stage_upgrade_guard "$local_package"
   prepare_driver_replacement
   log "Installing ${local_package##*/} with pacman"
   # Installing a local build must not also upgrade the operating system.
-  pacman -U "${replacement_confirm[@]}" "${driver_overwrite[@]}" -- "$local_package"
+  pacman -U "${replacement_confirm[@]}" "${driver_overwrite[@]}" \
+    --hookdir "$workdir/hooks" -- "$local_package"
 }
 
 install_vibepollo() {
-  log 'Vibepollo replaces conflicting Sunshine and Vibeshine packages in the same package transaction.'
-  log 'Original legacy profiles are retained. Migration preserves identity, credentials, pairings and applications.'
-  log 'Active streams disconnect during replacement; no existing host is removed before its replacement is available.'
-  workdir=$(mktemp -d)
+  workdir=$(mktemp -d /tmp/vibepollo-installer.XXXXXXXX)
   if [[ -n "$local_package" ]]; then
     install_from_package
     return
@@ -522,6 +596,22 @@ install_virtual_driver() {
   ok "Virtual-display driver ${installed} is installed for ${kernel_release}."
 }
 
+install_dualsense_driver() {
+  local helper=${1:-$DS5_INSTALL} result=0
+  [[ -x "$helper" ]] || die "the package is missing the DualSense USB installer: $helper"
+  if "$helper" status; then result=0; else result=$?; fi
+  if [[ $result != 0 && $result != 4 ]]; then
+    install_kernel_headers
+    log "Installing the DualSense USB driver for ${kernel_release}"
+    if "$helper" install; then result=0; else result=$?; fi
+  fi
+  case "$result" in
+    0) ok 'DualSense USB driver is installed and loaded.' ;;
+    4) reboot_required=1; warn 'The DualSense USB driver is installed; reboot to use the updated module.' ;;
+    *) die "DualSense USB driver installation failed (status $result); installation is not complete." ;;
+  esac
+}
+
 check_driver_state() {
   local installed loaded
   [[ -x "$DRM_INSTALL" ]] || return
@@ -570,9 +660,9 @@ print_summary() {
     printf '    %d. Reboot now. The display/session integration, virtual-display driver, Secure Boot key, or service state requires it.\n' "$step"
     step=$((step + 1))
   fi
-  printf '    %d. Log in to your KDE Plasma (Wayland) desktop.\n' "$step"; step=$((step + 1))
   printf '    %d. Open https://localhost:47990 on this machine, create the Web UI login, then pair Moonlight with the PIN.\n' "$step"; step=$((step + 1))
-  printf '       Pairing also works at the login screen; enter the PIN in the Web UI from another device.\n'
+  printf '       Pairing works at the login screen; enter the PIN in the Web UI from another device.\n'
+  printf '    %d. Log in to your KDE Plasma (Wayland) desktop to stream the desktop.\n' "$step"; step=$((step + 1))
   printf '    %d. Log out and back in once (or restart PipeWire) so the audio quantum drop-in takes effect.\n' "$step"; step=$((step + 1))
   printf '\n    Status:  sudo systemctl status vibepollo-session-controller.service vibepollo.service\n'
   printf '    Logs:    sudo journalctl -u vibepollo-session-controller.service -u vibepollo.service -b\n'
@@ -595,10 +685,13 @@ main() {
   check_session_restart
   install_vibepollo
   install_virtual_driver
+  install_dualsense_driver
   open_firewall
   check_driver_state
   check_services
   print_summary
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

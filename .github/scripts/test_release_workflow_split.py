@@ -20,6 +20,53 @@ def load_workflow(name: str) -> dict:
 
 
 class ReleaseWorkflowSplitTest(unittest.TestCase):
+    def test_release_tag_uses_local_linux_and_cloud_windows(self) -> None:
+        ci_workflow = load_workflow("ci.yml")
+        dispatch_input = ci_workflow["on"]["workflow_dispatch"]["inputs"][
+            "use_self_hosted"
+        ]
+        self.assertEqual(dispatch_input["type"], "boolean")
+        self.assertEqual(dispatch_input["default"], "false")
+
+        expected_forwarding = (
+            "${{ github.event_name == 'workflow_dispatch' && inputs.use_self_hosted }}"
+        )
+        self.assertEqual(
+            ci_workflow["jobs"]["build-windows"]["with"]["use_self_hosted"],
+            expected_forwarding,
+        )
+        self.assertEqual(
+            ci_workflow["jobs"]["build-archlinux"]["with"]["use_self_hosted"],
+            "${{ needs.release-candidate.outputs.should_release == 'true' || "
+            "(github.event_name == 'workflow_dispatch' && inputs.use_self_hosted) }}",
+        )
+
+        validation_workflow = load_workflow("validate-windows.yml")
+        validation_input = validation_workflow["on"]["workflow_dispatch"]["inputs"][
+            "use_self_hosted"
+        ]
+        self.assertEqual(validation_input["default"], "false")
+        self.assertEqual(
+            validation_workflow["jobs"]["windows"]["with"]["use_self_hosted"],
+            "${{ inputs.use_self_hosted }}",
+        )
+
+        runner_cases = (
+            ("ci-windows.yml", "build_windows", "windows-2022", "windows-release"),
+            ("ci-archlinux.yml", "build_archlinux", "ubuntu-latest", "linux-release"),
+        )
+        for workflow_name, job_name, hosted_runner, self_hosted_label in runner_cases:
+            workflow = load_workflow(workflow_name)
+            self_hosted_input = workflow["on"]["workflow_call"]["inputs"][
+                "use_self_hosted"
+            ]
+            self.assertEqual(self_hosted_input["type"], "boolean")
+            self.assertEqual(self_hosted_input["default"], "false")
+            runner_expression = workflow["jobs"][job_name]["runs-on"]
+            self.assertIn("inputs.use_self_hosted", runner_expression)
+            self.assertIn(hosted_runner, runner_expression)
+            self.assertIn(self_hosted_label, runner_expression)
+
     def test_package_compilers_have_bounded_parallelism(self) -> None:
         for workflow_name in ('ci-windows.yml', 'ci-archlinux.yml'):
             workflow = load_workflow(workflow_name)
@@ -72,6 +119,9 @@ class ReleaseWorkflowSplitTest(unittest.TestCase):
             "valid_candidates.append((key, tag, notes_file, release_commit))",
             workflow_text,
         )
+        self.assertIn('os.environ.get("GITHUB_REF") == "refs/heads/vibe-test"', workflow_text)
+        self.assertIn("Linux branch candidate:", workflow_text)
+        self.assertIn("release_version=release_version", workflow_text)
         self.assertIn("should_release=\"false\"", workflow_text)
         self.assertNotIn("def canonical_release_tag", workflow_text)
 
@@ -122,9 +172,6 @@ class ReleaseWorkflowSplitTest(unittest.TestCase):
                     self.assertEqual(eval(expression, {"__builtins__": {}}), expected)
 
     def test_arch_package_is_built_and_carried_into_release(self) -> None:
-        pkgbuild = (ROOT / "packaging/linux/Arch/PKGBUILD").read_text(encoding="utf-8")
-        self.assertIn("pkgname='vibepollo'", pkgbuild)
-        self.assertIn("conflicts=('sunshine' 'vibeshine')", pkgbuild)
         ci_workflow = load_workflow("ci.yml")
         arch_workflow = load_workflow("ci-archlinux.yml")
         release_workflow = load_workflow("sign-release.yml")
@@ -225,7 +272,7 @@ class ReleaseWorkflowSplitTest(unittest.TestCase):
         )
         self.assertNotIn("vibepollo.pkg.tar.gz", getting_started)
         self.assertIn("vibepollo-*.pkg.tar.zst", getting_started)
-        self.assertIn("without guessing a package name", getting_started)
+        self.assertIn("installs the kernel headers for your running kernel", (ROOT / "docs" / "linux" / "install.md").read_text(encoding="utf-8"))
 
     def test_prerelease_notes_do_not_claim_to_cover_stable_releases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -339,6 +386,8 @@ class ReleaseWorkflowSplitTest(unittest.TestCase):
             '[[ "${asset_name}" == "release-provenance.json" ]] && continue',
             workflow_text,
         )
+        self.assertIn("arch_package_version=${RELEASE_VERSION//-/}", workflow_text)
+        self.assertIn("arch_package_version=${arch_package_version//+/.}", workflow_text)
 
         release_steps = jobs["release"]["steps"]
         close_issues = next(
@@ -433,7 +482,7 @@ class ReleaseWorkflowSplitTest(unittest.TestCase):
         self.assertIn("AddSeconds($timeoutSeconds)", action_text)
 
 
-class WindowsWorkflowEfficiencyTest(unittest.TestCase):
+class WindowsWorkflowBehaviorTest(unittest.TestCase):
     def test_release_build_uses_shallow_cached_dependencies(self) -> None:
         workflow = load_workflow("ci-windows.yml")
         workflow_text = (ROOT / ".github" / "workflows" / "ci-windows.yml").read_text(
@@ -483,7 +532,7 @@ class WindowsWorkflowEfficiencyTest(unittest.TestCase):
             workflow_text,
         )
         self.assertIn(
-            "          # Release tag builds save unsigned artifacts and rely on prior branch/PR testing; other calls retain tests.\n"
+            "          # Release tag builds omit test targets; ordinary reusable-workflow calls retain them.\n"
             "          cmake \\",
             workflow_text,
         )
@@ -618,6 +667,63 @@ class WindowsWorkflowEfficiencyTest(unittest.TestCase):
             bootstrapper,
         )
 
+    def test_release_build_uses_shallow_cached_dependencies(self) -> None:
+        workflow = load_workflow("ci-windows.yml")
+        workflow_text = (ROOT / ".github" / "workflows" / "ci-windows.yml").read_text(
+            encoding="utf-8"
+        )
+        build_steps = workflow["jobs"]["build_windows"]["steps"]
+        package_steps = workflow["jobs"]["package_windows"]["steps"]
+
+        build_checkout = next(step for step in build_steps if step["name"] == "Checkout")
+        package_checkout = next(step for step in package_steps if step["name"] == "Checkout")
+        self.assertEqual(build_checkout["with"]["fetch-depth"], "1")
+        self.assertEqual(build_checkout["with"]["submodules"], "recursive")
+        self.assertEqual(package_checkout["with"]["fetch-depth"], "1")
+
+        self.assertNotIn(
+            "Update Windows dependencies",
+            {step["name"] for step in build_steps},
+        )
+        setup = next(
+            step for step in build_steps if step["name"] == "Setup Dependencies Windows"
+        )
+        self.assertEqual(setup["with"]["cache"], "true")
+        install = setup["with"]["install"]
+        packages = (
+            "git",
+            "mingw-w64-${{ matrix.toolchain }}-boost",
+            "mingw-w64-${{ matrix.toolchain }}-cmake",
+            "mingw-w64-${{ matrix.toolchain }}-cppwinrt",
+            "mingw-w64-${{ matrix.toolchain }}-curl-winssl",
+            "mingw-w64-${{ matrix.toolchain }}-gcc",
+            "mingw-w64-${{ matrix.toolchain }}-MinHook",
+            "mingw-w64-${{ matrix.toolchain }}-miniupnpc",
+            "mingw-w64-${{ matrix.toolchain }}-ninja",
+            "mingw-w64-${{ matrix.toolchain }}-nlohmann-json",
+            "mingw-w64-${{ matrix.toolchain }}-onevpl",
+            "mingw-w64-${{ matrix.toolchain }}-openssl",
+            "mingw-w64-${{ matrix.toolchain }}-opus",
+            "mingw-w64-${{ matrix.toolchain }}-sqlite3",
+            "mingw-w64-${{ matrix.toolchain }}-tools",
+        )
+        for package in packages:
+            self.assertIn(package, install)
+        self.assertNotIn("wget", install)
+        self.assertNotIn("-toolchain", install)
+        self.assertNotIn(
+            "-DBUILD_WERROR=ON \\\n            # Release tag builds",
+            workflow_text,
+        )
+        self.assertIn(
+            "          # Release tag builds omit test targets; ordinary reusable-workflow calls retain them.\n"
+            "          cmake \\",
+            workflow_text,
+        )
+        self.assertIn(
+            "-DBUILD_TESTS=${{ inputs.build_tests && 'ON' || 'OFF' }}",
+            workflow_text,
+        )
     def test_windows_steam_artwork_dependencies(self) -> None:
         workflow = load_workflow("ci-windows.yml")
         steps = workflow["jobs"]["build_windows"]["steps"]

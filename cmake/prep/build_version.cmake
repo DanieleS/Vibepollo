@@ -48,12 +48,8 @@ if(DEFINED GITHUB_CLONE_URL AND (SUNSHINE_REPO_OWNER STREQUAL "DanieleS" OR SUNS
     endif()
 endif()
 
-# BUILD_VERSION is the authoritative version input whether supplied as the
-# BUILD_VERSION environment variable or the normal -DBUILD_VERSION cache
-# option. BRANCH is optional build context and must not decide whether an
-# explicit release version is honored. In particular, later build targets may
-# re-run CMake without inheriting a step-local environment while retaining the
-# configured cache value.
+# BUILD_VERSION is authoritative from the environment or -DBUILD_VERSION.
+# BRANCH is optional context and does not determine version selection.
 if(DEFINED BUILD_VERSION AND NOT "${BUILD_VERSION}" STREQUAL "")
     if(DEFINED ENV{BRANCH} AND NOT "$ENV{BRANCH}" STREQUAL "")
         message("Got explicit build version '${BUILD_VERSION}' for '$ENV{BRANCH}'")

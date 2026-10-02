@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/vhf_gamepad.cpp
- * @brief Definitions for the Vibeshine VHF virtual gamepad input backend.
+ * @brief Definitions for the Vibepollo VHF virtual gamepad input backend.
  */
 #define WINVER 0x0A00
 
@@ -38,7 +38,7 @@ namespace platf {
     // only bounds how quickly rumble reaches the client. 8ms keeps that under a frame at 120 FPS.
     constexpr auto k_feedback_poll_interval = 8ms;
 
-    // The wire protocol reuses Vibeshine's normalized button values verbatim. Pin that here so a
+    // The wire protocol reuses Vibepollo's normalized button values verbatim. Pin that here so a
     // change on either side breaks the build instead of silently remapping every controller.
     static_assert(DPAD_UP == lvg::button_mask::dpad_up);
     static_assert(DPAD_DOWN == lvg::button_mask::dpad_down);

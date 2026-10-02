@@ -48,11 +48,6 @@ namespace audio::policy {
     return selected;
   }
 
-  bool capture_sink_without_routing(bool enabled, const std::string &configured_sink, const std::string &configured_virtual_sink, const std::string &selected_sink) {
-    return enabled && !configured_sink.empty() && configured_virtual_sink.empty() &&
-           selected_sink == configured_sink;
-  }
-
   std::string select_stream_sink(const sink_catalog_t &catalog,
                                  const std::string &configured_sink,
                                  const std::string &configured_virtual_sink,
@@ -65,6 +60,11 @@ namespace audio::policy {
       channels,
       host_audio_enabled && !managed_virtual_sink
     );
+  }
+
+  bool capture_sink_without_routing(bool enabled, const std::string &configured_sink, const std::string &configured_virtual_sink, const std::string &selected_sink) {
+    return enabled && !configured_sink.empty() && configured_virtual_sink.empty() &&
+           selected_sink == configured_sink;
   }
 
   sample_action_e sample_action(sample_status_e status) {

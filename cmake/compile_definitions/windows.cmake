@@ -41,7 +41,7 @@ file(GLOB NVPREFS_FILES CONFIGURE_DEPENDS
 include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include")
 include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party")
 
-# libvirtualgamepad: the control-protocol client for Vibeshine's own UMDF/VHF gamepad driver.
+# libvirtualgamepad: the control-protocol client for Vibepollo's own UMDF/VHF gamepad driver.
 # Only the header-only protocol and the small SetupAPI client are compiled here; the driver
 # itself is consumed as an independently released signed package.
 set(SUNSHINE_LIBVIRTUALGAMEPAD_SOURCE_DIR "" CACHE PATH "Path to libvirtualgamepad source")
@@ -257,6 +257,9 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_ram.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/present_timing.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/present_timing.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/present_timing_policy.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_display.h"
         ${SUNSHINE_WINDOWS_VDISPLAY_SOURCES}
@@ -310,6 +313,7 @@ set(OPENSSL_LIBRARIES
 
 list(PREPEND PLATFORM_LIBRARIES
         ${CURL_STATIC_LIBRARIES}
+        advapi32
         avrt
         d3d11
         D3DCompiler
@@ -338,4 +342,13 @@ list(PREPEND PLATFORM_LIBRARIES
 if(SUNSHINE_ENABLE_TRAY)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/third-party/tray/src/tray_windows.c")
+endif()
+
+# PyroWave host encoder: D3D11 colour conversion into the Vulkan encoder. Without
+# it, src/pyrowave_host.cpp provides the unavailable stub.
+if(SUNSHINE_ENABLE_PYROWAVE)
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave_d3d11_core.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave_d3d11_core.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave_encode.cpp")
 endif()

@@ -1112,7 +1112,8 @@ namespace platf::steam {
       const bool overlay = policy.provider == "mangohud" ||
                            policy.provider == "mangohud-proton";
       const bool limited = overlay || policy.provider == "proton";
-      if ((!limited && policy.provider != "disabled") ||
+      if ((policy.playstation_controller_attached && !policy.proton_dualsense_compatibility) ||
+          (!limited && policy.provider != "disabled") ||
           (limited && (policy.limit_millihz < 1000 ||
                        policy.limit_millihz > 1000000)) ||
           (!limited && policy.limit_millihz != 0) ||
@@ -1125,10 +1126,11 @@ namespace platf::steam {
            policy.limiter_method != "late") ||
           (policy.provider != "mangohud" &&
            policy.limiter_method != "late") ||
-          (!policy.smooth_motion && policy.smooth_motion_graphics_queue)) {
+          (!policy.smooth_motion && policy.smooth_motion_graphics_queue) ||
+          (policy.wayland_hdr_compatibility && !policy.hdr)) {
         return false;
       }
-      return limited || policy.smooth_motion;
+      return limited || policy.smooth_motion || policy.hdr || policy.proton_dualsense_compatibility;
     }
 
     bool parse_u32_token(std::string_view token, std::uint32_t &value) {
@@ -1150,7 +1152,11 @@ namespace platf::steam {
            std::to_string(policy.limit_millihz) + " " + policy.preset + " " +
            (policy.always_show_graph ? "1" : "0") + " " +
            policy.limiter_method + " " + (policy.smooth_motion ? "1" : "0") +
-           " " + (policy.smooth_motion_graphics_queue ? "1" : "0");
+           " " + (policy.smooth_motion_graphics_queue ? "1" : "0") +
+           " " + (policy.hdr ? "1" : "0") +
+           " " + (policy.wayland_hdr_compatibility ? "1" : "0") +
+           " " + (policy.proton_dualsense_compatibility ? "1" : "0") +
+           " " + (policy.playstation_controller_attached ? "1" : "0");
   }
 
   std::optional<std::vector<std::string>> session_launch_arguments(
@@ -1174,8 +1180,8 @@ namespace platf::steam {
       }
       offset = separator + 1;
     }
-    // The client fallback is also semantic. Otherwise run_command would
-    // wrap this trusted helper invocation in the generic app verb.
+    // The unresolved catalog fallback is a trusted session-exec Steam verb.
+    // Passing it through the generic app wrapper would make the broker reject it.
     if (tokens.size() == 3 && tokens[0] == session_exec_path && tokens[1] == "steam") {
       std::uint32_t app_id = 0;
       if (!parse_u32_token(tokens[2], app_id) || app_id == 0 ||
@@ -1185,7 +1191,7 @@ namespace platf::steam {
       tokens.erase(tokens.begin());
       return tokens;
     }
-    if (tokens.size() != 10 || tokens[0] != session_exec_path ||
+    if (tokens.size() != 14 || tokens[0] != session_exec_path ||
         tokens[1] != "steam-direct") {
       return std::nullopt;
     }
@@ -1196,7 +1202,11 @@ namespace platf::steam {
         !parse_u32_token(tokens[4], policy.limit_millihz) ||
         (tokens[6] != "0" && tokens[6] != "1") ||
         (tokens[8] != "0" && tokens[8] != "1") ||
-        (tokens[9] != "0" && tokens[9] != "1")) {
+        (tokens[9] != "0" && tokens[9] != "1") ||
+        (tokens[10] != "0" && tokens[10] != "1") ||
+        (tokens[11] != "0" && tokens[11] != "1") ||
+        (tokens[12] != "0" && tokens[12] != "1") ||
+        (tokens[13] != "0" && tokens[13] != "1")) {
       return std::nullopt;
     }
     policy.provider = tokens[3];
@@ -1205,6 +1215,10 @@ namespace platf::steam {
     policy.limiter_method = tokens[7];
     policy.smooth_motion = tokens[8] == "1";
     policy.smooth_motion_graphics_queue = tokens[9] == "1";
+    policy.hdr = tokens[10] == "1";
+    policy.wayland_hdr_compatibility = tokens[11] == "1";
+    policy.proton_dualsense_compatibility = tokens[12] == "1";
+    policy.playstation_controller_attached = tokens[13] == "1";
     if (session_launch_command(app_id, policy) != command) {
       return std::nullopt;
     }

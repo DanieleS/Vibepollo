@@ -37,7 +37,7 @@ namespace virtual_display_scale {
     }
 
     // Keep roughly 864 logical pixels on the short edge, then choose a scale
-    // exposed by both Windows and the Vibeshine UI.
+    // exposed by both Windows and the web UI.
     const auto short_edge = (std::min) (width, height);
     const auto ideal_percent = static_cast<double>(short_edge) * 100.0 / 864.0;
     auto closest = supported_percentages.front();

@@ -45,6 +45,7 @@
 #include "entry_handler.h"
 #include "file_handler.h"
 #include "globals.h"
+#include "host_stats.h"
 #include "httpcommon.h"
 #include "logging.h"
 #include "nvhttp.h"
@@ -846,6 +847,7 @@ namespace config {
 
     0,  // hevc_mode
     0,  // av1_mode
+    true,  // pyrowave
 
     2,  // min_threads
     {
@@ -959,7 +961,8 @@ namespace config {
       {},  // snapshot_exclude_devices
       {},  // mode_remapping
       {false},  // wa
-      true  // vulkan_hdr_layer
+      true,  // vulkan_hdr_layer
+      false  // wayland_hdr_compatibility
     },  // display_device
 
     0,  // max_bitrate
@@ -986,6 +989,7 @@ namespace config {
 
     20,  // fecPercentage
     64,  // video_max_batch_size_kb
+    20,  // pyrowave_critical_fec_percentage
 
     ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
@@ -1028,6 +1032,7 @@ namespace config {
     true,  // client gamepads with motion events are emulated as DS4
     true,  // client gamepads with touchpads are emulated as DS4
     true,  // ds5_inputtino_randomize_mac
+    true,  // proton_dualsense_compatibility
 
     true,  // keyboard enabled
     true,  // mouse enabled
@@ -1035,7 +1040,7 @@ namespace config {
     true,  // always send scancodes
     true,  // high resolution scrolling
     true,  // native pen/touch support
-    true,  // enable input only mode (preserve synthetic Remote Input when unset)
+    false,  // enable input only mode
     true,  // forward_rumble
   };
 
@@ -1716,19 +1721,14 @@ namespace config {
     return ret;
   }
 
-  std::vector<std::string_view> &get_supported_gamepad_options() {
-    // The names are owned by a function-local static inside the platform layer, so these views
-    // stay valid. Build the list once: copying the vector per call left every view dangling and
-    // appended another full set of options on each parse.
-    static std::vector<std::string_view> opts = [] {
-      const auto &options = platf::supported_gamepads(nullptr);
-      std::vector<std::string_view> names;
-      names.reserve(options.size());
-      for (const auto &opt : options) {
-        names.emplace_back(opt.name);
-      }
-      return names;
-    }();
+  std::vector<::std::string_view> get_supported_gamepad_options() {
+    // The platform owns this static list; keep it by reference so the views remain valid.
+    const auto &options = platf::supported_gamepads(nullptr);
+    std::vector<::std::string_view> opts;
+    opts.reserve(options.size());
+    for (const auto &opt : options) {
+      opts.emplace_back(opt.name);
+    }
     return opts;
   }
 
@@ -1791,6 +1791,7 @@ namespace config {
     int_f(vars, "qp", video.qp);
     int_between_f(vars, "hevc_mode", video.hevc_mode, {0, 3});
     int_between_f(vars, "av1_mode", video.av1_mode, {0, 3});
+    bool_f(vars, "pyrowave", video.pyrowave);
     int_f(vars, "min_threads", video.min_threads);
     string_f(vars, "sw_preset", video.sw.sw_preset);
     if (!video.sw.sw_preset.empty()) {
@@ -1990,6 +1991,7 @@ namespace config {
       }
     }
     bool_f(vars, "vulkan_hdr_layer", video.dd.vulkan_hdr_layer);
+    bool_f(vars, "wayland_hdr_compatibility", video.dd.wayland_hdr_compatibility);
     {
       auto it = vars.find("dd_virtual_display_permanent_count");
       if (it == std::end(vars)) {
@@ -2078,6 +2080,10 @@ namespace config {
         if (virtual_capture_mode == "legacy" || virtual_capture_mode == "2x" ||
             virtual_capture_mode == "fixed-2x" || virtual_capture_mode == "fixed_2x") {
           frame_limiter.virtual_display_capture_mode = mode_e::legacy;
+        } else if (virtual_capture_mode == "vrr" || virtual_capture_mode == "1000hz" ||
+                   virtual_capture_mode == "1000" || virtual_capture_mode == "fixed-1000hz" ||
+                   virtual_capture_mode == "fixed_1000hz") {
+          frame_limiter.virtual_display_capture_mode = mode_e::vrr;
         } else if (virtual_capture_mode == "false" || virtual_capture_mode == "no" ||
                    virtual_capture_mode == "disable" || virtual_capture_mode == "disabled" ||
                    virtual_capture_mode == "off" || virtual_capture_mode == "0") {
@@ -2223,6 +2229,8 @@ namespace config {
     int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
     int_between_f(vars, "pacing_max_bitrate_kbps", stream.pacing_max_bitrate_kbps, {0, 10000000});
     int_between_f(vars, "packetsize", stream.packetsize, {0, PACKETSIZE_MAX});
+    vars.erase("pyrowave_send_rate_mbps");
+    int_between_f(vars, "pyrowave_critical_fec_percentage", stream.pyrowave_critical_fec_percentage, {0, 255});
     int_between_f(vars, "video_max_batch_size_kb", stream.video_max_batch_size_kb, {0, 64});
     if (stream.video_max_batch_size_kb == 0) {
       stream.video_max_batch_size_kb = 64;
@@ -2265,6 +2273,7 @@ namespace config {
     string_restricted_f(vars, "gamepad"s, input.gamepad, get_supported_gamepad_options());
     bool_f(vars, "ds4_back_as_touchpad_click", input.ds4_back_as_touchpad_click);
     bool_f(vars, "motion_as_ds4", input.motion_as_ds4);
+    bool_f(vars, "proton_dualsense_compatibility", input.proton_dualsense_compatibility);
     bool_f(vars, "touchpad_as_ds4", input.touchpad_as_ds4);
 
     bool_f(vars, "mouse", input.mouse);
@@ -2717,6 +2726,7 @@ namespace config {
         "native_pen_touch",
         "keybindings",
         "ds5_inputtino_randomize_mac",
+        "proton_dualsense_compatibility",
 
         // Stream audio/video and display automation
         "audio_sink",
@@ -2753,6 +2763,7 @@ namespace config {
         // Codec / capture negotiation
         "fec_percentage",
         "video_max_batch_size_kb",
+        "pyrowave_critical_fec_percentage",
         "qp",
         "min_threads",
         "hevc_mode",
@@ -3270,6 +3281,8 @@ namespace config {
       const auto prev_rtx_hdr_peak_brightness = video.rtx_hdr.peak_brightness;
 #endif
       const auto prev_session_history_enabled = sunshine.session_history_enabled;
+      const auto prev_realtime_stats_enabled = sunshine.realtime_stats_enabled;
+      const auto prev_realtime_stats_poll_interval_ms = sunshine.realtime_stats_poll_interval_ms;
 
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
       merge_config_overrides(vars, command_line_overrides);
@@ -3288,6 +3301,10 @@ namespace config {
         BOOST_LOG(info) << "Hot-apply: deferring session history enablement change until active sessions end.";
         sunshine.session_history_enabled = prev_session_history_enabled;
         g_deferred_reload.store(true, std::memory_order_release);
+      }
+      if (sunshine.realtime_stats_enabled != prev_realtime_stats_enabled ||
+          sunshine.realtime_stats_poll_interval_ms != prev_realtime_stats_poll_interval_ms) {
+        host_stats::configuration_changed();
       }
       session_history::reload_settings();
 

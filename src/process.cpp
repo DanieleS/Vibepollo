@@ -53,14 +53,13 @@
 #include "display_device.h"
 #include "deferred_action.h"
 #include "file_handler.h"
+#include "logging.h"
+#include "platform/common.h"
 #if defined(_WIN32) || defined(__linux__)
   #include "display_helper_integration.h"
   #include "remote_display_topology.h"
 #endif
-#include "logging.h"
-#include "platform/common.h"
 #ifdef _WIN32
-  #include "display_helper_integration.h"
   #include "config_playnite.h"
   #include "platform/windows/display.h"
   #include "platform/windows/frame_limiter.h"
@@ -77,10 +76,13 @@
   #include <Psapi.h>
 #elif defined(__linux__)
   #include "platform/linux/gamescopegrab.h"
+  #include "platform/linux/frame_limiter.h"
   #include "platform/linux/mangohud_policy.h"
   #include "platform/linux/mangohud_state.h"
+  #include "platform/linux/misc.h"
   #include "platform/linux/secure_open.h"
   #include "platform/linux/smooth_motion_policy.h"
+  #include "platform/linux/wayland_hdr_compatibility.h"
   #include "steam_integration.h"
 
   #include <fcntl.h>
@@ -950,6 +952,8 @@ namespace proc {
 
   proc_t proc;
 
+  int input_only_app_id = -1;
+  std::string input_only_app_id_str;
   int terminate_app_id = -1;
   std::string terminate_app_id_str;
 
@@ -1024,6 +1028,7 @@ namespace proc {
   proc_t::proc_t(proc_t &&other) noexcept:
       _app_id(other._app_id.load(std::memory_order_acquire)),
       _env(std::move(other._env)),
+      _stream_owned_environment_keys(std::move(other._stream_owned_environment_keys)),
       _apps(std::move(other._apps)),
       _app(std::move(other._app)),
       _app_launch_time(other._app_launch_time),
@@ -1034,7 +1039,6 @@ namespace proc {
       _steam_process_controller(std::move(other._steam_process_controller)),
       _steam_tracking_active(other._steam_tracking_active),
       _steam_tracking_associated(other._steam_tracking_associated),
-      _steam_tracking_exit(other._steam_tracking_exit),
       _steam_tracking_deadline(other._steam_tracking_deadline),
       _steam_last_tracking_poll(other._steam_last_tracking_poll),
       _process(std::move(other._process)),
@@ -1070,6 +1074,7 @@ namespace proc {
 #endif
       _app_id.store(other._app_id.load(std::memory_order_acquire), std::memory_order_release);
       _env = std::move(other._env);
+      _stream_owned_environment_keys = std::move(other._stream_owned_environment_keys);
       _apps = std::move(other._apps);
       _app = std::move(other._app);
       _app_launch_time = other._app_launch_time;
@@ -1080,7 +1085,6 @@ namespace proc {
       _steam_process_controller = std::move(other._steam_process_controller);
       _steam_tracking_active = other._steam_tracking_active;
       _steam_tracking_associated = other._steam_tracking_associated;
-      _steam_tracking_exit = other._steam_tracking_exit;
       _steam_tracking_deadline = other._steam_tracking_deadline;
       _steam_last_tracking_poll = other._steam_last_tracking_poll;
       _process = std::move(other._process);
@@ -1338,6 +1342,18 @@ namespace proc {
     return cmd_path.parent_path();
   }
 
+  void proc_t::launch_input_only() {
+    _app_id = input_only_app_id;
+    _app_name = "Remote Input";
+    _app.uuid = REMOTE_INPUT_UUID;
+    _app.terminate_on_pause = true;
+    allow_client_commands = false;
+    placebo = true;
+
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+    system_tray::update_tray_playing(_app_name);
+#endif
+  }
   int proc_t::execute(const ctx_t &app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
 #ifdef _WIN32
     std::optional<std::filesystem::path> resolved_lossless_exe_path;
@@ -1348,9 +1364,23 @@ namespace proc {
     _lossless_should_start_support = false;
     _lossless_metadata = {};
 #endif
-    // Ensure starting from a clean slate.
-    const bool skip_display_revert = launch_session && launch_session->display_config_preapplied;
-    terminate(false, false, skip_display_revert, true);
+    if (_app_id == input_only_app_id) {
+      terminate(false, false, false, true);
+      std::this_thread::sleep_for(1s);
+    } else {
+      // Ensure starting from a clean slate
+      const bool skip_display_revert = launch_session && launch_session->display_config_preapplied;
+      terminate(false, false, skip_display_revert, true);
+    }
+
+#ifdef __linux__
+    // proc_t retains its parsed environment across launches. Remove only the
+    // values that a prior stream supplied; never erase an apps.json value.
+    for (const auto &key : _stream_owned_environment_keys) {
+      _env[key] = "";
+    }
+    _stream_owned_environment_keys.clear();
+#endif
 
     _app = app;
     _app_id = util::from_view(app.id);
@@ -1706,7 +1736,45 @@ namespace proc {
     _env["SUNSHINE_CLIENT_WIDTH"] = std::to_string(render_width);
     _env["SUNSHINE_CLIENT_HEIGHT"] = std::to_string(render_height);
     _env["SUNSHINE_CLIENT_FPS"] = config::sunshine.envvar_compatibility_mode ? std::to_string(std::round((float) launch_session->fps / 1000.0f)) : fps_str;
-    _env["SUNSHINE_CLIENT_HDR"] = rtsp_stream::effective_hdr_requested(*launch_session) ? "true" : "false";
+    const bool stream_hdr = rtsp_stream::effective_hdr_requested(*launch_session);
+    _env["SUNSHINE_CLIENT_HDR"] = stream_hdr ? "true" : "false";
+#ifdef __linux__
+    const auto wayland_hdr_compatibility = platf::wayland_hdr_compatibility::resolve(
+      config::video.dd.wayland_hdr_compatibility,
+      platf::wayland_hdr_compatibility::selected_session_is_wayland(
+        window_system == window_system_e::WAYLAND
+      ),
+      stream_hdr
+    );
+    auto set_stream_environment_default = [&](const char *key, const char *value) {
+      if (!_env[key].to_string().empty()) {
+        return false;
+      }
+      _env[key] = value;
+      _stream_owned_environment_keys.emplace(key);
+      return true;
+    };
+    if (config::input.proton_dualsense_compatibility) {
+      (void) set_stream_environment_default("PROTON_KEEP_SONY_AUDIO_ENDPOINT_VISIBLE", "1");
+      (void) set_stream_environment_default("PROTON_SONY_WINDOWS_DEVICE_NAMES", "1");
+    }
+    if (wayland_hdr_compatibility.enabled) {
+      (void) set_stream_environment_default("ENABLE_HDR_WSI", "1");
+      BOOST_LOG(info) << "Wayland HDR compatibility enabled for application launch.";
+      BOOST_LOG(debug) << "Wayland HDR compatibility applied ENABLE_HDR_WSI to the launch environment.";
+    } else if (config::video.dd.wayland_hdr_compatibility) {
+      if (launch_session->prefer_sdr_10bit) {
+        BOOST_LOG(debug) << "Wayland HDR compatibility skipped: 10-bit SDR preferred.";
+      } else if (launch_session->force_sdr) {
+        BOOST_LOG(debug) << "Wayland HDR compatibility skipped: HDR disabled by the final session/display policy.";
+      } else if (wayland_hdr_compatibility.suppression_reason ==
+                 platf::wayland_hdr_compatibility::suppression_reason_e::not_wayland) {
+        BOOST_LOG(debug) << "Wayland HDR compatibility skipped: the active session is not Wayland.";
+      } else {
+        BOOST_LOG(debug) << "Wayland HDR compatibility skipped: session resolved to SDR.";
+      }
+    }
+#endif
     _env["SUNSHINE_CLIENT_GCMAP"] = std::to_string(launch_session->gcmap);
     _env["SUNSHINE_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
     _env["SUNSHINE_CLIENT_ENABLE_SOPS"] = launch_session->enable_sops ? "true" : "false";
@@ -1738,7 +1806,8 @@ namespace proc {
       config::video.capture,
       false,
       config::frame_limiter.virtual_display_limiter_enabled(),
-      config::frame_limiter.fixed_virtual_display_refresh_multiplier()
+      config::frame_limiter.fixed_virtual_display_refresh_multiplier(),
+      config::frame_limiter.fixed_virtual_display_refresh_millihz(launch_session->client_vrr_requested)
     );
     const auto mangohud_policy = platf::mangohud::make_launch_policy(
       config::frame_limiter.provider,
@@ -1777,15 +1846,17 @@ namespace proc {
     }
     bool inherited_steam_environment_ready = !gamescope_steam_launch;
     bool session_steam_direct_launch = false;
+    bool steam_proton_launch = false;
     const bool effective_frame_limiter =
       mangohud_policy.enabled && (proton_limiter || mangohud_available);
     const bool direct_steam_launch_required =
       !gamescope_steam_launch &&
       !_app.steam_id.empty() &&
-      platf::steam::requires_direct_environment_launch(
+      (config::input.proton_dualsense_compatibility || platf::steam::requires_direct_environment_launch(
         effective_frame_limiter,
-        smooth_motion_policy.enabled
-      );
+        smooth_motion_policy.enabled,
+        stream_hdr
+      ));
     if (direct_steam_launch_required) {
       inherited_steam_environment_ready = false;
       std::uint32_t steam_app_id = 0;
@@ -1798,6 +1869,7 @@ namespace proc {
           return candidate.app_id == steam_app_id && candidate.installed;
         });
         if (game != games.end()) {
+          steam_proton_launch = game->launch_os == "windows";
           if (std::getenv("VIBEPOLLO_MACHINE_HOST")) {
             const bool proton_overlay_enabled =
               effective_frame_limiter && proton_limiter &&
@@ -1820,6 +1892,15 @@ namespace proc {
               .smooth_motion = smooth_motion_policy.enabled,
               .smooth_motion_graphics_queue = smooth_motion_policy.enabled &&
                                               smooth_motion_policy.use_graphics_queue,
+              .hdr = stream_hdr,
+              // The machine-side Steam catalog intentionally omits desktop
+              // Proton metadata. The session helper re-discovers the app and
+              // applies this policy only when its launch is actually Proton;
+              // carrying the resolved Wayland/HDR bit here is therefore
+              // required for the brokered direct launch to receive it.
+              .wayland_hdr_compatibility = wayland_hdr_compatibility.enabled,
+              .proton_dualsense_compatibility = config::input.proton_dualsense_compatibility,
+              .playstation_controller_attached = launch_session->playstation_gamepad_mask != 0,
             };
             const bool overlay = policy.provider == "mangohud" ||
                                  policy.provider == "mangohud-proton";
@@ -1883,6 +1964,16 @@ namespace proc {
         BOOST_LOG(error)
           << "Stream-owned launch features cannot activate because the managed Steam app ID is invalid: ["
           << _app.steam_id << "].";
+      }
+    }
+    if (steam_proton_launch) {
+      // Steam metadata is the reliable Proton discriminator. Native Steam and
+      // arbitrary direct executables do not receive these Proton HDR flags.
+      (void) set_stream_environment_default("PROTON_ENABLE_HDR", stream_hdr ? "1" : "0");
+      (void) set_stream_environment_default("DXVK_HDR", stream_hdr ? "1" : "0");
+      if (wayland_hdr_compatibility.enabled) {
+        (void) set_stream_environment_default("PROTON_ENABLE_WAYLAND", "1");
+        BOOST_LOG(debug) << "Wayland HDR compatibility applied Proton/DXVK launch flags.";
       }
     }
     const bool smooth_motion_launch_ready = smooth_motion_policy.enabled && inherited_steam_environment_ready;
@@ -2069,7 +2160,7 @@ namespace proc {
       _app.lossless_scaling_framegen
     );
 #else
-    constexpr bool lossless_scaling_enabled = false;
+    const bool lossless_scaling_enabled = _app.lossless_scaling_enabled || _app.lossless_scaling_framegen;
 #endif
     _env["SUNSHINE_FRAME_GENERATION_PROVIDER"] =
       _app.frame_generation_enabled ? _app.frame_generation_provider : "";
@@ -2144,7 +2235,8 @@ namespace proc {
           config::video.capture,
           platf::dxgi::should_use_wgc_default(),
           config::frame_limiter.virtual_display_limiter_enabled(),
-          config::frame_limiter.fixed_virtual_display_refresh_multiplier()
+          config::frame_limiter.fixed_virtual_display_refresh_multiplier(),
+          config::frame_limiter.fixed_virtual_display_refresh_millihz(launch_session->client_vrr_requested)
         );
         platf::frame_limiter_prepare_launch(warmup_policy);
       }
@@ -2242,6 +2334,23 @@ namespace proc {
       BOOST_LOG(info) << "No active user session; deferring app launch until sign-in.";
       _deferred_launch = true;
       return 0;
+    }
+#endif
+
+#ifdef __linux__
+    if (!_app.steam_id.empty() && !session_steam_direct_launch &&
+        (wayland_hdr_compatibility.enabled || config::input.proton_dualsense_compatibility)) {
+      // A Steam URI is only a handoff to its already-running daemon. Prepare
+      // the session-owned Proton hook before its launch commands run, or the
+      // daemon would spawn the game with its old environment.
+      platf::frame_limiter_streaming_start(
+        platf::frame_limiter_owner::application,
+        mangohud_stream_policy,
+        {.color_mode = stream_hdr ? platf::proton_color_mode::hdr :
+                                    (launch_session->prefer_sdr_10bit ? platf::proton_color_mode::sdr10 : platf::proton_color_mode::sdr),
+         .wayland_hdr_compatibility = wayland_hdr_compatibility.enabled}
+      );
+      BOOST_LOG(debug) << "Global Proton compatibility hook prepared before the running Steam handoff.";
     }
 #endif
 
@@ -2534,7 +2643,6 @@ namespace proc {
         _steam_tracker.clear();
         _steam_tracking_active = _steam_tracker.begin(provider_directory);
         _steam_tracking_associated = false;
-        _steam_tracking_exit = {};
         _steam_tracking_deadline = std::chrono::steady_clock::now() + 15s;
         _steam_last_tracking_poll = {};
         if (!_steam_tracking_active) {
@@ -2640,6 +2748,7 @@ namespace proc {
           .auto_capture_uses_wgc = platf::dxgi::should_use_wgc_default(),
           .auto_virtual_framegen_limiter = config::frame_limiter.virtual_display_limiter_enabled(),
           .virtual_display_refresh_multiplier = config::frame_limiter.fixed_virtual_display_refresh_multiplier(),
+          .virtual_display_fixed_refresh_millihz = config::frame_limiter.fixed_virtual_display_refresh_millihz(),
         });
         platf::frame_limiter_prepare_launch(warmup_policy);
         const bool provider_auto = config::frame_limiter.provider.empty() ||
@@ -2675,7 +2784,6 @@ namespace proc {
       if (_steam_last_tracking_poll.time_since_epoch().count() == 0 || now - _steam_last_tracking_poll >= tracking_poll_interval) {
         _steam_last_tracking_poll = now;
         const auto tracking = _steam_tracker.finish();
-        _steam_tracking_exit.observe(_steam_tracking_associated, tracking);
         if (tracking.associated()) {
           if (!_steam_tracking_associated) {
             const auto provider_name = !_app.steam_id.empty() ? "Steam" : "Lutris";
@@ -2697,50 +2805,46 @@ namespace proc {
       if (_steam_tracking_associated) {
         return _app_id;
       }
-      if (!_steam_tracking_exit.exited && now < _steam_tracking_deadline) {
+      if (now < _steam_tracking_deadline) {
         // Keep the stream alive while Steam is still starting the game. This
         // preserves the existing detached/placebo behavior if association
         // eventually fails, without turning polling into a blocking wait.
         return _app_id;
       }
 
-      if (!_steam_tracking_exit.exited) {
-        BOOST_LOG(warning) << "Steam app " << _app.steam_id
-                           << " process tree remained untrackable after the 15 second launch window;"
-                              " retaining detached streaming behavior.";
-        _steam_tracking_active = false;
-        placebo = true;
-        return _app_id;
-      }
+      BOOST_LOG(warning) << "Steam app " << _app.steam_id
+                         << " process tree remained untrackable after the 15 second launch window;"
+                            " retaining detached streaming behavior.";
+      _steam_tracking_active = false;
+      placebo = true;
+      return _app_id;
     }
 
-    if (!_steam_tracking_exit.exited) {
-      if (placebo) {
-        return _app_id;
-      } else if (_app.wait_all && _process_group && platf::process_group_running((std::uintptr_t) _process_group.native_handle())) {
-        // The app is still running if any process in the group is still running
-        return _app_id;
-      } else if (_process.running()) {
-        // The app is still running only if the initial process launched is still running
-        return _app_id;
-      } else if (_app.auto_detach && std::chrono::steady_clock::now() - _app_launch_time < 5s) {
-        BOOST_LOG(info) << "App exited with code ["sv << _process.native_exit_code() << "] within 5 seconds of launch. Treating the app as a detached command."sv;
-        BOOST_LOG(info) << "Adjust this behavior in the Applications tab or apps.json if this is not what you want."sv;
-        BOOST_LOG(info) << "Playnite launch path complete; treating app as placebo (status-driven).";
-        placebo = true;
+    if (placebo) {
+      return _app_id;
+    } else if (_app.wait_all && _process_group && platf::process_group_running((std::uintptr_t) _process_group.native_handle())) {
+      // The app is still running if any process in the group is still running
+      return _app_id;
+    } else if (_process.running()) {
+      // The app is still running only if the initial process launched is still running
+      return _app_id;
+    } else if (_app.auto_detach && std::chrono::steady_clock::now() - _app_launch_time < 5s) {
+      BOOST_LOG(info) << "App exited with code ["sv << _process.native_exit_code() << "] within 5 seconds of launch. Treating the app as a detached command."sv;
+      BOOST_LOG(info) << "Adjust this behavior in the Applications tab or apps.json if this is not what you want."sv;
+      BOOST_LOG(info) << "Playnite launch path complete; treating app as placebo (status-driven).";
+      placebo = true;
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
-        if (_process.native_exit_code() != 0) {
-          system_tray::update_tray_launch_error(proc::proc.get_last_run_app_name(), _process.native_exit_code());
-        }
+      if (_process.native_exit_code() != 0) {
+        system_tray::update_tray_launch_error(proc::proc.get_last_run_app_name(), _process.native_exit_code());
+      }
 #endif
 
-        return _app_id;
-      }
+      return _app_id;
     }
 
     // Perform cleanup actions now if needed
-    if (_process || _steam_tracking_exit.exited) {
+    if (_process) {
       std::unique_lock<std::mutex> stream_lifecycle_lock {nvhttp::stream_lifecycle_mutex(), std::try_to_lock};
       if (!stream_lifecycle_lock.owns_lock()) {
         // Teardown is already in flight on another thread. Blocking here
@@ -2752,6 +2856,8 @@ namespace proc {
         return 0;
       }
       BOOST_LOG(info) << "[running] _process.running() is false; calling terminate(). App exited with code ["sv << _process.native_exit_code() << "] for app '" << _app.name << "' (id=" << _app_id << ")";
+      // running() owns the lifecycle gate above; prevent terminate() from
+      // acquiring the non-recursive mutex a second time.
       terminate(false, true, false, true);
     }
 
@@ -2766,12 +2872,9 @@ namespace proc {
     BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
 
 #ifdef _WIN32
-    // Capture a fresh baseline after a completed pause, or retain the original
-    // while an older pause command could still change the setting. Processless
-    // Remote Monitor/Input sessions must not claim application ownership.
-    if (current_app_id() > 0) {
-      platf::cache_screen_saver_state();
-    }
+    // pause() consumes the prior snapshot after restoring it. Capture a new
+    // baseline before any resume command can change the setting again.
+    platf::cache_screen_saver_state();
 #endif
 
     if (!_app.state_cmds.empty()) {
@@ -2985,6 +3088,11 @@ namespace proc {
     bool skip_display_revert,
     bool stream_lifecycle_lock_held
   ) {
+#ifdef __linux__
+    // This owner represents a running-Steam handoff. Dropping it when the
+    // app ends also prevents a later SDR launch from retaining HDR policy.
+    platf::frame_limiter_streaming_stop(platf::frame_limiter_owner::application);
+#endif
     std::unique_lock<std::mutex> stream_lifecycle_lock;
     if (!stream_lifecycle_lock_held) {
       stream_lifecycle_lock =
@@ -3071,7 +3179,6 @@ namespace proc {
     _steam_tracker.clear();
     _steam_tracking_active = false;
     _steam_tracking_associated = false;
-    _steam_tracking_exit = {};
     _steam_tracking_deadline = {};
     _steam_last_tracking_poll = {};
 
@@ -4234,8 +4341,6 @@ namespace proc {
             ctx.output = parse_env_val(this_env, app_node.value("output", ""));
           }
           if (app_node.contains("display-output")) {
-            // `output` is the app command-log path, not a display selection.
-            // Only the dedicated field represents an explicit display override.
             ctx.output_name_override = parse_env_val(this_env, app_node.value("display-output", ""));
           }
           std::string name = parse_env_val(this_env, app_node.value("name", ""));
@@ -4249,18 +4354,18 @@ namespace proc {
             boost::erase_all(ctx.working_dir, "\"");
             ctx.working_dir += '\\';
 #endif
-        }
-          if (app_node.contains("steam-id")) {
-            ctx.steam_id = parse_env_val(this_env, app_node.value("steam-id", ""));
           }
-          if (app_node.contains("steam-install-dir")) {
-            ctx.steam_install_dir = parse_env_val(this_env, app_node.value("steam-install-dir", ""));
+          if (app_node.contains("steam-id") && app_node["steam-id"].is_string()) {
+            ctx.steam_id = parse_env_val(this_env, app_node["steam-id"].get<std::string>());
           }
-          if (app_node.contains("lutris-id")) {
-            ctx.lutris_id = parse_env_val(this_env, app_node.value("lutris-id", ""));
+          if (app_node.contains("steam-install-dir") && app_node["steam-install-dir"].is_string()) {
+            ctx.steam_install_dir = parse_env_val(this_env, app_node["steam-install-dir"].get<std::string>());
           }
-          if (app_node.contains("lutris-directory")) {
-            ctx.lutris_directory = parse_env_val(this_env, app_node.value("lutris-directory", ""));
+          if (app_node.contains("lutris-id") && app_node["lutris-id"].is_string()) {
+            ctx.lutris_id = parse_env_val(this_env, app_node["lutris-id"].get<std::string>());
+          }
+          if (app_node.contains("lutris-directory") && app_node["lutris-directory"].is_string()) {
+            ctx.lutris_directory = parse_env_val(this_env, app_node["lutris-directory"].get<std::string>());
           }
           if (app_node.contains("image-path")) {
             ctx.image_path = parse_env_val(this_env, app_node.value("image-path", ""));
@@ -4548,6 +4653,77 @@ namespace proc {
       apps.emplace_back(std::move(ctx));
     }
 
+    // Virtual Display entry
+#ifdef _WIN32
+    if (vDisplayDriverStatus.load(std::memory_order_acquire) == VDISPLAY::DRIVER_STATUS::OK) {
+      proc::ctx_t ctx {};
+      ctx.idx = std::to_string(i);
+      ctx.uuid = VIRTUAL_DISPLAY_UUID;
+      ctx.name = "Virtual Display";
+      ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
+      ctx.virtual_display = true;
+      ctx.scale_factor = 100;
+      ctx.use_app_identity = false;
+      ctx.per_client_app_identity = false;
+      ctx.allow_client_commands = false;
+      ctx.terminate_on_pause = false;
+
+      ctx.elevated = false;
+      ctx.auto_detach = true;
+      ctx.wait_all = false;
+      ctx.exit_timeout = 5s;
+
+      auto possible_ids = calculate_app_id(ctx.name, ctx.uuid, ctx.image_path, i++);
+      if (ids.count(std::get<0>(possible_ids)) == 0) {
+        // Avoid using index to generate id if possible
+        ctx.id = std::get<0>(possible_ids);
+      } else {
+        // Fallback to include index on collision
+        ctx.id = std::get<1>(possible_ids);
+      }
+      ids.insert(ctx.id);
+
+      apps.emplace_back(std::move(ctx));
+    }
+#endif
+
+    if (config::input.enable_input_only_mode) {
+      // Input Only entry
+      {
+        proc::ctx_t ctx {};
+        ctx.idx = std::to_string(i);
+        ctx.uuid = REMOTE_INPUT_UUID;
+        ctx.name = "Remote Input";
+        ctx.image_path = parse_env_val(this_env, "input_only.png");
+        ctx.virtual_display = false;
+        ctx.scale_factor = 100;
+        ctx.use_app_identity = false;
+        ctx.per_client_app_identity = false;
+        ctx.allow_client_commands = false;
+        ctx.terminate_on_pause = true;  // There's no need to keep an active input only session ongoing
+
+        ctx.elevated = false;
+        ctx.auto_detach = true;
+        ctx.wait_all = true;
+        ctx.exit_timeout = 5s;
+
+        auto possible_ids = calculate_app_id(ctx.name, ctx.uuid, ctx.image_path, i++);
+        if (ids.count(std::get<0>(possible_ids)) == 0) {
+          // Avoid using index to generate id if possible
+          ctx.id = std::get<0>(possible_ids);
+        } else {
+          // Fallback to include index on collision
+          ctx.id = std::get<1>(possible_ids);
+        }
+        ids.insert(ctx.id);
+
+        input_only_app_id_str = ctx.id;
+        input_only_app_id = util::from_view(ctx.id);
+
+        apps.emplace_back(std::move(ctx));
+      }
+    }
+
     // Terminate entry
     {
       proc::ctx_t ctx {};
@@ -4654,6 +4830,7 @@ namespace proc {
       _apps = std::move(apps);
       if (!app_was_running) {
         _env = std::move(env);
+        _stream_owned_environment_keys.clear();
       }
     }
   }

@@ -55,6 +55,7 @@
 #include "crypto.h"
 #include "file_handler.h"
 #include "globals.h"
+#include "host_stats.h"
 #include "hdr_request_policy.h"
 #include "httpcommon.h"
 #include "input.h"
@@ -90,10 +91,12 @@
   #endif
 #elif defined(__linux__)
   #include "src/platform/linux/frame_limiter.h"
+  #include "src/platform/linux/misc.h"
   #include "src/display_helper_integration.h"
   #include "src/platform/linux/private_display.h"
   #include "src/platform/linux/display_backend.h"
   #include "src/platform/linux/display_power.h"
+  #include "src/platform/linux/wayland_hdr_compatibility.h"
 #endif
 
 #ifdef __APPLE__
@@ -281,6 +284,7 @@ namespace webrtc_stream {
           .auto_capture_uses_wgc = platf::dxgi::should_use_wgc_default(),
           .auto_virtual_framegen_limiter = config::frame_limiter.virtual_display_limiter_enabled(),
           .virtual_display_refresh_multiplier = config::frame_limiter.fixed_virtual_display_refresh_multiplier(),
+          .virtual_display_fixed_refresh_millihz = config::frame_limiter.fixed_virtual_display_refresh_millihz(session->client_vrr_requested),
         });
       };
       const auto requested_display_framegen_policy =
@@ -296,6 +300,7 @@ namespace webrtc_stream {
         session->framegen_refresh_rate = framegen_policy.framegen_refresh_rate;
         session->framegen_refresh_millihz = framegen_policy.framegen_refresh_millihz;
         session->framegen_refresh_multiplier = framegen_policy.refresh_multiplier;
+        session->framegen_fixed_refresh = framegen_policy.fixed_refresh;
       };
       BOOST_LOG(debug) << "Display helper: WebRTC session prep client='" << session->client_name
                        << "' allow_display_changes=" << allow_display_changes
@@ -368,6 +373,7 @@ namespace webrtc_stream {
         session->framegen_refresh_rate.reset();
         session->framegen_refresh_millihz.reset();
         session->framegen_refresh_multiplier = 1;
+        session->framegen_fixed_refresh = false;
         if (app_output_override) {
           publish_output_override(*app_output_override);
           BOOST_LOG(info) << "Display helper: pinning WebRTC capture to app output override: "
@@ -398,6 +404,7 @@ namespace webrtc_stream {
         session->framegen_refresh_rate.reset();
         session->framegen_refresh_millihz.reset();
         session->framegen_refresh_multiplier = 1;
+        session->framegen_fixed_refresh = false;
         return;
       }
       apply_framegen_refresh_policy(true);
@@ -515,11 +522,18 @@ namespace webrtc_stream {
           virtual_display_hdr_requested = source_hdr_requested;
         }
       }
-      const uint32_t base_vd_fps_millihz = session->client_display_refresh_millihz > 0 ?
-                                                 session->client_display_refresh_millihz :
-                                                 (session->fps > 0 ?
-                                                    framegen::saturating_refresh_millihz(static_cast<uint32_t>(session->fps), 1000) :
-                                                    0u);
+      // A fixed-refresh (VRR) virtual display is described at that rate so the driver
+      // advertises it; multiplier modes describe the client rate and add its multiples.
+      const bool fixed_vd_refresh = session->framegen_fixed_refresh &&
+                                    session->framegen_refresh_millihz &&
+                                    *session->framegen_refresh_millihz > 0;
+      const uint32_t base_vd_fps_millihz = fixed_vd_refresh ?
+                                             *session->framegen_refresh_millihz :
+                                           session->client_display_refresh_millihz > 0 ?
+                                             session->client_display_refresh_millihz :
+                                             (session->fps > 0 ?
+                                                framegen::saturating_refresh_millihz(static_cast<uint32_t>(session->fps), 1000) :
+                                                0u);
       uint32_t vd_fps = rtsp_stream::effective_display_refresh_millihz(*session);
       if (vd_fps == 0) {
         vd_fps = 60000u;
@@ -733,6 +747,7 @@ namespace webrtc_stream {
       session->framegen_refresh_rate.reset();
       session->framegen_refresh_millihz.reset();
       session->framegen_refresh_multiplier = 1;
+      session->framegen_fixed_refresh = false;
     }
 #endif
 
@@ -861,6 +876,8 @@ namespace webrtc_stream {
       std::string frame_generation_provider = "lossless-scaling";
       bool uses_virtual_display = false;
       bool smooth_motion = false;
+      bool hdr = false;
+      bool prefer_sdr_10bit = false;
     };
 
     struct WebRtcCaptureState {
@@ -2918,6 +2935,7 @@ namespace webrtc_stream {
       launch_session->framegen_refresh_rate.reset();
       launch_session->framegen_refresh_millihz.reset();
       launch_session->framegen_refresh_multiplier = 1;
+      launch_session->framegen_fixed_refresh = false;
       launch_session->frame_generation_enabled = false;
       launch_session->lossless_scaling_framegen = false;
       launch_session->lossless_scaling_target_fps.reset();
@@ -3037,11 +3055,40 @@ namespace webrtc_stream {
 #endif
         .auto_virtual_framegen_limiter = config::frame_limiter.virtual_display_limiter_enabled(),
         .virtual_display_refresh_multiplier = config::frame_limiter.fixed_virtual_display_refresh_multiplier(),
+        .virtual_display_fixed_refresh_millihz = config::frame_limiter.fixed_virtual_display_refresh_millihz(),
       });
+#ifdef _WIN32
+      platf::frame_limiter_streaming_start(platf::frame_limiter_owner::webrtc, policy);
+#else
+      const auto color_mode = start_params.hdr ? platf::proton_color_mode::hdr :
+                              start_params.prefer_sdr_10bit ? platf::proton_color_mode::sdr10 :
+                                                             platf::proton_color_mode::sdr;
+      const auto wayland_hdr_compatibility = platf::wayland_hdr_compatibility::resolve(
+        config::video.dd.wayland_hdr_compatibility,
+        platf::wayland_hdr_compatibility::selected_session_is_wayland(
+          window_system == window_system_e::WAYLAND
+        ),
+        color_mode == platf::proton_color_mode::hdr
+      );
+      if (config::video.dd.wayland_hdr_compatibility && !wayland_hdr_compatibility.enabled) {
+        if (color_mode == platf::proton_color_mode::sdr10) {
+          BOOST_LOG(debug) << "Wayland HDR compatibility skipped: 10-bit SDR preferred.";
+        } else if (start_params.prefer_sdr_10bit) {
+          BOOST_LOG(debug) << "Wayland HDR compatibility skipped: session resolved to SDR.";
+        } else if (wayland_hdr_compatibility.suppression_reason ==
+                   platf::wayland_hdr_compatibility::suppression_reason_e::not_wayland) {
+          BOOST_LOG(debug) << "Wayland HDR compatibility skipped: the active session is not Wayland.";
+        } else {
+          BOOST_LOG(debug) << "Wayland HDR compatibility skipped: session resolved to SDR.";
+        }
+      }
       platf::frame_limiter_streaming_start(
         platf::frame_limiter_owner::webrtc,
-        policy
+        policy,
+        {.color_mode = color_mode,
+         .wayland_hdr_compatibility = wayland_hdr_compatibility.enabled}
       );
+#endif
     }
 #endif
 
@@ -3174,6 +3221,12 @@ namespace webrtc_stream {
       auto audio_config = build_audio_config(options);
       apply_rtsp_video_overrides(video_config, rtsp_config);
       apply_rtx_hdr_stream_policy(video_config);
+      stream_start_params.hdr = video_config.dynamicRange != 0 &&
+                                !video_config.prefer_sdr_10bit &&
+                                !video_config.force_sdr;
+      stream_start_params.prefer_sdr_10bit = video_config.dynamicRange != 0 &&
+                                             video_config.prefer_sdr_10bit &&
+                                             !video_config.force_sdr;
       auto desired_key = build_capture_config_key(effective_app_id, video_config, options);
 
       if (
@@ -3226,16 +3279,18 @@ namespace webrtc_stream {
 #endif
 
       const bool allow_display_changes = !rtsp_active && !resume_only;
-#ifndef _WIN32
       if (allow_display_changes && launch_session->output_name_override) {
-#ifdef __linux__
+#ifdef _WIN32
+        if (launch_session->output_name_override->empty() ||
+            !VDISPLAY::is_virtual_display_selection(*launch_session->output_name_override)) {
+          pending_output_override_lease =
+            config::set_runtime_output_name_override_with_lease(*launch_session->output_name_override);
+        }
+#else
         pending_output_override_lease =
           config::set_runtime_output_name_override_with_lease(*launch_session->output_name_override);
-#else
-        config::set_runtime_output_name_override(*launch_session->output_name_override);
 #endif
       }
-#endif
 
       desired_key = build_capture_config_key(effective_app_id, video_config, options);
 
@@ -3376,6 +3431,12 @@ namespace webrtc_stream {
                                    !video_config.force_sdr;
       launch_session->prefer_sdr_10bit = video_config.prefer_sdr_10bit;
       launch_session->force_sdr = video_config.force_sdr;
+      if (webrtc_capture.stream_start_params) {
+        webrtc_capture.stream_start_params->hdr = launch_session->enable_hdr;
+        webrtc_capture.stream_start_params->prefer_sdr_10bit =
+          video_config.dynamicRange != 0 && video_config.prefer_sdr_10bit &&
+          !video_config.force_sdr;
+      }
 
       // Do not launch an application until the selected adapter has proven it
       // can satisfy the requested codec and dynamic range. Otherwise a bad
@@ -5643,6 +5704,7 @@ namespace webrtc_stream {
         }
         sessions.emplace(snapshot.id, std::move(session));
         first_session = active_sessions.fetch_add(1, std::memory_order_relaxed) == 0;
+        host_stats::webrtc_session_started();
       }
       webrtc_capture.pending_session_creations.fetch_sub(1, std::memory_order_release);
       reservation_guard.disable();
@@ -5743,6 +5805,7 @@ namespace webrtc_stream {
         // An HTTP observer that acquires active_sessions == 0 must also observe
         // the preceding teardown_sessions increment.
         last_session = active_sessions.fetch_sub(1, std::memory_order_acq_rel) == 1;
+        host_stats::webrtc_session_ended();
       }
     }
     if (removed) {

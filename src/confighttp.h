@@ -70,8 +70,9 @@ namespace confighttp {
   nlohmann::json get_windows_drives();
 #endif
 
-  // Writes the apps file and refreshes the client-visible app cache/list.
-  // Hold this recursive mutex throughout apps-file read-modify-write transactions.
+  // Writes the apps file and refreshes the client-visible app cache/list
+  // Callers that perform a read-modify-write transaction should hold this
+  // recursive mutex from the initial read through refresh.
   std::recursive_mutex &apps_file_mutex();
   bool refresh_client_apps_cache(nlohmann::json &file_tree, bool sort_by_name = true);
 

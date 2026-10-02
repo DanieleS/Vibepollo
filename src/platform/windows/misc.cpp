@@ -1844,6 +1844,48 @@ namespace platf {
     return saddr_v6;
   }
 
+  std::uint64_t routed_link_bps(const boost::asio::ip::address &source, const boost::asio::ip::address &target, routed_link_info_t *info) {
+    auto socket_address = [](const boost::asio::ip::address &address) {
+      SOCKADDR_INET result {};
+      if (address.is_v6() && !address.to_v6().is_v4_mapped()) {
+        result.Ipv6 = to_sockaddr(address.to_v6(), 0);
+      } else {
+        const auto ipv4 = address.is_v4() ? address.to_v4() :
+                                          boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, address.to_v6());
+        result.Ipv4 = to_sockaddr(ipv4, 0);
+      }
+      return result;
+    };
+    const auto destination = socket_address(target);
+    const auto local = socket_address(source);
+    if (local.si_family != destination.si_family) {
+      return 0;
+    }
+    MIB_IPFORWARD_ROW2 route {};
+    SOCKADDR_INET selected_source {};
+    if (GetBestRoute2(nullptr, 0, source.is_unspecified() ? nullptr : &local,
+                      &destination, 0, &route, &selected_source) != NO_ERROR) {
+      return 0;
+    }
+    MIB_IF_ROW2 interface_row {};
+    interface_row.InterfaceLuid = route.InterfaceLuid;
+    const auto entry_status = GetIfEntry2(&interface_row);
+    if (info) {
+      info->luid = route.InterfaceLuid.Value;
+      if (entry_status == NO_ERROR) {
+        info->alias = to_utf8(interface_row.Alias);
+        info->if_type = interface_row.Type;
+        info->transmit_bps = interface_row.TransmitLinkSpeed;
+      }
+    }
+    if (entry_status != NO_ERROR || interface_row.OperStatus != IfOperStatusUp ||
+        interface_row.TransmitLinkSpeed == std::numeric_limits<std::uint64_t>::max()) {
+      return 0;
+    }
+    // Tunnel and Wi-Fi link rates are not usable estimates of packet throughput.
+    return interface_row.Type == IF_TYPE_ETHERNET_CSMACD ? interface_row.TransmitLinkSpeed : 0;
+  }
+
   // Use UDP segmentation offload if it is supported by the OS. If the NIC is capable, this will use
   // hardware acceleration to reduce CPU usage. Support for USO was introduced in Windows 10 20H1.
   bool send_batch(batched_send_info_t &send_info) {
@@ -1946,7 +1988,28 @@ namespace platf {
 
     // If USO is not supported, this will fail and the caller will fall back to unbatched sends.
     DWORD bytes_sent;
-    return WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR;
+    if (WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR) {
+      return true;
+    }
+
+    const auto winerr = WSAGetLastError();
+    // A rejected batch otherwise turns into dozens of individual sends with
+    // no explanation at normal log levels. Bound reporting so an unsupported
+    // offload path cannot spend its send budget flooding the log.
+    thread_local std::chrono::steady_clock::time_point next_failure_log {};
+    thread_local std::uint64_t failed_batches = 0;
+    ++failed_batches;
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_failure_log) {
+      BOOST_LOG(warning) << "WSASendMsg() batch failed: "sv << winerr
+                         << "; packets="sv << send_info.block_count
+                         << "; bytes="sv << send_info.block_count * (send_info.header_size + send_info.payload_size)
+                         << "; failed batches since previous report="sv << failed_batches
+                         << "; falling back to individual sends"sv;
+      failed_batches = 0;
+      next_failure_log = now + 5s;
+    }
+    return false;
   }
 
   bool send(send_info_t &send_info) {

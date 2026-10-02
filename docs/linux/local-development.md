@@ -3,12 +3,11 @@
 On **Arch Linux and CachyOS**, this tool builds a native package from the local
 checkout and installs it through `linux_install.sh --package`. It supports first
 installation, replaces conflicting Sunshine/Vibeshine packages through pacman,
-and reuses the package account, machine-profile, signing, driver and firewall setup. The
-native installer installs required dependencies and matching kernel headers, but
-does not run a full system upgrade. Driver sources and the build helper are
-required in every local package; installation verifies or builds the module for
-the running kernel and fails if it remains missing. Reboot/key-enrollment states
-are reported separately from build failures.
+and reuses the package account, machine profile, signing, driver and firewall
+setup. The native installer installs required dependencies and matching kernel
+headers without a full system upgrade. Local packages must contain driver sources
+and the build helper; installation verifies the driver for the running kernel.
+Reboot and key enrollment states are reported separately from build failures.
 Run from the checkout as your normal user, not with `sudo`:
 
 ```bash
@@ -43,9 +42,9 @@ build dependencies.
 - Runtime operation targets the native controller's KDE/Wayland seat0 desktop
   or greeter sessions. On Arch, confirmed installation disables the invoking
   user's obsolete Sunshine/Vibeshine/Vibepollo service and imports the selected
-  desktop profile into service-owned state. Original profiles remain intact. Multiple
-  source profiles require explicit selection through the native installer
-  (`--source-profile`) or `vibepollo configure USER SOURCE` before retrying setup.
+  desktop profile into service-owned state. Original profiles remain intact. If
+  automatic setup finds multiple desktop accounts, select one with
+  `sudo vibepollo configure USER` before retrying setup.
   It does not support arbitrary compositors, Windows, macOS, live deployment
   inside containers, or cross-compiling. `--stage-only` can be used in Linux build
   containers: it skips the live-host requirements and does not elevate.
@@ -62,6 +61,12 @@ Unsupported platforms and missing native tools fail before deployment. Build
 options do not permit changing privileged installation or signing paths.
 
 ## Build settings
+
+Normal builds explicitly set the C and C++ `RelWithDebInfo` flags to
+`-O2 -g -DNDEBUG`, and apply the same flags to CUDA when enabled. This repairs
+empty or unoptimized configuration flags left in an existing CMake cache;
+selecting `RelWithDebInfo` alone does not reset them. `--skip-build` uses the
+existing artifacts and does not repair or rebuild them.
 
 `--version` overrides the `BUILD_VERSION` environment variable, then the existing
 `build/CMakeCache.txt` version, then an exact Git tag on a clean HEAD checkout
@@ -119,6 +124,12 @@ command retries readiness after resolving a package setup error.
 `/var/cache/pacman/pkg` or your retained local builds. `--recover` reports this
 requirement; it never applies a file rollback over the package database. Package
 hooks and dependency changes are not covered by the file updater's rollback journal.
+
+On both paths, installation refuses to start while an application launched by
+the host (`vibepollo-app-*.service` in the selected desktop user manager) is still running,
+because installing stops it together with the capture host. Quit the game or end
+the stream and rerun with `--skip-build`, or pass `--allow-disruption`.
+
 The following file-journal behavior applies only to non-Arch configured hosts.
 
 Installation disconnects streams. The root phase closes and temporarily masks

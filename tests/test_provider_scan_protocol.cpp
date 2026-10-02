@@ -187,7 +187,7 @@ namespace {
   TEST(ProviderScanProtocol, RepeatedGreeterPollsDoNotSpawnAndDesktopRequestsResume) {
     using platf::provider_scan::detail::capture_command;
     scoped_environment machine {"VIBEPOLLO_MACHINE_HOST", "1"};
-    char directory[] = "/tmp/vibepollo-provider-XXXXXX";
+    char directory[] = "/tmp/vibeshine-provider-XXXXXX";
     ASSERT_NE(mkdtemp(directory), nullptr);
     const auto marker = std::filesystem::path(directory) / "spawned";
 

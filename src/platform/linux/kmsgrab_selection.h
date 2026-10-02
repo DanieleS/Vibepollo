@@ -38,7 +38,8 @@ namespace platf::kms::selection {
   /**
    * @brief Whether a KMS card's scanout DMA-BUFs can use the CUDA import path.
    *
-   * Vibeshine DRM is intentionally a display-only device. It forwards the
+   * The libvirtualdisplay vibeshine_drm compatibility driver is intentionally
+   * display-only. It forwards the
    * renderer GPU's imported DMA-BUF and modifier, so it must not be rejected
    * merely because its DRM driver is not nvidia-drm. Capture treats this path
    * as direct-import-only so a renderer-association regression fails closed.

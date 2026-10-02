@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "vibepollo-session-protocol.h"
+#include "vibepollo-session-stream-environment.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -594,7 +595,7 @@ static bool sink_name_is_safe(const char *name) {
 }
 
 static bool steam_direct_arguments_are_safe(int argc, char **argv) {
-  if (argc != 10 || !argv) return false;
+  if (argc != 14 || !argv) return false;
   unsigned long app_id = 0, limit_millihz = 0;
   if (!parse_number(argv[2], 1, UINT32_MAX, &app_id) ||
       !parse_number(argv[4], 0, 1000000, &limit_millihz)) return false;
@@ -613,19 +614,33 @@ static bool steam_direct_arguments_are_safe(int argc, char **argv) {
   const bool method = !strcmp(argv[7], "early") || !strcmp(argv[7], "late");
   const bool smooth = !strcmp(argv[8], "0") || !strcmp(argv[8], "1");
   const bool queue = !strcmp(argv[9], "0") || !strcmp(argv[9], "1");
-  return (limited || disabled) && preset && graph && method && smooth && queue &&
+  const bool hdr = !strcmp(argv[10], "0") || !strcmp(argv[10], "1");
+  const bool wayland_hdr_compatibility = !strcmp(argv[11], "0") || !strcmp(argv[11], "1");
+  const bool dualsense = !strcmp(argv[12], "0") || !strcmp(argv[12], "1");
+  const bool playstation_controller = !strcmp(argv[13], "0") || !strcmp(argv[13], "1");
+  return (limited || disabled) && preset && graph && method && smooth && queue && hdr && wayland_hdr_compatibility && dualsense && playstation_controller &&
          ((limited && limit_millihz >= 1000) || (disabled && !limit_millihz)) &&
          (overlay || (!strcmp(argv[5], "custom") && !strcmp(argv[6], "0"))) &&
          (mangohud || !strcmp(argv[7], "late")) &&
          (strcmp(argv[8], "0") || !strcmp(argv[9], "0")) &&
-         (limited || strcmp(argv[8], "0"));
+         (limited || strcmp(argv[8], "0") || strcmp(argv[10], "0") || strcmp(argv[12], "0")) &&
+         (!strcmp(argv[11], "0") || !strcmp(argv[10], "1")) &&
+         (!strcmp(argv[13], "0") || !strcmp(argv[12], "1"));
 }
 
 static bool global_limiter_arguments_are_safe(int argc, char **argv) {
-  if (argc != 7 || !argv) return false;
+  if (argc != 10 || !argv) return false;
+  const bool color_mode = !strcmp(argv[7], "sdr") || !strcmp(argv[7], "sdr10") ||
+                          !strcmp(argv[7], "hdr");
+  const bool wayland_hdr_compatibility = !strcmp(argv[8], "0") || !strcmp(argv[8], "1");
+  if (!color_mode || !wayland_hdr_compatibility ||
+      (!strcmp(argv[8], "1") && strcmp(argv[7], "hdr"))) return false;
+  // Reuse the stricter direct-launch validator. Its final HDR bit is only a
+  // feature-presence sentinel here; argv[7] remains the validated mode passed
+  // to the global hook.
   char *validation[] = {"broker", "steam-direct", "1", argv[2], argv[3],
-                        argv[4], argv[5], argv[6], "0", "0"};
-  return steam_direct_arguments_are_safe(10, validation);
+                        argv[4], argv[5], argv[6], "0", "0", "1", argv[8], argv[9], "0"};
+  return steam_direct_arguments_are_safe(14, validation);
 }
 
 static bool parse_channel_mapping(const char *value, size_t channels,
@@ -1004,8 +1019,6 @@ static bool steam_launch_retry_is_safe(int result, bool cleanup_verified,
 
 static int supervise_user_service(const char *unit, char *const arguments[], bool *cleanup_verified) {
   *cleanup_verified = false;
-  // A cancellation received during the retry delay belongs to this request,
-  // not just the previous attempt. Never clear it on entry to supervision.
   if (termination_signal) return 128 + termination_signal;
   if (!set_termination_handlers(request_user_service_stop)) return 126;
   if (termination_signal) return 128 + termination_signal;
@@ -1082,7 +1095,9 @@ static int supervise_user_service(const char *unit, char *const arguments[], boo
 }
 
 static int exec_user_service(const struct session_identity *identity, const char *directory,
-                             char *const command_argv[], bool recover_steam_launch) {
+                             char *const command_argv[], bool recover_steam_launch,
+                             bool wayland_hdr_compatibility,
+                             size_t stream_environment_count, char *const stream_environment[]) {
   char unit[192], environment_home[PATH_MAX + 16], environment_user[80], environment_logname[80];
   char environment_runtime[PATH_MAX + 32], environment_config[PATH_MAX + 32];
   char environment_data[PATH_MAX + 32], environment_pipewire[PATH_MAX + 32];
@@ -1101,9 +1116,12 @@ static int exec_user_service(const struct session_identity *identity, const char
       snprintf(environment_wayland, sizeof(environment_wayland), "WAYLAND_DISPLAY=%s", identity->wayland_display) >= (int) sizeof(environment_wayland) ||
       (identity->x_display[0] && snprintf(environment_display, sizeof(environment_display), "DISPLAY=%s", identity->x_display) >= (int) sizeof(environment_display)) ||
       (identity->xauthority[0] && snprintf(environment_xauthority, sizeof(environment_xauthority), "XAUTHORITY=%s", identity->xauthority) >= (int) sizeof(environment_xauthority))) return 126;
-  char *arguments[72];
+  char *arguments[72 + 2 * VIBEPOLLO_STREAM_ENVIRONMENT_MAX_ENTRIES];
+  if (!vibepollo_stream_environment_is_safe(stream_environment_count, stream_environment)) return 126;
   const unsigned int attempts = recover_steam_launch ? steam_launch_attempts : 1;
+  termination_signal = 0;
   for (unsigned int attempt = 0; attempt < attempts; ++attempt) {
+    if (termination_signal) return 128 + termination_signal;
     const int unit_length = recover_steam_launch
       ? snprintf(unit, sizeof(unit), "vibepollo-app-%lu-%ld-%u.service",
                  identity->generation, (long) getpid(), attempt + 1)
@@ -1149,6 +1167,16 @@ static int exec_user_service(const struct session_identity *identity, const char
     arguments[index++] = "XDG_SESSION_TYPE=wayland";
     arguments[index++] = "--setenv";
     arguments[index++] = environment_wayland;
+    if (wayland_hdr_compatibility) {
+      // This is a fixed broker policy, never a caller-selected environment
+      // value.
+      arguments[index++] = "--setenv";
+      arguments[index++] = "ENABLE_HDR_WSI=1";
+    }
+    for (size_t environment_index = 0; environment_index < stream_environment_count; ++environment_index) {
+      arguments[index++] = "--setenv";
+      arguments[index++] = stream_environment[environment_index];
+    }
     if (identity->x_display[0]) {
       arguments[index++] = "--setenv";
       arguments[index++] = environment_display;
@@ -1194,6 +1222,13 @@ static const char *steam_big_picture_uri(const char *command) {
   return NULL;
 }
 
+static bool steam_big_picture_request(const char *operation, const char *command) {
+  // HDR streams send app-wayland-hdr for the same catalog commands. Big Picture
+  // is still a fixed Steam URI, not an HDR WSI launch, so both verbs map here.
+  return operation && (!strcmp(operation, "app") || !strcmp(operation, "app-wayland-hdr")) &&
+         steam_big_picture_uri(command);
+}
+
 static int execute_request(int argc, char **argv,
                            const struct session_identity *identity,
                            gid_t service_gid) {
@@ -1201,13 +1236,22 @@ static int execute_request(int argc, char **argv,
   enum operation {
     DISPLAY_QUERY, DISPLAY_APPLY, DISPLAY_POWER, DISPLAY_WAKE, AUDIO_GET_DEFAULT, AUDIO_LIST_SINKS, AUDIO_SET_DEFAULT,
     AUDIO_CREATE_NULL, AUDIO_REMOVE_NULL, AUDIO_CAPTURE, STEAM, STEAM_BIG_PICTURE, STEAM_DIRECT, GLOBAL_LIMITER, LUTRIS,
-    PROVIDER_STEAM_SCAN, PROVIDER_LUTRIS_SCAN, PROVIDER_STEAM_ARTWORK, PROVIDER_LUTRIS_ARTWORK, APP
+    PROVIDER_STEAM_SCAN, PROVIDER_LUTRIS_SCAN, PROVIDER_STEAM_ARTWORK, PROVIDER_LUTRIS_ARTWORK, APP, APP_WAYLAND_HDR
   } operation;
   unsigned long first_number = 0, second_number = 0, third_number = 0;
   unsigned char channel_mapping[8] = {0};
   size_t audio_channel_count = 0;
   char authorized_directory[PATH_MAX] = {0};
   const char *big_picture_uri = NULL;
+  size_t stream_environment_count = 0;
+  char **stream_environment = NULL;
+  if (argc >= 3 && (!strcmp(argv[1], "app") || !strcmp(argv[1], "app-wayland-hdr"))) {
+    stream_environment_count = (size_t) (argc - 3);
+    stream_environment = &argv[3];
+    // Reject the entire metadata list before any identity/capability change.
+    // No assignment is ever installed in the privileged broker environment.
+    if (!vibepollo_stream_environment_is_safe(stream_environment_count, stream_environment)) return 126;
+  }
   if (!strcmp(argv[1], "display-query") && argc == 2) operation = DISPLAY_QUERY;
   else if (!strcmp(argv[1], "display-power") && argc == 2) operation = DISPLAY_POWER;
   else if (!strcmp(argv[1], "display-wake") && argc == 2) operation = DISPLAY_WAKE;
@@ -1242,11 +1286,15 @@ static int execute_request(int argc, char **argv,
            artwork_request_is_safe(argv[1], "provider-steam-artwork:", UINT32_MAX)) operation = PROVIDER_STEAM_ARTWORK;
   else if (argc == 2 && !strcmp(identity->role, "desktop") &&
            artwork_request_is_safe(argv[1], "provider-lutris-artwork:", INT64_MAX)) operation = PROVIDER_LUTRIS_ARTWORK;
-  else if (!strcmp(argv[1], "app") && argc == 3 && !strcmp(identity->role, "desktop") &&
+  else if (argc >= 3 && !strcmp(identity->role, "desktop") &&
+           steam_big_picture_request(argv[1], argv[2]) &&
            (big_picture_uri = steam_big_picture_uri(argv[2]))) operation = STEAM_BIG_PICTURE;
-  else if (!strcmp(argv[1], "app") && argc == 3 && !strcmp(identity->role, "desktop") &&
+  else if (!strcmp(argv[1], "app") && argc >= 3 && !strcmp(identity->role, "desktop") &&
            command_is_authorized(identity->role, argv[2], service_gid,
                                  authorized_directory, sizeof(authorized_directory))) operation = APP;
+  else if (!strcmp(argv[1], "app-wayland-hdr") && argc >= 3 && !strcmp(identity->role, "desktop") &&
+           command_is_authorized(identity->role, argv[2], service_gid,
+                                 authorized_directory, sizeof(authorized_directory))) operation = APP_WAYLAND_HDR;
   else {
     fprintf(stderr, "vibepollo-session-broker: rejected request '%s' (argc=%d, role=%s)\n",
             argv[1], argc, identity->role);
@@ -1337,32 +1385,34 @@ static int execute_request(int argc, char **argv,
       break;
     }
     case STEAM_BIG_PICTURE: {
-      // Capture/consume the game baseline as the desktop user, after the
-      // identity drop and endpoint validation. Never parse it in the broker.
+      // The broker's hardened namespace cannot start Steam or write the
+      // session baseline (ProtectHome, ProtectProc, TasksMax). Run the helper
+      // in the desktop session like other application launches. It captures
+      // the game baseline there and never returns that state to the broker.
       char *const arguments[] = {(char *) steam_launch_path, "--big-picture", (char *) big_picture_uri, NULL};
-      execv(steam_launch_path, arguments);
-      break;
+      return exec_user_service(identity, NULL, arguments, false, false,
+                               stream_environment_count, stream_environment);
     }
     case GLOBAL_LIMITER: {
       char *const arguments[] = {
         (char *) steam_launch_path, "--global", argv[2], argv[3], argv[4],
-        argv[5], argv[6], "0", "0", NULL
+        argv[5], argv[6], "0", "0", argv[7], argv[8], argv[9], NULL
       };
-      return exec_user_service(identity, NULL, arguments, false);
+      return exec_user_service(identity, NULL, arguments, false, false, 0, NULL);
     }
     case STEAM_DIRECT: {
       char *const arguments[] = {
         (char *) steam_launch_path, argv[2], argv[3], argv[4], argv[5],
-        argv[6], argv[7], argv[8], argv[9], NULL
+        argv[6], argv[7], argv[8], argv[9], argv[10], argv[11], argv[12], argv[13], NULL
       };
-      return exec_user_service(identity, NULL, arguments, false);
+      return exec_user_service(identity, NULL, arguments, false, false, 0, NULL);
     }
     case LUTRIS: {
       // Apply the same ownership boundary to an already-running Lutris daemon.
       char uri[160];
       if (snprintf(uri, sizeof(uri), "lutris:rungameid/%s", argv[2]) >= (int) sizeof(uri)) return 126;
       char *const arguments[] = {"/usr/bin/lutris", uri, NULL};
-      return exec_user_service(identity, NULL, arguments, false);
+      return exec_user_service(identity, NULL, arguments, false, false, 0, NULL);
     }
     case PROVIDER_STEAM_ARTWORK:
     case PROVIDER_LUTRIS_ARTWORK: {
@@ -1382,9 +1432,12 @@ static int execute_request(int argc, char **argv,
       execv("/usr/libexec/vibeshine/vibepollo-provider-scan", arguments);
       break;
     }
-    case APP: {
+    case APP:
+    case APP_WAYLAND_HDR: {
       char *const arguments[] = {"/bin/sh", "-c", argv[2], "--", NULL};
-      return exec_user_service(identity, authorized_directory, arguments, false);
+      return exec_user_service(identity, authorized_directory, arguments, false,
+                               operation == APP_WAYLAND_HDR,
+                               stream_environment_count, stream_environment);
     }
   }
   perror("vibepollo-session-broker");

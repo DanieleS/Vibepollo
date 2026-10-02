@@ -44,7 +44,6 @@
   #include <vector>
   #include <Windows.h>
 #endif
-
 // local includes
 #include "config.h"
 #include "confighttp.h"
@@ -117,6 +116,18 @@ using namespace std::literals;
 namespace pt = boost::property_tree;
 
 namespace confighttp {
+#ifdef _WIN32
+  /**
+   * @brief Reports whether ViGEmBus is needed for the configured gamepad backend.
+   * @return `true` unless a selected VHF backend is ready to provide controllers.
+   */
+  static bool is_vigem_required() {
+    const bool vhf_allowed = config::input.gamepad == "auto" ||
+                             config::input.gamepad.starts_with("vhf");
+    return !vhf_allowed || !platf::is_virtual_gamepad_driver_available();
+  }
+#endif
+
   // Global MIME type lookup used for static file responses
   const std::map<std::string, std::string> mime_types = {
     {"css", "text/css"},
@@ -289,7 +300,6 @@ namespace confighttp {
     }
 
     try {
-      std::lock_guard apps_lock {apps_file_mutex()};
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
       if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
@@ -614,6 +624,8 @@ namespace confighttp {
   void getFrameLimiterStatus(resp_https_t response, req_https_t request);
 #endif
 
+  // Steam provider endpoints are available on every supported host. The
+  // handlers remain provider-local in confighttp_steam.cpp.
   void getSteamStatus(resp_https_t response, req_https_t request);
   void getSteamGames(resp_https_t response, req_https_t request);
   void postSteamForceSync(resp_https_t response, req_https_t request);
@@ -1257,7 +1269,7 @@ namespace confighttp {
       nlohmann::json out;
       out["installed"] = installed;
       // ViGEmBus is only a requirement when nothing else can provide a virtual controller.
-      out["required"] = !platf::is_virtual_gamepad_driver_available();
+      out["required"] = is_vigem_required();
       if (!version.empty()) {
         out["version"] = version;
       }
@@ -1894,7 +1906,18 @@ namespace confighttp {
         }
       }
 
-      // Add computed app ids for UI clients (best-effort, do not persist).
+      // If any normalization occurred, persist back to disk
+      if (mutated) {
+        try {
+          file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+          proc::refresh(config::stream.file_apps, false);
+        } catch (std::exception &e) {
+          BOOST_LOG(warning) << "GetApps persist normalization failed: "sv << e.what();
+        }
+      }
+
+      // Add computed app ids for UI clients only after normalized records are
+      // persisted. These fields are response metadata and must never enter apps.json.
       if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
         try {
           const auto apps_snapshot = proc::proc.get_apps();
@@ -1905,16 +1928,6 @@ namespace confighttp {
             app["index"] = static_cast<int>(idx);
           }
         } catch (...) {
-        }
-      }
-
-      // If any normalization occurred, persist back to disk
-      if (mutated) {
-        try {
-          file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
-          proc::refresh(config::stream.file_apps, false);
-        } catch (std::exception &e) {
-          BOOST_LOG(warning) << "GetApps persist normalization failed: "sv << e.what();
         }
       }
 
@@ -2511,28 +2524,8 @@ namespace confighttp {
 
     std::optional<size_t> target_index = index_from_body ? index_from_body : index_from_path;
 
-#ifdef _WIN32
-    // Detect if the app being removed is the Playnite fullscreen launcher
-    auto is_playnite_fullscreen = [](const nlohmann::json &app) -> bool {
-      try {
-        if (app.contains("playnite-fullscreen") && app["playnite-fullscreen"].is_boolean() && app["playnite-fullscreen"].get<bool>()) {
-          return true;
-        }
-        if (app.contains("cmd") && app["cmd"].is_string()) {
-          auto s = app["cmd"].get<std::string>();
-          if (s.find("playnite-launcher") != std::string::npos && s.find("--fullscreen") != std::string::npos) {
-            return true;
-          }
-        }
-        if (app.contains("name") && app["name"].is_string() && app["name"].get<std::string>() == "Playnite (Fullscreen)") {
-          return true;
-        }
-      } catch (...) {}
-      return false;
-    };
-#endif
-
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
       if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
@@ -2568,6 +2561,27 @@ namespace confighttp {
 
       nlohmann::json::array_t new_apps;
       new_apps.reserve(apps_node.size());
+
+#ifdef _WIN32
+      // Detect if the app being removed is the Playnite fullscreen launcher
+      auto is_playnite_fullscreen = [](const nlohmann::json &app) -> bool {
+        try {
+          if (app.contains("playnite-fullscreen") && app["playnite-fullscreen"].is_boolean() && app["playnite-fullscreen"].get<bool>()) {
+            return true;
+          }
+          if (app.contains("cmd") && app["cmd"].is_string()) {
+            auto s = app["cmd"].get<std::string>();
+            if (s.find("playnite-launcher") != std::string::npos && s.find("--fullscreen") != std::string::npos) {
+              return true;
+            }
+          }
+          if (app.contains("name") && app["name"].is_string() && app["name"].get<std::string>() == "Playnite (Fullscreen)") {
+            return true;
+          }
+        } catch (...) {}
+        return false;
+      };
+#endif
 
       bool removed = false;
       bool disabled_fullscreen_flag = false;
@@ -3111,15 +3125,6 @@ namespace confighttp {
 #endif
     // Build/release date provided by CMake (ISO 8601 when available)
     output_tree["release_date"] = PROJECT_RELEASE_DATE;
-    // UI status reads must never start a capture or probe an encoder.
-    bool probe_complete = false;
-    const auto encoder_caps = video::advertised_encoder_capabilities(false, &probe_complete);
-    output_tree["encoder_status"] = {
-      {"state", probe_complete ? "ready" : video::has_attempted_encoder_probe() ? "failed" : "unknown"},
-      {"h264", probe_complete},
-      {"hevc", probe_complete && encoder_caps.hevc_mode >= 2},
-      {"av1", probe_complete && encoder_caps.av1_mode >= 2},
-    };
     output_tree["providers"]["steam"] = true;
 #if defined(__linux__)
     output_tree["providers"]["lutris"] = true;
@@ -3151,6 +3156,16 @@ namespace confighttp {
       {"reset_persistence", true},
     };
 #endif
+
+    // UI status reads must never start a capture or probe an encoder.
+    bool probe_complete = false;
+    const auto encoder_caps = video::advertised_encoder_capabilities(false, &probe_complete);
+    output_tree["encoder_status"] = {
+      {"state", probe_complete ? "ready" : video::has_attempted_encoder_probe() ? "failed" : "unknown"},
+      {"h264", probe_complete},
+      {"hevc", probe_complete && encoder_caps.hevc_mode >= 2},
+      {"av1", probe_complete && encoder_caps.av1_mode >= 2},
+    };
 #if defined(_WIN32)
     output_tree["providers"]["playnite_toggle"] = true;
     const auto driver_snapshot = proc::vDisplayDriverStatusSnapshot();
@@ -3535,7 +3550,7 @@ namespace confighttp {
     }
     print_req(request);
 
-    send_response(response, host_stats_to_json(host_stats::latest()));
+    send_response(response, host_stats_to_json(host_stats::latest_for_consumer()));
   }
 
   // Static host info â€” model strings + total RAM/VRAM, sampled once.
@@ -5068,7 +5083,7 @@ namespace confighttp {
       }
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/zip");
-      headers.emplace("Content-Disposition", std::string {"attachment; filename=\""} + std::string {log_export::support_bundle_filename} + "\"");
+      headers.emplace("Content-Disposition", "attachment; filename=\"vibepollo_logs.zip\"");
       headers.emplace("Cache-Control", "no-store");
       headers.emplace("X-Frame-Options", "DENY");
       headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
@@ -6312,8 +6327,8 @@ namespace confighttp {
     output_tree["version_compatible"] = version_compatible;
     output_tree["packaged_version"] = VIGEMBUS_PACKAGED_VERSION;
     // Drives whether the UI presents a missing ViGEmBus as a problem or as an
-    // unused option: Vibeshine's own driver provides controllers without it.
-    output_tree["required"] = !platf::is_virtual_gamepad_driver_available();
+    // unused option: Vibepollo's own driver provides controllers without it.
+    output_tree["required"] = is_vigem_required();
 #else
     output_tree["error"] = "ViGEmBus is only available on Windows";
     output_tree["installed"] = false;

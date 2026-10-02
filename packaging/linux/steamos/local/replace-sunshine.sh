@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Replace Sunshine or Vibeshine user services with a validated SteamOS bundle.
+# Replace the local Sunshine user service with a validated SteamOS bundle.
 # SPDX-License-Identifier: GPL-3.0-only
 set -euo pipefail
 umask 077
@@ -7,26 +7,20 @@ umask 077
 die() { printf 'replace-sunshine.sh: %s\n' "$*" >&2; exit 1; }
 payload=
 service_environment=
-source_host=
 while (($#)); do
   case "$1" in
-    --source)
-      (($# >= 2)) || die '--source requires sunshine or vibeshine'
-      case "$2" in sunshine|vibeshine) source_host=$2 ;; *) die '--source requires sunshine or vibeshine' ;; esac
-      shift 2 ;;
     --payload|--service-environment)
       (($# >= 2)) || die "$1 requires a path"
       if [[ "$1" == --payload ]]; then payload=$2; else service_environment=$2; fi
       shift 2 ;;
     -h|--help)
       cat <<'EOF'
-Usage: replace-sunshine.sh --payload DIR [--source sunshine|vibeshine] [--service-environment FILE]
+Usage: replace-sunshine.sh --payload DIR [--service-environment FILE]
 
-Stops legacy hosts, copies the selected host's settings and pairings into a new Vibepollo profile,
+Stops Sunshine, copies its settings and pairings into a new Vibepollo profile,
 and starts the supplied SteamOS bundle. An active stream will disconnect.
-Existing Vibepollo profiles are refused. All original profiles are kept.
-If both legacy profiles exist, --source is required; identities are never merged.
-On failure, the prior installation and legacy service states are restored.
+Existing Vibepollo profiles are refused. Sunshine's original profile is kept.
+On failure, the prior installation and Sunshine service state are restored.
 The optional environment file accepts LIBVA_DRIVERS_PATH and LIBVA_DRIVER_NAME,
 with VIBEPOLLO_PRIVATE_VAAPI=1 required for a private driver path.
 EOF
@@ -39,26 +33,15 @@ steamos_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
 data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
 [[ "$HOME" == /* && "$config_home" == /* && "$data_home" == /* ]] || die 'XDG paths must be absolute'
-if [[ -z "$source_host" ]]; then
-  for candidate in sunshine vibeshine; do
-    if [[ -e "$config_home/$candidate" || -L "$config_home/$candidate" ]]; then
-      [[ -z "$source_host" ]] || die 'both Sunshine and Vibeshine profiles exist; choose --source sunshine or --source vibeshine'
-      source_host=$candidate
-    fi
-  done
-fi
-[[ -n "$source_host" ]] || die 'no Sunshine or Vibeshine profile found'
-source_config="$config_home/$source_host"
+source_config="$config_home/sunshine"
 target_config="$config_home/vibepollo"
 install_root="$data_home/vibepollo-steamos"
 unit_dir="$config_home/systemd/user"
 launcher="$HOME/.local/bin/vibepollo-steamos-session"
 dropin="$unit_dir/vibepollo-steamos.service.d/90-local-runtime.conf"
-legacy_units=()
-legacy_enabled=()
-legacy_active=()
+sunshine_unit=app-dev.lizardbyte.app.Sunshine.service
 vibepollo_unit=vibepollo-steamos.service
-[[ -d "$source_config" && ! -L "$source_config" ]] || die 'legacy profile must be a real directory'
+[[ -d "$source_config" && ! -L "$source_config" ]] || die 'Sunshine profile must be a real directory'
 [[ ! -e "$target_config" && ! -L "$target_config" ]] || die 'Vibepollo profile already exists; refusing to overwrite it'
 [[ -n "$payload" && -d "$payload" && ! -L "$payload" ]] || die '--payload must name a real directory'
 payload=$(CDPATH= cd -- "$payload" && pwd -P)
@@ -71,8 +54,8 @@ systemctl --user is-active --quiet "$vibepollo_unit" && die 'Vibepollo is alread
 [[ ! -e "$install_root/current" || -L "$install_root/current" ]] || die 'bundle current must be a symlink'
 install -d -- "$data_home"
 exec 8> "$data_home/.vibepollo-sunshine-cutover.lock"
-flock -n 8 || die 'another legacy-host replacement is running'
-backup=$(mktemp -d -- "$data_home/$source_host-before-vibepollo-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX")
+flock -n 8 || die 'another Sunshine replacement is running'
+backup=$(mktemp -d -- "$data_home/sunshine-before-vibepollo-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX")
 chmod 0700 -- "$backup"
 printf 'Private rollback backup: %s\n' "$backup"
 
@@ -110,7 +93,7 @@ while IFS= read -r line; do runtime_env+=("$line"); done < "$backup/runtime.env"
 if ! timeout 20 env "${runtime_env[@]}" "$payload/bin/vibepollo" --help > "$backup/preflight.log" 2>&1; then
   die "payload cannot run natively; see $backup/preflight.log"
 fi
-https_port=$(python3 - "$source_config/$source_host.conf" <<'PY'
+https_port=$(python3 - "$source_config/sunshine.conf" <<'PY'
 import pathlib, re, sys
 ports = []
 for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
@@ -126,22 +109,13 @@ print((ports[0] if ports else 47989) + 1)
 PY
 )
 
+sunshine_enabled=$(systemctl --user is-enabled "$sunshine_unit" 2>/dev/null || true)
 vibepollo_enabled=$(systemctl --user is-enabled "$vibepollo_unit" 2>/dev/null || true)
-for unit in app-dev.lizardbyte.app.Sunshine.service sunshine.service vibeshine-steamos.service vibeshine.service app-io.github.Nonary.vibeshine.service; do
-  enabled=$(systemctl --user is-enabled "$unit" 2>/dev/null || true)
-  case "$enabled" in
-    enabled|enabled-runtime|disabled|static|indirect) ;;
-    ''|not-found) continue ;;
-    masked|masked-runtime)
-      systemctl --user is-active --quiet "$unit" && die "$unit is active but masked; stop it before replacement"
-      continue ;;
-    *) die "unsupported legacy service state for $unit: $enabled" ;;
-  esac
-  active=no
-  systemctl --user is-active --quiet "$unit" && active=yes
-  legacy_units+=("$unit"); legacy_enabled+=("$enabled"); legacy_active+=("$active")
-  printf '%s enabled=%s active=%s\n' "$unit" "$enabled" "$active" >> "$backup/service-state"
-done
+case "$sunshine_enabled" in enabled|enabled-runtime|disabled|static|indirect) ;; *) die 'Sunshine service is missing, masked, or has an unsupported enable state' ;; esac
+sunshine_active=no
+systemctl --user is-active --quiet "$sunshine_unit" && sunshine_active=yes
+printf 'sunshine_enabled=%s\nsunshine_active=%s\nvibepollo_enabled=%s\n' \
+  "$sunshine_enabled" "$sunshine_active" "$vibepollo_enabled" > "$backup/service-state"
 previous=$(readlink -- "$install_root/current" || true)
 printf '%s\n' "$previous" > "$backup/previous-release"
 for pair in "launcher:$launcher" "unit:$unit_dir/$vibepollo_unit" "dropin:$dropin" "runtime:$install_root/local-runtime.env"; do
@@ -164,14 +138,9 @@ rollback() {
   local status=$?
   trap - EXIT INT TERM HUP
   if [[ "$success" != yes && "$installation_started" == yes ]]; then
-    printf 'Cutover failed; restoring legacy hosts and the prior Vibepollo installation.\n' >&2
+    printf 'Cutover failed; restoring Sunshine and the prior Vibepollo installation.\n' >&2
     set +e
-    if ! systemctl --user stop "$vibepollo_unit" || systemctl --user is-active --quiet "$vibepollo_unit" ||
-       [[ $(systemctl --user show "$vibepollo_unit" --property=MainPID --value) != 0 ]] ||
-       [[ ! $(systemctl --user show "$vibepollo_unit" --property=ActiveState --value) =~ ^(inactive|failed)$ ]]; then
-      printf 'ERROR: new host could not be stopped; retaining its profile and all backups at %s. Legacy hosts remain stopped to avoid conflicts.\n' "$backup" >&2
-      exit "$status"
-    fi
+    systemctl --user stop "$vibepollo_unit"
     systemctl --user disable "$vibepollo_unit"
     if [[ "$migration_started" == yes ]]; then rm -rf -- "$target_config"; fi
     if [[ -n "$previous" ]]; then
@@ -191,12 +160,10 @@ rollback() {
     systemctl --user daemon-reload
     restore_enabled "$vibepollo_unit" "$vibepollo_enabled"
     if [[ "$cutover_started" == yes ]]; then
-      for index in "${!legacy_units[@]}"; do
-        restore_enabled "${legacy_units[index]}" "${legacy_enabled[index]}"
-        if [[ "${legacy_active[index]}" == yes ]]; then
-          systemctl --user start "${legacy_units[index]}" || printf 'ERROR: legacy host restart failed; use the private backup at %s.\n' "$backup" >&2
-        fi
-      done
+      restore_enabled "$sunshine_unit" "$sunshine_enabled"
+      if [[ "$sunshine_active" == yes ]]; then
+        systemctl --user start "$sunshine_unit" || printf 'ERROR: Sunshine restart failed; use the private backup at %s.\n' "$backup" >&2
+      fi
     fi
   fi
   exit "$status"
@@ -222,15 +189,13 @@ if [[ -n "$service_environment" ]]; then
     die 'systemd did not load the private encoder environment file'
 fi
 cutover_started=yes
-for unit in "${legacy_units[@]}"; do
-  systemctl --user disable --now "$unit"
-  systemctl --user is-active --quiet "$unit" && die "$unit did not stop"
-done
+systemctl --user disable --now "$sunshine_unit"
+systemctl --user is-active --quiet "$sunshine_unit" && die 'Sunshine did not stop'
 
 # The source service is now stopped, so the backup includes its final pairing
 # state. Keep Sunshine's original directory untouched throughout the cutover.
 migration_started=yes
-python3 - "$source_config" "$target_config" "$backup/$source_host" "$steamos_dir/local" "$source_host" <<'PY'
+python3 - "$source_config" "$target_config" "$backup/sunshine" "$steamos_dir/local" <<'PY'
 import json, os, pathlib, re, shutil, stat, sys
 source, target, backup = map(pathlib.Path, sys.argv[1:4])
 sys.path.insert(0, sys.argv[4])
@@ -250,14 +215,13 @@ shutil.copytree(source, backup)
 backup.chmod(0o700)
 shutil.copytree(backup, target)
 target.chmod(0o700)
-source_host = sys.argv[5]
-old = target / (source_host + '.conf')
+old = target / 'sunshine.conf'
 if not old.is_file():
-    raise SystemExit('legacy profile has no host configuration file')
+    raise SystemExit('Sunshine profile has no sunshine.conf')
 path_keys = {'file_state', 'credentials_file', 'file_apps', 'pkey', 'cert', 'log_path', 'vibeshine_file_state'}
 lines = []
 apps = target / 'apps.json'
-pairing_states = {target / 'sunshine_state.json', target / 'vibeshine_state.json'}
+pairing_state = target / 'sunshine_state.json'
 external_files = {}
 for line in old.read_text().splitlines(keepends=True):
     match = re.match(r'\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$', line)
@@ -293,19 +257,17 @@ for line in old.read_text().splitlines(keepends=True):
             apps = pathlib.Path(migrated_value)
             if not apps.is_absolute():
                 apps = target / apps
-        if key in {'file_state', 'vibeshine_file_state'} and value:
+        if key == 'file_state' and value:
             pairing_state = pathlib.Path(line.partition('=')[2].strip())
             if not pairing_state.is_absolute():
                 pairing_state = target / pairing_state
-            pairing_states.add(pairing_state)
     lines.append(line)
 (target / 'vibepollo.conf').write_text(''.join(lines))
 old.unlink()
-for pairing_state in pairing_states:
-    if pairing_state.is_file():
-        consolidated = normalize_pairing_state(pairing_state)
-        if consolidated:
-            print(f'Consolidated {consolidated} legacy pairing aliases; all distinct client certificates retained.')
+if pairing_state.is_file():
+    consolidated = normalize_pairing_state(pairing_state)
+    if consolidated:
+        print(f'Consolidated {consolidated} legacy pairing aliases; all distinct client certificates retained.')
 if apps.is_file():
     def remap(value):
         if isinstance(value, str):
@@ -377,5 +339,5 @@ if [[ "$ready" != yes ]]; then
   die "Vibepollo service and HTTPS readiness check failed; diagnostics: $backup"
 fi
 success=yes
-printf 'Vibepollo is active at https://localhost:%s/. %s settings and pairings were copied.\n' "$https_port" "$source_host"
-printf 'Legacy user services are disabled; original profiles and private backup remain at %s.\n' "$backup"
+printf 'Vibepollo is active at https://localhost:%s/. Sunshine settings and pairings were copied.\n' "$https_port"
+printf 'Sunshine is disabled; its original profile and private backup remain at %s.\n' "$backup"

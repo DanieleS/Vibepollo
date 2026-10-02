@@ -338,6 +338,12 @@ TEST(RemoteSession, SecondaryGameTransportJoinsActiveOrRetainedOutput) {
   EXPECT_FALSE(remote_session::joins_existing_game_output(remote_session::role_e::input, false, true));
 }
 
+TEST(RemoteSession, SecondaryGameClientIsDeterminedByRunningAppOwner) {
+  EXPECT_FALSE(remote_session::is_secondary_game_client("owner", "owner"));
+  EXPECT_TRUE(remote_session::is_secondary_game_client("owner", "other"));
+  EXPECT_FALSE(remote_session::is_secondary_game_client("", "other"));
+}
+
 TEST(RemoteSession, ApplistResumeUsesLaunchResponseShape) {
   EXPECT_EQ(remote_session::stream_start_response_key(true), "gamesession");
   EXPECT_EQ(remote_session::stream_start_response_key(false), "resume");
@@ -369,14 +375,6 @@ TEST(RemoteSession, CapturePlanNeverFallsBackForSpecialRoles) {
   EXPECT_EQ(remote_session::capture_plan(remote_session::role_e::monitor).source, remote_session::capture_source_e::invalid);
   EXPECT_EQ(remote_session::capture_plan(remote_session::role_e::monitor, std::string {}).source, remote_session::capture_source_e::invalid);
   EXPECT_EQ(remote_session::capture_plan(remote_session::role_e::game).source, remote_session::capture_source_e::active_output);
-}
-
-TEST(RemoteSession, ConvertsApolloSessionMillihertzBeforeCreatingDisplayModes) {
-  EXPECT_EQ(remote_session::display_refresh_hz_from_session_fps(120000), 120);
-  EXPECT_EQ(remote_session::display_refresh_hz_from_session_fps(119880), 120);
-  EXPECT_EQ(remote_session::display_refresh_hz_from_session_fps(59940), 60);
-  EXPECT_EQ(remote_session::display_refresh_hz_from_session_fps(60), 60);
-  EXPECT_EQ(remote_session::monitor_mode_from_session_fps(2560, 1440, 120000), "2560x1440@120");
 }
 
 TEST(RemoteSession, DisconnectControlsCompleteAsDisplayedLaunchFailures) {
@@ -489,8 +487,10 @@ TEST(RemoteSession, PendingRegistryKeepsEncryptedLaunchesDistinctAndPlaintextSaf
   const auto expiry = std::chrono::steady_clock::now() + std::chrono::minutes(1);
   EXPECT_TRUE(registry.add({.launch_id = 1, .client_uuid = "one", .crypto_binding = "cert-one", .source_address = "10.0.0.1", .encrypted = true, .role = remote_session::role_e::game, .generation = 1, .expires_at = expiry}));
   EXPECT_TRUE(registry.add({.launch_id = 2, .client_uuid = "two", .crypto_binding = "cert-two", .source_address = "10.0.0.1", .encrypted = true, .role = remote_session::role_e::game, .generation = 1, .expires_at = expiry}));
+  EXPECT_TRUE(registry.add({.launch_id = 5, .client_uuid = "one", .crypto_binding = "cert-one-rotated", .source_address = "10.0.0.1", .encrypted = true, .role = remote_session::role_e::monitor, .generation = 2, .expires_at = expiry}));
   EXPECT_EQ(registry.match_encrypted("one", "cert-one", std::chrono::steady_clock::now())->launch_id, 1u);
   EXPECT_EQ(registry.match_encrypted("two", "cert-two", std::chrono::steady_clock::now())->launch_id, 2u);
+  EXPECT_EQ(registry.match_encrypted("one", "cert-one-rotated", std::chrono::steady_clock::now())->launch_id, 5u);
   EXPECT_FALSE(registry.match_encrypted("one", "cert-two", std::chrono::steady_clock::now()));
   EXPECT_TRUE(registry.add({.launch_id = 3, .client_uuid = "three", .source_address = "10.0.0.2", .encrypted = false, .role = remote_session::role_e::game, .expires_at = expiry}));
   std::string warning;
@@ -558,33 +558,4 @@ TEST(RemoteSession, LayoutGraphRejectsInvalidAnchorsCyclesAndDuplicatePrimary) {
   EXPECT_FALSE(remote_session::validate_layout({{"a", "client", "b", "right", "center", 0, false}, {"b", "client", "a", "right", "center", 0, false}}, clients, physical, &error));
   EXPECT_FALSE(remote_session::validate_layout({{"a", "physical", "missing", "right", "center", 0, false}}, clients, physical, &error));
   EXPECT_FALSE(remote_session::validate_layout({{"a", "physical", "DISPLAY1", "right", "center", 0, true}, {"b", "physical", "DISPLAY1", "right", "center", 0, true}}, clients, physical, &error));
-}
-
-TEST(RemoteSession, DisabledInputHidesCatalogueAndRejectsCachedLaunchWithoutBlockingCleanup) {
-  auto disabled = caller("client");
-  disabled.input_enabled = false;
-  const std::vector<remote_session::app_t> configured {{42, "game", "Game", false}};
-  for (const auto active_game : {remote_session::game_t {}, game()}) {
-    for (bool active_peers : {false, true}) {
-      const auto projected = remote_session::project(disabled, active_game, {}, configured, active_peers);
-      for (const auto &entry : projected.catalogue) EXPECT_NE(entry.id, remote_session::input_id);
-    }
-  }
-  EXPECT_FALSE(remote_session::dispatch(disabled, {}, {}, remote_session::control_e::input).allowed);
-  EXPECT_TRUE(remote_session::dispatch(disabled, {}, {}, remote_session::control_e::monitor).allowed);
-  EXPECT_TRUE(remote_session::dispatch(disabled, game(), {}, remote_session::control_e::resume).allowed);
-  EXPECT_TRUE(remote_session::dispatch(disabled, {}, {.role = remote_session::role_e::input}, remote_session::control_e::disconnect_input).allowed);
-  EXPECT_TRUE(remote_session::dispatch(caller("client"), {}, {}, remote_session::control_e::input).allowed);
-  EXPECT_FALSE(remote_session::dispatch(caller("client", true, false), {}, {}, remote_session::control_e::input).allowed);
-}
-
-TEST(RemoteSession, MonitorCommandsHonorClientAndAppPolicyWithoutChangingInputIsolation) {
-  using remote_session::role_e;
-  for (bool client_allows : {false, true}) {
-    for (bool app_allows : {false, true}) {
-      EXPECT_FALSE(remote_session::allows_client_commands(role_e::input, client_allows, app_allows));
-      EXPECT_EQ(remote_session::allows_client_commands(role_e::monitor, client_allows, app_allows), client_allows && app_allows);
-      EXPECT_EQ(remote_session::allows_client_commands(role_e::game, client_allows, app_allows), client_allows && app_allows);
-    }
-  }
 }

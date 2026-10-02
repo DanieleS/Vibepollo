@@ -647,7 +647,7 @@ namespace VibepolloInstaller {
         Margin = new Thickness(0, 0, 0, 6)
       });
       _virtualGamepadDriverCheckBox = new CheckBox {
-        Content = "Install Vibeshine virtual gamepad driver",
+        Content = "Install Vibepollo virtual gamepad driver",
         FontSize = 13,
         Foreground = new SolidColorBrush(Color.FromRgb(232, 239, 253)),
         IsChecked = true,
@@ -656,7 +656,7 @@ namespace VibepolloInstaller {
       };
       gamepadStack.Children.Add(_virtualGamepadDriverCheckBox);
       gamepadStack.Children.Add(new TextBlock {
-        Text = "Enable this to install or update Vibeshine's bundled virtual gamepad driver.",
+        Text = "Enable this to install or update Vibepollo's bundled virtual gamepad driver.",
         FontSize = 12,
         Foreground = new SolidColorBrush(Color.FromRgb(190, 208, 236)),
         TextWrapping = TextWrapping.Wrap
@@ -1740,7 +1740,7 @@ namespace VibepolloInstaller {
         IsChecked = false
       };
       var removeGamepadDriverCheckBox = new CheckBox {
-        Content = "Also remove Vibeshine virtual gamepad driver package",
+        Content = "Also remove Vibepollo virtual gamepad driver package",
         FontSize = 13,
         Foreground = new SolidColorBrush(Color.FromRgb(226, 235, 250)),
         Margin = new Thickness(0, 0, 0, 8),
@@ -7947,28 +7947,33 @@ namespace VibepolloInstaller {
       if (snapshot != null && !string.IsNullOrWhiteSpace(snapshot.LogPath)) {
         cliLogPath = snapshot.LogPath;
       }
-      TryDeleteFile(resultPath);
-      if (exitCode == 0 && InstallLogIndicatesDriverRebootRequired(cliLogPath)) {
+      var componentWarnings = snapshot == null
+        ? elevatedOperation == InstallerOperation.Install
+          ? CollectInstallComponentFailures(cliLogPath, false)
+          : CollectVirtualGamepadCleanupWarnings(cliLogPath)
+        : new List<string>();
+      if (snapshot == null && exitCode == 0 && InstallLogIndicatesDriverRebootRequired(cliLogPath)) {
         exitCode = 3010;
       }
+      TryDeleteFile(resultPath);
       var installDeferred = snapshot != null && snapshot.InstallDeferredForRestart;
-      var componentFailures = snapshot == null ? new List<string>() : (snapshot.ComponentFailures ?? new List<string>());
-      if (elevatedOperation != InstallerOperation.Install) {
-        componentFailures.AddRange(CollectVirtualGamepadCleanupWarnings(cliLogPath));
+      var resultMessage = installDeferred
+        ? string.IsNullOrWhiteSpace(snapshot.Message)
+          ? "Installation is deferred. Migration cleanup completed and Windows must restart before installation can continue."
+          : snapshot.Message
+        : snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Message)
+          ? snapshot.Message
+          : BuildResultMessage("CLI operation", exitCode, cliLogPath);
+      if (componentWarnings.Count > 0) {
+        resultMessage += " Component warnings: " + string.Join(" ", componentWarnings);
       }
       return new InstallerResult {
         Operation = elevatedOperation,
         ExitCode = exitCode,
-        Message = installDeferred
-          ? string.IsNullOrWhiteSpace(snapshot.Message)
-            ? "Installation is deferred. Migration cleanup completed and Windows must restart before installation can continue."
-            : snapshot.Message
-          : snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Message)
-            ? snapshot.Message
-            : BuildResultMessage("CLI operation", exitCode, cliLogPath),
+        Message = resultMessage,
         UserDetail = snapshot == null ? string.Empty : snapshot.UserDetail,
         LogPath = cliLogPath,
-        ComponentFailures = componentFailures,
+        ComponentFailures = snapshot == null ? componentWarnings : (snapshot.ComponentFailures ?? new List<string>()),
         InstallDeferredForRestart = installDeferred
       };
     }

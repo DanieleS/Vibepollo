@@ -21,8 +21,7 @@ namespace remote_session {
   inline constexpr std::int32_t monitor_id = 2147483505;
   inline constexpr std::int32_t input_id = 2147483506;
   inline constexpr std::int32_t running_game_id = 2147483507;
-  // Prioritized display variants keep a separate ID so Moonlight replaces
-  // them instead of renaming an existing row across catalogue transitions.
+  // Distinct identities prevent Moonlight from renaming cached primary tiles.
   inline constexpr std::int32_t secondary_resume_id = 2147483511;
   inline constexpr std::int32_t secondary_terminate_id = 2147483514;
   inline constexpr std::int32_t secondary_monitor_id = 2147483515;
@@ -61,7 +60,6 @@ namespace remote_session {
     bool may_view {};
     bool may_launch {};
     bool may_terminate {};
-    bool input_enabled {true};
   };
 
   struct projection_t {
@@ -79,8 +77,6 @@ namespace remote_session {
     bool terminate {};
     bool already_complete {};
   };
-
-  bool allows_client_commands(role_e role, bool client_allows, bool app_allows);
 
   struct control_completion_t {
     int status_code {};
@@ -185,6 +181,7 @@ namespace remote_session {
     bool stream_active,
     bool retained_output_ready = false
   );
+  [[nodiscard]] bool is_secondary_game_client(std::string_view app_owner_uuid, std::string_view caller_uuid);
   [[nodiscard]] std::string_view stream_start_response_key(bool launched_from_applist);
   [[nodiscard]] std::optional<control_completion_t> successful_control_completion(control_e control);
   [[nodiscard]] bool input_uses_display_or_audio(role_e role);
@@ -195,8 +192,6 @@ namespace remote_session {
   [[nodiscard]] bool uses_host_audio(role_e role);
   [[nodiscard]] bool disconnect_monitor_after_stream(bool disconnect_on_stream_end, bool disconnect_on_client_disconnect, bool client_disconnected);
   [[nodiscard]] capture_plan_t capture_plan(role_e role, std::optional<std::string> output = std::nullopt);
-  [[nodiscard]] int display_refresh_hz_from_session_fps(int session_fps);
-  [[nodiscard]] std::string monitor_mode_from_session_fps(int width, int height, int session_fps);
 
   class normal_app_transition_gate_t {
   public:

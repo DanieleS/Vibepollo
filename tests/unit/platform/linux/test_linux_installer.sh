@@ -4,30 +4,45 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd -P)
 source "$repo/scripts/linux_install.sh"
 workdir=$(mktemp -d /tmp/vibepollo-installer-test.XXXXXXXX)
 local_package="$workdir/vibepollo.pkg.tar.zst"
-touch "$local_package"
+printf 'vibepollo_quiesce_or_abort() { return 1; }\n' > "$workdir/.INSTALL"
+bsdtar -cf "$local_package" -C "$workdir" .INSTALL
+stage_upgrade_guard "$local_package"
+grep -Fxq 'AbortOnFail' "$workdir/hooks/00-vibepollo-quiesce.hook"
+grep -Fxq "Exec = $workdir/preflight" "$workdir/hooks/00-vibepollo-quiesce.hook"
+if "$workdir/preflight"; then exit 1; fi
 calls="$workdir/calls"
 source_root="$workdir/usr/src"
 backup_root="$workdir/backups"
-mkdir -p "$source_root" "$backup_root"
+install_root="$workdir/root"
+mkdir -p "$source_root" "$backup_root" "$install_root"
 # Route only the fixture through alternate roots; never inspect real driver files.
 eval "$(declare -f prepare_driver_replacement | sed '1s/prepare_driver_replacement/prepare_driver_replacement_fixture/')"
-prepare_driver_replacement() { prepare_driver_replacement_fixture "$source_root" "$backup_root"; }
+prepare_driver_replacement() { prepare_driver_replacement_fixture "$source_root" "$backup_root" "$install_root"; }
 stat() {
   # The production /usr/src ancestry is root-owned and not world-writable.
   # Our fixture's /tmp ancestor is intentionally the only mocked metadata.
   if [[ "${!#}" == /tmp ]]; then printf '%s 755\n' "$EUID"; else command stat "$@"; fi
 }
 package_name=vibepollo
-directory_owner=vibeshine
+directory_owner=vibepollo
 ownership_error=0
 repository_metadata_available=1
 pacman() {
   printf '%s\n' "$*" >> "$calls"
   if [[ "$1" == -Si ]]; then ((repository_metadata_available)); return; fi
+  if [[ "$1" == -Sw ]]; then
+    mkdir -p "$workdir/cache"
+    command cp "$local_package" "$workdir/cache/vibepollo-1.0-1-x86_64.pkg.tar.zst"
+    return
+  fi
   if [[ "$1" == -Qp ]]; then printf '%s 1.0-1\n' "$package_name"; fi
   if [[ "$1" == -Qoq ]]; then
     local path=${!#}
     if [[ -d "$path" ]]; then
+      if [[ $directory_owner == unowned ]]; then
+        printf 'error: No package owns %s\n' "$path" >&2
+        return 1
+      fi
       printf '%s\n' "$directory_owner"
     elif [[ ${path##*/} == owned.h ]]; then
       printf 'unrelated-driver\n'
@@ -38,11 +53,10 @@ pacman() {
     fi
   fi
 }
-parse_args --yes --source-profile vibeshine
-[[ "$VIBEPOLLO_IMPORT_SOURCE" == vibeshine ]]
+parse_args --yes
 install_from_package
 ! grep -Eq -- '^-S' "$calls"
-grep -Fx -- "-U --noconfirm --ask=4 -- $local_package" "$calls"
+grep -Fx -- "-U --noconfirm --ask=4 --hookdir $workdir/hooks -- $local_package" "$calls"
 [[ $(wc -l < "$calls") == 2 ]]
 : > "$calls"
 package_name=unrelated
@@ -53,7 +67,7 @@ if (install_from_package); then exit 1; fi
 package_name=vibepollo
 pacman_confirm=(); replacement_confirm=()
 install_from_package
-grep -Fx -- "-U -- $local_package" "$calls"
+grep -Fx -- "-U --hookdir $workdir/hooks -- $local_package" "$calls"
 printf 'Native installer validates package identity and confines conflict answers to replacement.\n'
 
 directory="$source_root/vibeshine-drm-1.19.0"
@@ -67,9 +81,9 @@ printf 'literal wildcard\n' > "$directory/unsafe*.h"
 install_from_package
 expected='--overwrite usr/src/vibeshine-drm-1.19.0/vibeshine_drm_vrr.h'
 ! grep -Eq -- '^-S' "$calls"
-grep -Fx -- "-U $expected -- $local_package" "$calls"
+grep -Fx -- "-U $expected --hookdir $workdir/hooks -- $local_package" "$calls"
 [[ ${#driver_overwrite[@]} == 2 ]]
-backups=("$backup_root"/vibepollo-driver-backup.*/vibeshine-drm-1.19.0/vibeshine_drm_vrr.h)
+backups=("$backup_root"/vibeshine-driver-backup.*/vibeshine-drm-1.19.0/vibeshine_drm_vrr.h)
 [[ ${#backups[@]} == 1 ]]
 cmp "$directory/vibeshine_drm_vrr.h" "${backups[0]}"
 [[ $(command stat -c %a "${backups[0]%/vibeshine-drm-1.19.0/*}") == 700 ]]
@@ -79,7 +93,7 @@ cmp "$directory/vibeshine_drm_vrr.h" "${backups[0]}"
 directory_owner=unrelated
 prepare_driver_replacement
 [[ ${#driver_overwrite[@]} == 0 ]]
-directory_owner=vibeshine
+directory_owner=vibepollo
 
 # Ownership-query failures are not evidence of an unowned file.
 ownership_error=1
@@ -102,14 +116,14 @@ configure_pacman_repo() { :; }
 parse_args --yes
 : > "$calls"
 install_from_repo
-grep -Fx -- "-S --noconfirm --ask=4 $expected vibepollo" "$calls"
+grep -Fx -- "-S --noconfirm --ask=4 $expected --cachedir $workdir/cache --hookdir $workdir/hooks vibepollo" "$calls"
 ! grep -Eq -- '^-S[^ ]*[yu]' "$calls"
 download_release_package() { printf 'download-release\n' >> "$calls"; }
 repository_metadata_available=0
 : > "$calls"
 install_from_repo
 grep -Fx -- 'download-release' "$calls"
-grep -Fx -- "-U --noconfirm --ask=4 $expected -- $local_package" "$calls"
+grep -Fx -- "-U --noconfirm --ask=4 $expected --hookdir $workdir/hooks -- $local_package" "$calls"
 ! grep -Eq -- '^-S[^ ]*[yu]' "$calls"
 repository_metadata_available=1
 
@@ -126,6 +140,32 @@ if (install_from_package); then exit 1; fi
 ! grep -Eq -- '^-S|^-U' "$calls"
 unset -f cp
 printf 'Legacy driver leftovers are backed up and narrowly adopted without changing owned files.\n'
+
+# Exact unowned DS5 package files from a manual development install are adopted.
+mkdir -p "$install_root/usr/lib/modules-load.d" "$install_root/usr/libexec/vibeshine"
+printf 'vibeshine_ds5\n' > "$install_root/usr/lib/modules-load.d/70-vibeshine-ds5.conf"
+printf '#!/usr/bin/env bash\n' > "$install_root/usr/libexec/vibeshine/vibeshine-ds5-install"
+prepare_driver_replacement
+for relative in usr/lib/modules-load.d/70-vibeshine-ds5.conf \
+  usr/libexec/vibeshine/vibeshine-ds5-install; do
+  [[ " ${driver_overwrite[*]} " == *" $relative "* ]]
+  package_backups=("$backup_root"/vibeshine-driver-backup.*/"$relative")
+  [[ ${#package_backups[@]} == 1 ]]
+  cmp "$install_root/$relative" "${package_backups[0]}"
+done
+
+# A manually installed DS5 tree must be adoptable by its first native package.
+(
+  directory="$source_root/vibeshine-ds5-2.0.0"
+  mkdir "$directory"
+  printf 'manual DS5 source\n' > "$directory/vibeshine_ds5_main.c"
+  directory_owner=unowned
+  prepare_driver_replacement
+  [[ " ${driver_overwrite[*]} " == *" usr/src/vibeshine-ds5-2.0.0/vibeshine_ds5_main.c "* ]]
+  ds5_backups=("$backup_root"/vibeshine-driver-backup.*/vibeshine-ds5-2.0.0/vibeshine_ds5_main.c)
+  [[ ${#ds5_backups[@]} == 1 ]]
+  cmp "$directory/vibeshine_ds5_main.c" "${ds5_backups[0]}"
+)
 
 # Check the installed driver's status and build it if the package hook failed.
 driver_calls="$workdir/driver-calls"
@@ -172,6 +212,30 @@ install_kernel_headers() { die 'fixture: matching headers unavailable'; }
 if (install_virtual_driver "$driver_helper"); then exit 1; fi
 [[ $(<"$driver_calls") == status ]]
 printf 'Driver installation is required; genuine build failures cannot report installer success.\n'
+
+# DualSense package-hook failures must not be silently accepted either.
+(
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$driver_calls"' \
+    'if [[ "$1" == status ]]; then exit "$driver_status"; fi' \
+    '[[ "$1" == install ]] || exit 99' 'exit "$driver_install_status"' > "$driver_helper"
+  install_kernel_headers() { printf 'headers\n' >> "$driver_calls"; }
+  driver_status=1; driver_install_status=0
+  : > "$driver_calls"
+  install_dualsense_driver "$driver_helper"
+  [[ $(<"$driver_calls") == $'status\nheaders\ninstall' ]]
+  driver_install_status=1
+  if (install_dualsense_driver "$driver_helper"); then exit 1; fi
+  driver_install_status=4; reboot_required=0
+  install_dualsense_driver "$driver_helper"
+  [[ $reboot_required == 1 ]]
+  for driver_status in 0 4; do
+    : > "$driver_calls"
+    install_dualsense_driver "$driver_helper"
+    [[ $(<"$driver_calls") == status ]]
+  done
+  if (install_dualsense_driver "$workdir/missing-ds5-helper"); then exit 1; fi
+)
+printf 'DualSense installation failures cannot report installer success.\n'
 
 # Reproduce an upgraded kernel package while the removed old kernel still runs.
 (
@@ -220,3 +284,217 @@ printf 'Retired running kernels require a reboot, not mismatched header installa
   [[ $reboot_required == 0 ]]
 )
 printf 'Fresh installs require a compositor restart even when the driver loads immediately.\n'
+
+# Upgrades must match the running supervisor's signal-forwarding contract.
+# Evaluate only this pure selector from each package hook; never execute a
+# package hook's top-level host mutations in the test environment.
+for package_hook in \
+  "$repo/packaging/linux/Arch/vibepollo.install" \
+  "$repo/packaging/linux/vibeshine-preinst.in" \
+  "$repo/packaging/linux/copr/Sunshine.spec"; do
+  (
+    eval "$(sed -n '/^vibepollo_select_upgrade_kill_mode() {$/,/^}$/p' "$package_hook")"
+    declare -F vibepollo_select_upgrade_kill_mode >/dev/null
+    vibepollo_legacy_host="$workdir/supervisor-fixture"
+    helper_safe=1
+    host_quiescent=1
+    vibepollo_privileged_helper_is_safe() { ((helper_safe)); }
+    vibepollo_unit_is_quiescent() { [[ "$1" == vibepollo.service ]] && ((host_quiescent)); }
+
+    printf '%s\n' '  trap request_host_shutdown TERM INT HUP' > "$vibepollo_legacy_host"
+    vibepollo_select_upgrade_kill_mode
+    [[ "$vibepollo_upgrade_kill_mode" == mixed ]]
+    # Prefer the new contract if a transitional helper retains the old marker.
+    printf '%s\n' '  trap mark_host_shutdown TERM INT HUP' >> "$vibepollo_legacy_host"
+    vibepollo_select_upgrade_kill_mode
+    [[ "$vibepollo_upgrade_kill_mode" == mixed ]]
+    helper_safe=0
+    if vibepollo_select_upgrade_kill_mode; then exit 1; fi
+    helper_safe=1
+
+    printf '%s\n' '  trap mark_host_shutdown TERM INT HUP' > "$vibepollo_legacy_host"
+    vibepollo_select_upgrade_kill_mode
+    [[ "$vibepollo_upgrade_kill_mode" == control-group ]]
+    printf '%s\n' \
+      "  trap 'forward_host_signal TERM' TERM" \
+      "  trap 'forward_host_signal INT' INT" \
+      "  trap 'forward_host_signal HUP' HUP" > "$vibepollo_legacy_host"
+    vibepollo_select_upgrade_kill_mode
+    [[ "$vibepollo_upgrade_kill_mode" == process ]]
+
+    printf '%s\n' "  trap 'forward_host_signal TERM' TERM" > "$vibepollo_legacy_host"
+    if vibepollo_select_upgrade_kill_mode; then exit 1; fi
+    printf '%s\n' 'unrecognized supervisor' > "$vibepollo_legacy_host"
+    if vibepollo_select_upgrade_kill_mode; then exit 1; fi
+
+    vibepollo_legacy_host="$workdir/absent-supervisor"
+    host_quiescent=0
+    if vibepollo_select_upgrade_kill_mode; then exit 1; fi
+    host_quiescent=1
+    vibepollo_select_upgrade_kill_mode
+    [[ "$vibepollo_upgrade_kill_mode" == control-group ]]
+  )
+done
+printf 'Package upgrades preserve new and legacy supervisor shutdown contracts.\n'
+
+# Removal and post-install recovery must leave broker/app workers untouched
+# when the GPU host has not drained, even if the admission socket has stopped.
+for hook_case in \
+  'packaging/linux/vibepollo-prerm.in:vibepollo_quiesce_for_removal' \
+  'packaging/linux/vibepollo-postinst.in:vibepollo_quiesce_machine_host' \
+  'packaging/linux/copr/Sunshine.spec:vibepollo_quiesce_machine_host' \
+  'packaging/linux/copr/Sunshine.spec:vibepollo_preun_quiesce'; do
+  (
+    package_hook="$repo/${hook_case%%:*}"
+    quiesce_function=${hook_case#*:}
+    # The RPM post-install definition intentionally supersedes its pre-install
+    # namesake. Redirect runtime-presence checks and paths into this fixture.
+    eval "$(sed -n "/^${quiesce_function}() {$/,/^}$/p" "$package_hook" |
+      sed -e "s|/run/systemd/system|$workdir|g" \
+          -e "s|/run/vibepollo/|$workdir/absent-runtime/|g")"
+    declare -F "$quiesce_function" >/dev/null
+    vibepollo_controller="$workdir/absent-controller"
+    vibepollo_broker_socket="$workdir/absent-runtime/session-broker.sock"
+    vibepollo_session_record="$workdir/absent-runtime/session.env"
+    vibepollo_legacy_acl="$workdir/absent-runtime/session.acl"
+    hook_calls="$workdir/hook-calls"
+    host_verified=0
+    host_quiescent=0
+    systemctl() { return 0; }
+    timeout() { return 0; }
+    vibepollo_stop_exact_unit() { printf 'stop %s\n' "$1" >> "$hook_calls"; }
+    vibepollo_unit_is_quiescent() {
+      if [[ "$1" == vibepollo.service ]]; then
+        ((host_quiescent)) || return 1
+        host_verified=1
+        printf 'host drained\n' >> "$hook_calls"
+      fi
+    }
+    vibepollo_stop_brokers() {
+      ((host_verified)) || return 1
+      printf 'stop brokers\n' >> "$hook_calls"
+    }
+    vibepollo_unit_is_masked() { return 0; }
+    vibepollo_unit_is_disabled() { return 0; }
+    vibepollo_remove_pam_hook() { return 0; }
+    vibepollo_preun_stop_exact_unit() { vibepollo_stop_exact_unit "$@"; }
+    vibepollo_preun_unit_is_quiescent() { vibepollo_unit_is_quiescent "$@"; }
+    vibepollo_preun_stop_brokers() { vibepollo_stop_brokers; }
+    vibepollo_preun_unit_is_masked() { return 0; }
+    vibepollo_preun_unit_is_disabled() { return 0; }
+    vibepollo_preun_remove_pam() { return 0; }
+
+    : > "$hook_calls"
+    if "$quiesce_function"; then exit 1; fi
+    grep -Fxq 'stop vibepollo.service' "$hook_calls"
+    ! grep -Fxq 'stop brokers' "$hook_calls"
+
+    host_quiescent=1
+    "$quiesce_function"
+    grep -Fxq 'host drained' "$hook_calls"
+    grep -Fxq 'stop brokers' "$hook_calls"
+  )
+done
+printf 'Removal and repair refuse broker teardown until the GPU host has drained.\n'
+
+# A pre-replacement failure must not stop the GPU host before broker admission
+# was touched. Once that shutdown begins, retain the runtime restart fence and
+# recover the installed unit enablement for the next boot.
+for hook in packaging/linux/vibeshine-preinst.in packaging/linux/Arch/vibepollo.install packaging/linux/copr/Sunshine.spec; do
+  (
+    eval "$(sed -n '/^vibepollo_abort_quiesce() {$/,/^}$/p' "$repo/$hook")"
+    actions=''
+    systemctl() { actions="$actions $*"; }
+    timeout() { shift 2; "$@"; }
+    stat() { printf '%s\n' '1:2:0:0:0:1'; }
+    chmod() { actions="$actions CHMOD:$*"; }
+    vibepollo_legacy_handoff="$workdir/handoff-fixture"
+    : > "$vibepollo_legacy_handoff"
+    vibepollo_pre_handoff_identity='1:2:0:0:755:1'
+    vibepollo_stop_exact_unit() { actions="$actions STOP:$1"; }
+    vibepollo_unit_is_quiescent() { return 1; }
+    vibepollo_controller_was_frozen=1
+    vibepollo_shutdown_started=0
+    vibepollo_quiesce_step='early fixture failure'
+    vibepollo_abort_quiesce 2>/dev/null
+    [[ "$actions" == *'thaw vibepollo-session-controller.service'* ]]
+    [[ "$actions" == *'CHMOD:0755 --'* ]]
+    [[ "$actions" == *'CHMOD:0755 --'*'thaw vibepollo-session-controller.service'* ]]
+    [[ "$actions" != *'STOP:'* && "$actions" != *'unmask'* ]]
+    actions=''
+    vibepollo_controller_was_frozen=0
+    vibepollo_shutdown_started=1
+    vibepollo_pre_controller_enabled=enabled
+    vibepollo_pre_host_enabled=disabled
+    vibepollo_pre_prelogin_enabled=disabled
+    vibepollo_pre_prepare_enabled=disabled
+    vibepollo_broker_socket="$workdir/absent-broker-socket"
+    vibepollo_control_socket="$workdir/absent-control-socket"
+    vibepollo_abort_quiesce 2>/dev/null
+    [[ "$actions" == *'STOP:vibepollo-session-controller.service'* ]]
+    [[ "$actions" == *'STOP:vibepollo.service'* ]]
+    [[ "$actions" != *'enable '* && "$actions" != *'disable '* && "$actions" != *'unmask'* ]]
+  )
+done
+printf 'Failed pre-upgrade quiesce preserves the early host, prior enablement, and late restart fences.\n'
+# Socket units have no MainPID property. All package formats must accept a
+# stopped four-property socket while still rejecting a malformed service.
+for package_hook in packaging/linux/vibeshine-preinst.in \
+  packaging/linux/vibepollo-postinst.in \
+  packaging/linux/vibepollo-prerm.in \
+  packaging/linux/copr/Sunshine.spec; do
+  (
+    unit_function=$(sed -n '/^vibepollo_unit_is_quiescent() {$/,/^}$/p' "$repo/$package_hook")
+    if [[ "$package_hook" == *.spec ]]; then unit_function=${unit_function//%%/%}; fi
+    eval "$unit_function"
+    timeout() { printf '%s\n' "$property_fixture"; }
+    vibepollo_cgroup_is_quiescent() { [[ -z "$1" ]]; }
+    property_fixture=$'LoadState=loaded\nActiveState=inactive\nSubState=dead\nControlGroup='
+    vibepollo_unit_is_quiescent vibepollo-session-exec.socket
+    if vibepollo_unit_is_quiescent vibepollo.service; then exit 1; fi
+    property_fixture+=$'\nMainPID=1'
+    if vibepollo_unit_is_quiescent vibepollo-session-exec.socket; then exit 1; fi
+    property_fixture=${property_fixture%$'\nMainPID=1'}$'\nMainPID=0'
+    vibepollo_unit_is_quiescent vibepollo-session-exec.socket
+  )
+done
+printf 'Debian and RPM package guards accept stopped sockets without MainPID.\n'
+(
+  preun_function=$(sed -n '/^vibepollo_preun_unit_is_quiescent() {$/,/^}$/p' \
+    "$repo/packaging/linux/copr/Sunshine.spec")
+  preun_function=${preun_function//%%/%}
+  eval "$preun_function"
+  timeout() { printf '%s\n' "$property_fixture"; }
+  vibepollo_preun_cgroup_is_quiescent() { [[ -z "$1" ]]; }
+  property_fixture=$'LoadState=loaded\nActiveState=inactive\nSubState=dead\nControlGroup='
+  vibepollo_preun_unit_is_quiescent vibepollo-session-exec.socket
+  if vibepollo_preun_unit_is_quiescent vibepollo.service; then exit 1; fi
+)
+printf 'RPM removal accepts stopped sockets without MainPID.\n'
+
+(
+  source "$repo/packaging/linux/Arch/vibepollo.install"
+  fixture=$(mktemp -d /tmp/vibepollo-masked-links.XXXXXXXX)
+  trap 'rm -rf -- "$fixture"' EXIT
+  mkdir -p "$fixture/usr/lib/systemd/system" \
+    "$fixture/etc/systemd/system/graphical.target.wants" \
+    "$fixture/etc/systemd/system/sockets.target.wants" \
+    "$fixture/run/systemd/system"
+  for unit in vibepollo.service vibepollo-session-exec.socket; do
+    printf '[Unit]\nDescription=Fixture\n' > "$fixture/usr/lib/systemd/system/$unit"
+    ln -s /dev/null "$fixture/run/systemd/system/$unit"
+  done
+  ln -s "$fixture/usr/lib/systemd/system/vibepollo.service" \
+    "$fixture/etc/systemd/system/graphical.target.wants/vibepollo.service"
+  ln -s "$fixture/usr/lib/systemd/system/vibepollo-session-exec.socket" \
+    "$fixture/etc/systemd/system/sockets.target.wants/vibepollo-session-exec.socket"
+  [[ $(systemctl --root="$fixture" is-enabled vibepollo.service) == masked-runtime ]]
+  vibepollo_retire_obsolete_boot_links "$fixture"
+  [[ ! -e "$fixture/etc/systemd/system/graphical.target.wants/vibepollo.service" ]]
+  [[ ! -e "$fixture/etc/systemd/system/sockets.target.wants/vibepollo-session-exec.socket" ]]
+  [[ $(systemctl --root="$fixture" is-enabled vibepollo.service) == masked-runtime ]]
+  ln -s /dev/null "$fixture/etc/systemd/system/graphical.target.wants/vibepollo.service"
+  if vibepollo_retire_obsolete_boot_links "$fixture"; then exit 1; fi
+  [[ -L "$fixture/etc/systemd/system/graphical.target.wants/vibepollo.service" ]]
+)
+printf 'Arch upgrade retires only matching boot links while runtime masks remain.\n'

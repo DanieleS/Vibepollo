@@ -15,8 +15,6 @@ readonly command_manifest=/etc/vibepollo/session-commands
 readonly command_manifest_header='# vibepollo-session-commands-v2'
 readonly session_controller=/usr/libexec/vibeshine/vibepollo-session-controller
 readonly profile_importer=/usr/libexec/vibeshine/vibepollo-profile-import
-readonly profile_normalizer=/usr/libexec/vibeshine/vibepollo-profile-normalize.py
-import_source=${VIBEPOLLO_IMPORT_SOURCE:-auto}
 readonly machine_host=/usr/libexec/vibeshine/vibepollo-machine-host
 readonly machine_host_executable=/usr/libexec/vibeshine/vibepollo-host
 readonly maximum_environment_entries=128
@@ -48,7 +46,9 @@ capability_clean_exec() {
   # The sandbox may need inheritable capabilities while systemd constructs
   # its namespaces.  Revoke those before the private +p executable is entered,
   # without setting no_new_privs early and suppressing its file capabilities.
-  /usr/bin/setpriv --inh-caps=-all --ambient-caps=-all -- "$@"
+  # This runs only in the background host child. Keep its PID through exec so
+  # the supervisor can signal the host without signalling its broker clients.
+  exec /usr/bin/setpriv --inh-caps=-all --ambient-caps=-all -- "$@"
 }
 
 resolve_desktop_identity() {
@@ -372,7 +372,7 @@ profile_tree_is_sanitized() {
 }
 
 rewrite_machine_cover_paths() {
-  local apps=$machine_profile/apps.json attributes temporary old_prefix new_prefix size
+  local apps=$machine_profile/apps.json attributes temporary old_prefix legacy_prefix new_prefix size
   local marker_line source_user entry account_name account_home
   [[ $(/usr/bin/id -un) == "$service_user" ]] || fail 'cover migration requires the service account'
   [[ -f "$profile_marker" && ! -L "$profile_marker" ]] || fail 'machine-profile marker is unsafe'
@@ -399,11 +399,12 @@ rewrite_machine_cover_paths() {
   [[ "$size" =~ ^[0-9]+$ ]] && ((size > 0 && size <= 16777216)) ||
     fail 'machine application catalog exceeds the migration limit'
   old_prefix=$account_home/.config/vibepollo/covers/
+  legacy_prefix=$account_home/.config/sunshine/covers/
   new_prefix=$machine_profile/covers/
   temporary=$(/usr/bin/mktemp --tmpdir="$machine_profile" .apps-migrate.XXXXXX)
   /usr/bin/chmod 0600 "$temporary"
   if ! capability_free_exec /usr/bin/timeout --signal=KILL 10 \
-      /usr/bin/jq --arg old "$old_prefix" --arg new "$new_prefix" '
+      /usr/bin/jq --arg old "$old_prefix" --arg legacy_old "$legacy_prefix" --arg new "$new_prefix" '
           def safe_suffix($value):
             ($value | type) == "string" and
             ($value | length) > 0 and
@@ -413,8 +414,9 @@ rewrite_machine_cover_paths() {
               if (has("image-path") | not) then .
               elif (.["image-path"] | type) != "string" then
                 .["image-path"] = "box.png"
-              elif (.["image-path"] | startswith($old)) then
-                (.["image-path"] | ltrimstr($old)) as $suffix
+              elif (.["image-path"] | startswith($old) or startswith($legacy_old)) then
+                (.["image-path"] | if startswith($old) then ltrimstr($old)
+                                   else ltrimstr($legacy_old) end) as $suffix
                 | .["image-path"] =
                     (if safe_suffix($suffix) then $new + $suffix else "box.png" end)
               elif (.["image-path"] | startswith($new)) then
@@ -488,21 +490,7 @@ remove_root_staging() {
 }
 
 publish_migrated_profile() (
-  local staging incoming attributes unsafe import_user=$desktop_user import_uid=$desktop_uid import_gid=$desktop_gid
-  local selected_source=$import_source entry account_name account_home
-  if [[ "$selected_source" == auto && ( -e /var/lib/vibeshine || -L /var/lib/vibeshine ) ]]; then
-    # The machine profile is authoritative after an earlier one-time migration;
-    # an old desktop copy must not replace its newer pairings/settings.
-    selected_source=machine-vibeshine
-  fi
-  if [[ "$selected_source" == machine-vibeshine ]]; then
-    entry=$(/usr/bin/getent passwd vibeshine) || exit 1
-    IFS=: read -r import_user _ import_uid import_gid _ _ _ <<<"$entry"
-    [[ "$import_user" == vibeshine && "$import_uid" =~ ^[0-9]+$ && "$import_uid" -gt 0 ]] || exit 1
-  fi
-  entry=$(/usr/bin/getent passwd "$desktop_user") || exit 1
-  IFS=: read -r account_name _ _ _ _ account_home _ <<<"$entry"
-  [[ "$account_name" == "$desktop_user" && "$account_home" == /* ]] || exit 1
+  local staging incoming attributes unsafe
   staging=$(/usr/bin/mktemp -d --tmpdir=/var/lib .vibepollo-profile.XXXXXX) || exit 1
   trap '[[ -z ${staging:-} ]] || remove_root_staging "$staging"' EXIT HUP INT TERM
   attributes=$(/usr/bin/stat -c '%U:%G:%a:%F' -- "$staging") || exit 1
@@ -514,9 +502,9 @@ publish_migrated_profile() (
   # this root-inaccessible staging parent. Root never traverses the live user
   # pathname, so a rename/symlink race cannot disclose privileged files.
   incoming=$staging/incoming
-  /usr/bin/install -d -o "$import_uid" -g "$import_gid" -m 0700 "$incoming" || exit 1
+  /usr/bin/install -d -o "$desktop_uid" -g "$desktop_gid" -m 0700 "$incoming" || exit 1
   [[ -x "$profile_importer" && ! -L "$profile_importer" ]] || exit 1
-  /usr/bin/timeout --signal=KILL 65 "$profile_importer" "$import_user" "$incoming" "$selected_source" || exit 1
+  /usr/bin/timeout --signal=KILL 65 "$profile_importer" "$desktop_user" "$incoming" || exit 1
 
   # Revoke the importer's ownership at the top before root validates or mutates
   # any descendants. The staging parent has remained root:root 0700 throughout.
@@ -527,8 +515,6 @@ publish_migrated_profile() (
   /usr/bin/find "$incoming" -xdev -mindepth 1 -type d -exec /usr/bin/chmod 0700 '{}' +
   /usr/bin/find "$incoming" -xdev -mindepth 1 -type f -exec /usr/bin/chown root:root '{}' +
   /usr/bin/find "$incoming" -xdev -mindepth 1 -type f -exec /usr/bin/chmod 0600 '{}' +
-  [[ -f "$profile_normalizer" && ! -L "$profile_normalizer" ]] || exit 1
-  /usr/bin/timeout --signal=KILL 30 /usr/bin/python3 -I "$profile_normalizer" "$incoming" "$account_home" "$selected_source" || exit 1
   /usr/bin/printf 'source_user=%s\n' "$desktop_user" >"$incoming/.machine-profile"
   /usr/bin/chown root:root "$incoming/.machine-profile"
   /usr/bin/chmod 0600 "$incoming/.machine-profile"
@@ -557,7 +543,6 @@ publish_migrated_profile() (
 
 migrate_profile() {
   require_root migrate-profile || return 1
-  case "$import_source" in auto|vibepollo|vibeshine|sunshine|machine-vibeshine) ;; *) fail 'invalid migration source'; return 1 ;; esac
   load_settings || return 1
   /usr/bin/getent passwd "$service_user" >/dev/null || { fail "missing system account: $service_user"; return 1; }
   if [[ -f "$profile_marker" && ! -L "$profile_marker" ]]; then
@@ -572,7 +557,7 @@ migrate_profile() {
 }
 
 configure_automatically() {
-  local home selected state user uid; local -a candidates=()
+  local home selected profile state user uid; local -a candidates=()
   require_root configure-auto || return 1
   if [[ -f "$settings_file" && ! -L "$settings_file" ]]; then
     selected=$(read_desktop_user "$settings_file") || return 1
@@ -585,7 +570,13 @@ configure_automatically() {
       valid_user "$user" || continue
       case "$shell" in */nologin|*/false|'') continue ;; esac
       accounts+=("$user")
-      for state in "$home/.config/"{vibepollo,vibeshine,sunshine}/{vibeshine_state,sunshine_state}.json; do
+      # Match the importer's source priority. An existing canonical directory
+      # owns this account's state even when only the legacy directory is paired.
+      profile=$home/.config/vibepollo
+      if ! user_exec "$user" /usr/bin/test -e "$profile" && ! user_exec "$user" /usr/bin/test -L "$profile"; then
+        profile=$home/.config/sunshine
+      fi
+      for state in "$profile/vibeshine_state.json" "$profile/sunshine_state.json"; do
         if user_exec "$user" /usr/bin/test -f "$state" && ! user_exec "$user" /usr/bin/test -L "$state"; then
           candidates+=("$user")
           break
@@ -701,9 +692,96 @@ find_host_readiness_log() {
   ((count == 1))
 }
 
+cleanup_host_clients() {
+  # The GPU-owning host has been reaped before this function runs. Detached
+  # session clients can still hold broker connections; close only members of
+  # this exact unit, using pidfds so PID reuse cannot signal another process.
+  "${host_cleanup_python:-/usr/bin/python3}" -I - "$BASHPID" "${1:-drain}" <<'PY'
+import os
+import pathlib
+import select
+import signal
+import sys
+import time
+
+supervisor = int(sys.argv[1])
+group = "/system.slice/vibepollo.service"
+members = pathlib.Path("/sys/fs/cgroup/system.slice/vibepollo.service/cgroup.procs")
+
+def belongs(pid):
+    try:
+        return f"0::{group}" in pathlib.Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+    except FileNotFoundError:
+        return False
+
+pending = {}
+try:
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise RuntimeError("client cleanup requires Python 3.9 or newer with pidfd support")
+    if os.getppid() != supervisor or not belongs(supervisor) or not belongs("self"):
+        raise RuntimeError("refusing client cleanup outside the host service cgroup")
+    if sys.argv[2] == "check":
+        descriptor = os.pidfd_open(os.getpid())
+        try:
+            signal.pidfd_send_signal(descriptor, 0)
+        finally:
+            os.close(descriptor)
+        members.read_text()
+        sys.exit(0)
+    deadline = time.monotonic() + 5
+    while True:
+        for pid, descriptor in list(pending.items()):
+            if select.select([descriptor], [], [], 0)[0]:
+                os.close(descriptor)
+                del pending[pid]
+        for member in members.read_text().split():
+            pid = int(member)
+            if pid in (supervisor, os.getpid()) or pid in pending:
+                continue
+            try:
+                descriptor = os.pidfd_open(pid)
+            except ProcessLookupError:
+                continue
+            try:
+                if select.select([descriptor], [], [], 0)[0]:
+                    continue
+                if not belongs(pid):
+                    continue
+                signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+                pending[pid] = descriptor
+                descriptor = None
+            except ProcessLookupError:
+                pass
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+        if not pending:
+            # A member may fork and exit between the snapshot and pidfd_open.
+            # Confirm a fresh kernel snapshot contains no subordinate process
+            # before declaring the unit drained.
+            remaining = [int(member) for member in members.read_text().split()
+                         if int(member) not in (supervisor, os.getpid())]
+            if not remaining:
+                break
+        if time.monotonic() >= deadline:
+            raise RuntimeError("host exited but its remaining clients did not drain")
+        time.sleep(0.05)
+except (OSError, ValueError, RuntimeError) as error:
+    print(f"vibepollo-machine-host: {error}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    for descriptor in pending.values():
+        os.close(descriptor)
+PY
+}
+
 run_host() {
   local host_capabilities host_log='' host_log_directory=$machine_profile/logs
-  local host_log_prefix candidate host_pid readiness_attempt state status shutting_down=0
+  local host_log_prefix candidate readiness_attempt state status readiness_failed=0
+  # Bash unwinds function locals before an errexit EXIT trap. Keep only the
+  # process-lifetime shutdown state outside that stack so the guard can still
+  # stop and reap the real host when an unrelated supervisor command fails.
+  host_pid='' host_reaped=0 host_stop_sent=0 shutting_down=0 host_cleanup_python=''
   local -A previous_host_logs=()
   # Linux private displays are capture-ready through the Vibeshine DRM/KMS
   # path.  Leaving desktop sessions to inherit a compositor capture setting
@@ -750,40 +828,74 @@ run_host() {
     overrides+=('min_log_level=info' 'virtual_display_mode=shared' 'virtual_display_layout=exclusive' 'dd_config_revert_on_disconnect=enabled' 'dd_config_revert_delay=0' 'origin_web_ui_allowed=lan' 'session_history_enabled=disabled' 'frame_limiter_enable=false' 'file_apps=/usr/share/vibepollo/prelogin/apps.json'); fi
   environment=("HOME=$machine_profile" "USER=$service_user" "LOGNAME=$service_user" "PATH=/usr/local/sbin:/usr/local/bin:/usr/bin" "LANG=C.UTF-8" "SHELL=/bin/sh" \
     "XDG_CONFIG_HOME=/var/lib" "XDG_RUNTIME_DIR=/run/vibepollo/host" "VIBEPOLLO_MACHINE_HOST=1" \
+    "VIBEPOLLO_SESSION_TYPE=wayland" \
     "VIBEPOLLO_SESSION_ROLE=$session_role" "VIBEPOLLO_SESSION_USER=$session_user" "VIBEPOLLO_SESSION_UID=$session_uid" "VIBEPOLLO_SESSION_GID=$session_gid" "VIBEPOLLO_SESSION_GROUPS=$session_groups" \
     "VIBEPOLLO_SESSION_ID=$session_id" "VIBEPOLLO_SESSION_GENERATION=$session_generation" "VIBEPOLLO_SESSION_HOME=$session_home")
+  request_host_shutdown() {
+    shutting_down=1
+    # A signal can arrive before the background child's PID is assigned. Keep
+    # the request pending, then forward it exactly once after assignment.
+    if ((host_reaped == 0)) && [[ -n "$host_pid" ]] && ((host_stop_sent == 0)); then
+      host_stop_sent=1
+      /usr/bin/kill -s TERM -- "$host_pid" 2>/dev/null || :
+    fi
+  }
+  # Leap retains an older default Python alongside the supported python311
+  # package. Select a trusted system interpreter before starting the GPU owner.
+  for candidate in /usr/bin/python3 /usr/bin/python3.11; do
+    if [[ -x "$candidate" ]] && "$candidate" -I -c \
+      'import os, signal; raise SystemExit(not (hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")))'; then
+      host_cleanup_python=$candidate
+      break
+    fi
+  done
+  [[ -n "$host_cleanup_python" ]] || { fail 'client cleanup requires Python 3.9 or newer with pidfd support'; return 1; }
+  cleanup_host_clients check || return 1
+  finish_host_supervisor() {
+    local result=$1
+    trap - EXIT
+    # An unexpected supervisor error must still let the GPU owner finish
+    # before touching any subordinate broker connection.
+    if ((host_reaped == 0)); then
+      request_host_shutdown
+      while /usr/bin/kill -0 "$host_pid" 2>/dev/null; do
+        wait "$host_pid" || :
+      done
+      wait "$host_pid" 2>/dev/null || :
+      host_reaped=1
+    fi
+    cleanup_host_clients || return 1
+    return "$result"
+  }
+  # KillMode=mixed sends TERM only to this supervisor. Broker clients must
+  # remain connected while the host drains capture and encoding; their early
+  # death cancels applications through the broker before that drain finishes.
+  trap request_host_shutdown TERM INT HUP
   capability_clean_exec /usr/bin/env -i "${environment[@]}" \
     "$machine_host_executable" "$machine_profile/vibepollo.conf" "${overrides[@]}" &
   host_pid=$!
-
-  mark_host_shutdown() {
-    shutting_down=1
-  }
-  terminate_host() {
-    mark_host_shutdown
-    /usr/bin/kill -s TERM -- "$host_pid" 2>/dev/null || :
-  }
-  # KillMode=control-group delivers the service signal to both this readiness
-  # supervisor and the real host.  The trap must only interrupt wait(1);
-  # forwarding a second signal can re-enter the host's shutdown handler while
-  # it is releasing encoder and DRM resources.
-  trap mark_host_shutdown TERM INT HUP
+  trap 'finish_host_supervisor "$?"' EXIT
+  if ((shutting_down)); then request_host_shutdown; fi
 
   for ((readiness_attempt=0; readiness_attempt<400; ++readiness_attempt)); do
     if ((shutting_down)); then break; fi
     if ! /usr/bin/kill -0 "$host_pid" 2>/dev/null; then
       wait "$host_pid" || status=$?
-      return "${status:-1}"
+      host_reaped=1
+      finish_host_supervisor "${status:-1}"
+      return "$?"
     fi
     state=$(/usr/bin/awk '{print $3}' "/proc/$host_pid/stat" 2>/dev/null) || state=''
     if [[ "$state" == Z ]]; then
       wait "$host_pid" || status=$?
-      return "${status:-1}"
+      host_reaped=1
+      finish_host_supervisor "${status:-1}"
+      return "$?"
     fi
     # KMS capture is instantiated by the first stream and is verified after a
     # client connects; startup readiness proves the listener and the mandatory
     # H.264 encoder. HEVC and AV1 depend on the GPU generation and are optional.
-    if find_host_readiness_log "$host_log_directory" "${service_user}:${service_user}" previous_host_logs &&
+    if find_host_readiness_log "$host_log_directory" "$service_user:$service_user" previous_host_logs &&
        /usr/bin/grep -Fq 'Configuration UI available at' "$host_log" &&
        /usr/bin/grep -Fq 'Found H.264 encoder:' "$host_log"; then
       local codecs=H.264
@@ -791,27 +903,34 @@ run_host() {
       /usr/bin/grep -Fq 'Found AV1 encoder:' "$host_log" && codecs+=', AV1'
       /usr/bin/systemd-notify --pid="$$" --ready \
         --status="Vibepollo generation $session_generation is listening with $codecs encoders" || {
-          terminate_host
+          readiness_failed=1
+          request_host_shutdown
           break
         }
       while /usr/bin/kill -0 "$host_pid" 2>/dev/null; do
         wait "$host_pid" && status=0 || status=$?
       done
-      ((shutting_down)) && return 0
-      return "${status:-0}"
+      host_reaped=1
+      ((shutting_down)) && status=0
+      finish_host_supervisor "${status:-0}"
+      return "$?"
     fi
     /usr/bin/sleep 0.1
   done
 
-  # During a service stop systemd already delivered exactly one signal to the
-  # complete cgroup.  Only readiness failures initiated by this wrapper need
-  # it to request child termination itself.
-  ((shutting_down)) || terminate_host
+  # Readiness failures use the same idempotent stop as service termination.
+  ((shutting_down)) || readiness_failed=1
+  request_host_shutdown
   while /usr/bin/kill -0 "$host_pid" 2>/dev/null; do
     wait "$host_pid" || status=$?
   done
-  ((shutting_down)) && return 0
-  fail 'host did not complete KMS capture and encoder discovery before its readiness deadline'
+  host_reaped=1
+  if ((readiness_failed)); then
+    fail 'host did not complete encoder readiness or notify systemd before its readiness deadline' || :
+    finish_host_supervisor 1
+  else
+    finish_host_supervisor 0
+  fi
 }
 
 remove_pam_hook() {
@@ -1011,17 +1130,9 @@ reset_machine() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   case "${1:-}" in
     configure) [[ $# == 2 ]] || exit 2; shift; write_settings "$@"; prepare_upgrade_profile ;;
-    configure-auto)
-      [[ $# -le 2 ]] || exit 2
-      import_source=${2:-$import_source}
-      case "$import_source" in auto|vibepollo|vibeshine|sunshine|machine-vibeshine) ;; *) exit 2 ;; esac
-      configure_automatically ;;
+    configure-auto) [[ $# == 1 ]] || exit 2; configure_automatically ;;
     authorize-commands) [[ $# == 1 ]] || exit 2; authorize_commands ;;
-    migrate-profile)
-      [[ $# -le 2 ]] || exit 2
-      import_source=${2:-auto}
-      case "$import_source" in auto|vibepollo|vibeshine|sunshine|machine-vibeshine) ;; *) exit 2 ;; esac
-      migrate_profile ;;
+    migrate-profile) [[ $# == 1 ]] || exit 2; migrate_profile ;;
     prepare-profile) [[ $# == 1 ]] || exit 2; prepare_service_profile ;;
     repair-profile) [[ $# == 1 ]] || exit 2; repair_profile_tree ;;
     run) [[ $# == 1 ]] || exit 2; run_host ;;

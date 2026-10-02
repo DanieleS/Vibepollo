@@ -227,11 +227,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
-          VHF_ARCHIVE_SHA256: 7830a91ba281c44ae9d01e92e9086f72384a07ca1b35ee87150592f8f960361a
-          VHF_DRIVER_VER: 09/13/2026,0.1.0.34
+          VHF_ARCHIVE_SHA256: a45a8ae27d2764ad26a4b89d43d1e2dc43510d84bddd5899aac7c80499754782
+          VHF_DRIVER_VER: 09/22/2026,0.1.0.39
           VHF_PROTOCOL_VERSION: '2'
-          VHF_SOURCE_REVISION: 0b3970e1a8c839f14f20a7c8eaf48ff59b8c1986
-          VHF_TAG: v0.1.0-beta.4
+          VHF_SOURCE_REVISION: 4b56fb9da177f320fb2d7ddb1b6262e5d55d2750
+          VHF_TAG: v0.1.0-beta.6
         run: |
           $ErrorActionPreference = 'Stop'
           $gitlink = (git rev-parse "$($env:RELEASE_COMMIT):third-party/libvirtualgamepad").Trim()
@@ -353,11 +353,11 @@ jobs:
       - name: Revalidate VHF producer package for packaging
         shell: pwsh
         env:
-          VHF_ARCHIVE_SHA256: 7830a91ba281c44ae9d01e92e9086f72384a07ca1b35ee87150592f8f960361a
-          VHF_DRIVER_VER: 09/13/2026,0.1.0.34
+          VHF_ARCHIVE_SHA256: a45a8ae27d2764ad26a4b89d43d1e2dc43510d84bddd5899aac7c80499754782
+          VHF_DRIVER_VER: 09/22/2026,0.1.0.39
           VHF_PROTOCOL_VERSION: '2'
-          VHF_SOURCE_REVISION: 0b3970e1a8c839f14f20a7c8eaf48ff59b8c1986
-          VHF_TAG: v0.1.0-beta.4
+          VHF_SOURCE_REVISION: 4b56fb9da177f320fb2d7ddb1b6262e5d55d2750
+          VHF_TAG: v0.1.0-beta.6
         run: |
           $ErrorActionPreference = 'Stop'
           $packageRoot = Join-Path $env:RUNNER_TEMP 'vhf-gamepad-producer-release'
@@ -628,13 +628,13 @@ jobs:
           vhf_gamepad_package_arg=(
             -DSUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER=ON
             -DSUNSHINE_LIBVIRTUALGAMEPAD_PREBUILT_DIR="$(cygpath -u "${VHF_PACKAGE_ROOT}")"
-            -DSUNSHINE_VHF_GAMEPAD_RELEASE_TAG=v0.1.0-beta.4
-            -DSUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256=7830a91ba281c44ae9d01e92e9086f72384a07ca1b35ee87150592f8f960361a
-            -DSUNSHINE_VHF_GAMEPAD_SOURCE_REVISION=0b3970e1a8c839f14f20a7c8eaf48ff59b8c1986
-            -DSUNSHINE_VHF_GAMEPAD_DRIVER_VER=09/13/2026,0.1.0.34
+            -DSUNSHINE_VHF_GAMEPAD_RELEASE_TAG=v0.1.0-beta.6
+            -DSUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256=a45a8ae27d2764ad26a4b89d43d1e2dc43510d84bddd5899aac7c80499754782
+            -DSUNSHINE_VHF_GAMEPAD_SOURCE_REVISION=4b56fb9da177f320fb2d7ddb1b6262e5d55d2750
+            -DSUNSHINE_VHF_GAMEPAD_DRIVER_VER=09/22/2026,0.1.0.39
             -DSUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION=2
           )
-          echo "Using verified VHF producer release v0.1.0-beta.4"
+          echo "Using verified VHF producer release v0.1.0-beta.6"
           scry_prebuilt_arg=()
           if [[ -n "${SCRY_PREBUILT_DIR:-}" ]]; then
             scry_prebuilt_arg=(-DSUNSHINE_SCRY_PREBUILT_DIR="$(cygpath -u "${SCRY_PREBUILT_DIR}")")
@@ -650,7 +650,7 @@ jobs:
           fi
 
           mkdir -p build
-          # Test targets are opt-in for CI builds.
+          # Release tag builds omit test targets; ordinary reusable-workflow calls retain them.
           cmake \
             -B build \
             -G Ninja \
@@ -893,10 +893,10 @@ jobs:
             -ValidateOnly `
             -PrebuiltPackageDir $env:VHF_PACKAGE_ROOT `
             -PackageDir $packageDir `
-            -ReleaseTag v0.1.0-beta.4 `
-            -ExpectedReleaseAssetSha256 7830a91ba281c44ae9d01e92e9086f72384a07ca1b35ee87150592f8f960361a `
-            -ExpectedSourceRevision 0b3970e1a8c839f14f20a7c8eaf48ff59b8c1986 `
-            -ExpectedDriverVer '09/13/2026,0.1.0.34' `
+            -ReleaseTag v0.1.0-beta.6 `
+            -ExpectedReleaseAssetSha256 a45a8ae27d2764ad26a4b89d43d1e2dc43510d84bddd5899aac7c80499754782 `
+            -ExpectedSourceRevision 4b56fb9da177f320fb2d7ddb1b6262e5d55d2750 `
+            -ExpectedDriverVer '09/22/2026,0.1.0.39' `
             -ExpectedProtocolVersion 2
           $expected = @(
             'cleanup.ps1',
@@ -1035,7 +1035,7 @@ jobs:
       - release_artifacts
     if: always() && !cancelled() && inputs.build_only == false && needs.release_artifacts.result == 'success'
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 75
     outputs:
       signed_msi_artifact_id: ${{ steps.upload-signed-msi.outputs.artifact-id }}
     env:
@@ -1250,7 +1250,7 @@ jobs:
       - package_windows
     if: always() && !cancelled() && needs.package_windows.result == 'success'
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 75
     outputs:
       signed_installer_artifact_id: ${{ steps.upload-signed-installer.outputs.artifact-id }}
     env:
@@ -1488,11 +1488,11 @@ jobs:
             'virtualdisplay_probe.exe','VkLayer_sunshine_hdr.dll'
           )
           $optionalFirstParty = @('vibeshine_truehdr.dll')
-            $vendorSkip = @(
-              'SudoVDA.dll','nefconc.exe','SunshineVirtualDisplayDriver.dll','virtualdisplay_probe.exe',
-              'VkLayer_sunshine_hdr.dll','VibeshineVhfGamepad.dll','VibeshineVhfGamepadDeviceSetup.exe',
-              'nvngx_truehdr.dll','nvngx_vsr.dll'
-            )
+          $vendorSkip = @(
+            'SudoVDA.dll','nefconc.exe','SunshineVirtualDisplayDriver.dll',
+            'VibeshineVhfGamepad.dll','VibeshineVhfGamepadDeviceSetup.exe',
+            'nvngx_truehdr.dll','nvngx_vsr.dll'
+          )
 
           $allPe = @(Get-ChildItem -LiteralPath $extractDir -Recurse -File |
             Where-Object { $_.Extension -in '.exe', '.dll' })
@@ -1536,9 +1536,32 @@ jobs:
             }
           }
 
-          # The immutable producer release arrives unsigned. This repository's
-          # MSI request signs exactly the CAT and setup tool; INF, DLL,
-          # manifest, install/cleanup scripts, and release lock stay byte-pinned.
+          $displayPackageDir = Join-Path $extractDir 'Apollo\drivers\sunshine'
+          if (Test-Path -LiteralPath $displayPackageDir -PathType Container) {
+            foreach ($relative in @(
+              'SunshineVirtualDisplayDriver.cat',
+              'virtualdisplay_probe.exe',
+              'vulkan-layer\VkLayer_sunshine_hdr.dll'
+            )) {
+              $path = Join-Path $displayPackageDir $relative
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                $failures.Add("Vibepollo virtual display signing target is missing: $relative")
+              } elseif (Test-Signed $path) {
+                Write-Host "[verify] OK   virtual display target signed: $relative"
+              } else {
+                $failures.Add("Vibepollo virtual display target is UNSIGNED: $path")
+              }
+            }
+          }
+
+          # The VHF package arrives unsigned: SignPath is not available on
+          # Nonary/libvirtualgamepad, so its catalog and setup tool are signed
+          # by this repository's MSI request instead. That inverts what this
+          # check is for. The signature assertions below now confirm OUR
+          # signing ran, rather than that upstream signed it, and the manifest
+          # hashes for those two files are expected not to match because
+          # signing rewrote them. Everything else is still hash-pinned, and the
+          # catalog-bound DLL must still be untouched.
           $vhfPackageDir = Join-Path $extractDir 'Apollo\drivers\vhf-gamepad'
           $vhfManifestPath = Join-Path $vhfPackageDir 'manifest.json'
           if (-not (Test-Path -LiteralPath $vhfManifestPath -PathType Leaf)) {
@@ -1576,12 +1599,12 @@ jobs:
                   'tools/VibeshineVhfGamepadDeviceSetup.exe'
                 )
                 if ($vhfManifest.schema_version -ne 1 -or
-                    $vhfManifest.source_revision -cne '0b3970e1a8c839f14f20a7c8eaf48ff59b8c1986' -or
-                    $vhfManifest.driver_ver -cne '09/13/2026,0.1.0.34' -or
+                    $vhfManifest.source_revision -cne '4b56fb9da177f320fb2d7ddb1b6262e5d55d2750' -or
+                    $vhfManifest.driver_ver -cne '09/22/2026,0.1.0.39' -or
                     [uint16] $vhfManifest.protocol_version -ne 2 -or
                     $vhfManifest.platform -cne 'x64' -or
                     $vhfManifest.signing.channel -cne 'msi-request-signing') {
-                  throw 'manifest metadata does not match the pinned beta.2 producer release'
+                  throw 'manifest metadata does not match the pinned producer release'
                 }
                 $manifestPaths = @($vhfManifest.files | ForEach-Object { [string] $_.path } | Sort-Object)
                 if (($manifestPaths -join "`n") -cne ($vhfManifestPayload -join "`n")) {
@@ -1660,9 +1683,9 @@ jobs:
                 $vhfManifestHash = (Get-FileHash -LiteralPath $vhfManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 if ($vhfReleaseLock.channel -cne 'production' -or
                     $vhfReleaseLock.repository -cne 'Nonary/libvirtualgamepad' -or
-                    $vhfReleaseLock.release_tag -cne 'v0.1.0-beta.4' -or
-                    $vhfReleaseLock.release_asset_name -cne 'libvirtualgamepad-0.1.0-beta.4-windows-x64.zip' -or
-                    $vhfReleaseLock.release_asset_sha256 -cne '7830a91ba281c44ae9d01e92e9086f72384a07ca1b35ee87150592f8f960361a' -or
+                    $vhfReleaseLock.release_tag -cne 'v0.1.0-beta.6' -or
+                    $vhfReleaseLock.release_asset_name -cne 'libvirtualgamepad-0.1.0-beta.6-windows-x64.zip' -or
+                    $vhfReleaseLock.release_asset_sha256 -cne 'a45a8ae27d2764ad26a4b89d43d1e2dc43510d84bddd5899aac7c80499754782' -or
                     $vhfReleaseLock.source_revision -cne $vhfManifest.source_revision -or
                     $vhfReleaseLock.driver_ver -cne $vhfManifest.driver_ver -or
                     [uint16] $vhfReleaseLock.protocol_version -ne [uint16] $vhfManifest.protocol_version -or

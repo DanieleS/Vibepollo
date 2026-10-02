@@ -12,7 +12,7 @@ Docker build in this beta.
 | Distribution | Arch Linux or CachyOS, x86_64. Vibepollo is tuned for CachyOS. |
 | Desktop | KDE Plasma 6 on **Wayland**, started by **SDDM** or **Plasma Login Manager**. GNOME, other compositors, X11 sessions, and remote logins are not streamed. |
 | Kernel | Linux **6.16 or newer**, plus the headers for the kernel you boot (for example `linux-cachyos-headers`). The virtual-display driver is built with DKMS during installation. |
-| GPU | Any GPU with a hardware **H.264** encoder. NVIDIA uses NVENC through `nvidia-utils`; AMD needs `libva-mesa-driver`; Intel needs `intel-media-driver`. HEVC and AV1 are used when available. |
+| GPU | A GPU with a hardware **H.264** encoder. Testing has focused on NVIDIA and modern AMD GPUs; older cards may not work properly. NVIDIA uses NVENC through `nvidia-utils`; AMD needs `libva-mesa-driver`; Intel needs `intel-media-driver`. HEVC and AV1 are used when available. |
 | Pre-login streaming | NVIDIA only. AMD and Intel machines stream after you log in. |
 | Accounts | One interactive desktop account. Machines with several accounts choose the streaming owner once (see [Choosing the streaming user](#choosing-the-streaming-user)). |
 | Secure Boot | Supported. The package signs its kernel module; on kernels that enforce module signatures you approve a one-time MOK enrollment at the next reboot. Do not disable Secure Boot. |
@@ -36,12 +36,11 @@ downloads the newest release package from GitHub and installs it with `pacman -U
 
 | Option | Effect |
 | --- | --- |
-| `--version 1.19.0-beta.5` | Install that exact release. |
+| `--version 2.0.0` | Install that exact release. |
 | `--stable` | Ignore pre-releases. |
 | `--package ./vibepollo-*.pkg.tar.zst` | Install a package you already downloaded. |
 | `--no-repo` | Skip the pacman repository and use GitHub releases. |
 | `--yes` | Answer pacman prompts automatically. |
-| `--source-profile HOST` | Select `vibepollo`, `vibeshine`, `sunshine`, or `machine-vibeshine` when profile selection is ambiguous. |
 
 Re-running the script is safe. It only installs what is missing and repeats the checks.
 The script does not run a full system upgrade. Local packages use `pacman -U`;
@@ -53,34 +52,12 @@ running kernel are required: installing headers for a newer kernel is not enough
 The script verifies the virtual-display module after package installation and
 builds it if necessary; a missing module or build failure stops installation.
 
-### Replacing Sunshine or Vibeshine
+### Legacy driver-source leftovers
 
-The package conflicts with and replaces both Sunshine and Vibeshine. The installer
-lets pacman perform replacement in one transaction, including with `--yes`; it
-does not uninstall the old host before the new package is available. Active
-streams disconnect during replacement.
 Unowned driver-source files left by earlier local updates inside a host-package-owned
 `/usr/src/vibeshine-drm-*` directory are backed up under
-`/var/tmp/vibepollo-driver-backup.*` before exact-path replacement. Backups remain
+`/var/tmp/vibeshine-driver-backup.*` before exact-path replacement. Backups remain
 available if pacman fails. Other packages' files and symlinks are not overwritten.
-
-The existing Vibepollo machine profile wins on upgrades. Otherwise, a retained
-`/var/lib/vibeshine` machine profile takes precedence over stale desktop copies.
-For desktop profiles, the importer considers `.config/vibepollo`,
-`.config/vibeshine` and `.config/sunshine`, and refuses to choose between multiple
-profiles without `--source-profile`. Original profiles remain untouched; the
-confined copy preserves credentials, pairing identities, configuration and apps.
-External credential/state files must first be placed inside the source profile;
-the importer will not read arbitrary paths as root or share live legacy state.
-If package setup already stopped on ambiguous profiles, retry with
-`sudo vibepollo migrate sunshine` (or `vibeshine`, `vibepollo`, or
-`machine-vibeshine`) to explicitly select the source without reinstalling.
-
-For the separate SteamOS user bundle, use
-`packaging/linux/steamos/local/replace-sunshine.sh --payload DIR`. Despite its
-historical filename, it handles both Sunshine and Vibeshine, disables both hosts'
-known user services, and rolls them back if the new host fails readiness checks.
-Use `--source sunshine` or `--source vibeshine` when both profiles exist.
 
 ## Install manually
 
@@ -133,7 +110,7 @@ The `PKGBUILD` in the repository is a template; a CMake configure step fills in 
 version before `makepkg` can use it. Install `cuda` first if you want NVENC (the build detects it):
 
 ```bash
-git clone --branch 1.19.0-beta.5 https://github.com/Nonary/Vibepollo.git
+git clone --branch 2.0.0 https://github.com/Nonary/Vibepollo.git
 cd Vibepollo
 cmake -S . -B build -DSUNSHINE_CONFIGURE_ONLY=ON -DSUNSHINE_CONFIGURE_PKGBUILD=ON
 mkdir pkg && cp build/PKGBUILD build/vibepollo.install pkg/
@@ -154,9 +131,9 @@ there are four.
    if asked. A kernel that still holds an older driver, or a pending Secure Boot key
    enrollment, needs one reboot. On the Secure Boot path the firmware shows the blue MOK Manager
    screen: choose **Enroll MOK**, continue, and enter the password you typed during installation.
-2. **Log in to Plasma (Wayland) and pair.** Open <https://localhost:47990> on the machine, create
-   the Web UI username and password, then pair Moonlight with the PIN. Pairing also works at the
-   login screen: the Web UI stays reachable there, so enter the PIN from another device.
+2. **Pair Moonlight.** Open <https://localhost:47990> on the machine, create the Web UI username
+   and password, then enter the Moonlight PIN. The Web UI stays reachable at the login screen,
+   so you can pair from another device before logging in. Log in to Plasma (Wayland) for desktop streaming.
 3. **Open the firewall** if one is enabled. The package ships definitions for both common firewalls:
 
    ```bash
@@ -192,7 +169,7 @@ sudo journalctl -u vibepollo-session-controller.service -u vibepollo.service -b
 sudo vibepollo driver status
 ```
 
-A healthy host logs `Screencasting with KMS`, `Using event-driven KMS capture for Vibepollo DRM
+A healthy host logs `Screencasting with KMS`, `Using event-driven KMS capture for vibeshine_drm
 CRTC`, and at least `Found H.264 encoder`. HEVC and AV1 lines appear only when the GPU supports
 them. Open ports alone do not prove streaming works; check for those lines.
 

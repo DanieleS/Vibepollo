@@ -30,16 +30,19 @@ broker_socket_unit = (linux / "vibepollo-session-exec.socket").read_text()
 launcher = (linux / "vibepollo-session-exec.c").read_text()
 broker = (linux / "vibepollo-session-broker.c").read_text()
 steam_launcher = (linux / "vibepollo-steam-launch.cpp").read_text()
-provider_scan_protocol = (root / "src/provider_scan_protocol.cpp").read_text()
 session_execution = launcher + "\n" + broker
 private_display = (root / "src/platform/linux/private_display.cpp").read_text()
 display_power = (linux / "vibepollo-display-power.h").read_text()
 display_power_client = (root / "src/platform/linux/display_power.cpp").read_text()
+frame_limiter = (root / "src/platform/linux/frame_limiter.cpp").read_text()
+provider_scan_protocol = (root / "src/provider_scan_protocol.cpp").read_text()
+wayland_hdr_policy = (root / "src/platform/linux/wayland_hdr_compatibility.h").read_text()
 rtsp = (root / "src/rtsp.cpp").read_text()
 stream = (root / "src/stream.cpp").read_text()
 kmsgrab = (root / "src/platform/linux/kmsgrab.cpp").read_text()
 audio = (root / "src/platform/linux/audio.cpp").read_text()
 nvhttp = (root / "src/nvhttp.cpp").read_text()
+state_storage = (root / "src/state_storage.cpp").read_text()
 confighttp = (root / "src/confighttp.cpp").read_text()
 linux_misc = (root / "src/platform/linux/misc.cpp").read_text()
 main_source = (root / "src/main.cpp").read_text()
@@ -51,8 +54,8 @@ arch_pre = arch_install.split("\ndo_udev_reload()", 1)[0]
 arch_pkgbuild = (linux / "Arch/PKGBUILD").read_text()
 rpm = (linux / "copr/Sunshine.spec").read_text()
 preinst = (linux / "vibeshine-preinst.in").read_text()
-postinst = (linux / "vibeshine-postinst.in").read_text()
-prerm = (linux / "vibeshine-prerm.in").read_text()
+postinst = (linux / "vibepollo-postinst.in").read_text()
+prerm = (linux / "vibepollo-prerm.in").read_text()
 prelogin_apps = json.loads((linux / "prelogin/apps.json").read_text())
 rpm_pre = rpm.split("\n%pre\n", 1)[1].split("\n%post\n", 1)[0]
 rpm_post = rpm.split("\n%post\n", 1)[1].split("\n%preun\n", 1)[0]
@@ -193,7 +196,7 @@ require(
 )
 for forbidden in ("ExecStart=", "ExecStartPre=", "WantedBy="):
     forbid(kwin_environment_dropin, forbidden, "KWin session environment drop-in")
-require(controller, 'stop_host "$deadline" || success=1', "fail-closed transition ordering")
+require(controller, 'stop_host "$deadline" || return 1', "fail-closed transition ordering")
 require(controller, "binding_matches_candidate complete", "display credential rebinding")
 require(controller, "observe_active_session || return 1", "authoritative transition snapshot")
 require(controller, "read_user_environment || return 1", "current transition credentials")
@@ -224,7 +227,7 @@ quiesce_body = controller.split("\nquiesce() {\n", 1)[1].split("\n}\n\nnext_gene
 quiesce_normalized = " ".join(quiesce_body.split())
 quiesce_order = (
     quiesce_normalized.index('close_broker_admission "$deadline" || return 1'),
-    quiesce_normalized.index('stop_host "$deadline" || success=1'),
+    quiesce_normalized.index('stop_host "$deadline" || return 1'),
     quiesce_normalized.index('stop_broker_instances "$deadline" || success=1'),
     quiesce_normalized.index('stop_bound_session_apps "$deadline" || success=1'),
     quiesce_normalized.rindex('stop_broker_instances "$deadline" || success=1'),
@@ -268,8 +271,10 @@ forbid(controller, '[[ -S "$candidate_runtime/bus" ]]', "capability-bounded runt
 require(sysusers, 'u vibepollo - "Vibepollo machine host" /var/lib/vibepollo /usr/bin/nologin', "machine account")
 require(sysusers, "g vibepollo-uinput - -", "virtual input group the host unit joins")
 require(host_unit, "SupplementaryGroups=video render vibepollo-uinput vibeshine-vkms", "restricted virtual input membership")
-require(host, '"$home/.config/"{vibepollo,vibeshine,sunshine}/{vibeshine_state,sunshine_state}.json',
-        "pairing profile discovery across all three host names")
+require(host, 'profile=$home/.config/vibepollo', "canonical pairing profile discovery")
+require(host, 'profile=$home/.config/sunshine', "legacy pairing profile discovery")
+require(host, '"$profile/vibeshine_state.json"', "existing Vibepollo pairing profile discovery")
+require(host, '"$profile/sunshine_state.json"', "legacy pairing state discovery")
 require(controller, 'desktop_service_supported() { [[ "$1" =~ ^(plasmalogin|plasmalogin-autologin|sddm|sddm-autologin)$ ]]; }',
         "SDDM and Plasma Login Manager desktop sessions")
 uinput_rules = (linux / "70-vibepollo-uinput.rules").read_text()
@@ -298,7 +303,7 @@ for unit_text, label in (
     forbid(unit_text, "PartOf=vibepollo-session-controller.service", f"{label} ordered controller cleanup")
 require(broker_unit.split("[Service]", 1)[0], "CollectMode=inactive-or-failed",
         "completed rejected broker requests must not exhaust handoff inventory")
-require(host_unit, "KillMode=control-group", "machine host process-tree shutdown")
+require(host_unit, "KillMode=mixed", "supervisor-owned host shutdown")
 require(host_unit, "SendSIGKILL=no", "GPU-owner graceful shutdown")
 require(host_unit, "Type=notify", "encoder-gated machine host readiness")
 require(host_unit, "NotifyAccess=all", "encoder-gated machine host readiness")
@@ -315,19 +320,25 @@ require(host_unit, "ProtectHome=yes", "machine host unit")
 require(host_unit, "PrivateTmp=yes", "machine host unit")
 require(host_unit, "RestrictSUIDSGID=yes", "machine host unit")
 for forbidden in (
-    "User=root", "CAP_DAC_OVERRIDE", "machine-prepare", "ExecStopPost=", "WantedBy=", "KillMode=mixed",
+    "User=root", "CAP_DAC_OVERRIDE", "machine-prepare", "ExecStopPost=", "WantedBy=", "KillMode=control-group",
     "BindsTo=vibepollo-session-controller.service",
 ):
     forbid(host_unit_directives, forbidden, "machine host unit")
-require(host, "trap mark_host_shutdown TERM INT HUP", "single service signal delivery")
+require(host, "trap request_host_shutdown TERM INT HUP", "single service signal delivery")
 forbid(host, "trap 'forward_host_signal", "duplicate service signal delivery")
-require(host, "((shutting_down)) || terminate_host", "single child termination request")
 
 for variable in ("VIBEPOLLO_MACHINE_HOST", "VIBEPOLLO_SESSION_ROLE"):
     require(host, variable, "machine-host provider scan environment")
     require(provider_scan_protocol, f'std::getenv("{variable}")', "provider scan machine-session guard")
 for variable in ("VIBESHINE_MACHINE_HOST", "VIBESHINE_SESSION_ROLE"):
     forbid(provider_scan_protocol, variable, "provider scan source-only environment")
+require(frame_limiter, 'std::getenv("VIBEPOLLO_MACHINE_HOST")', "machine-host global limiter routing")
+require(frame_limiter, '"/usr/libexec/vibeshine/vibepollo-session-exec", "global-limiter"',
+        "machine-host global limiter broker")
+forbid(frame_limiter, "VIBESHINE_MACHINE_HOST", "global limiter source-only environment")
+require(host, '"VIBEPOLLO_SESSION_TYPE=wayland"', "managed Wayland session type")
+require(wayland_hdr_policy, 'std::getenv("VIBEPOLLO_SESSION_TYPE")', "managed Wayland HDR policy")
+forbid(wayland_hdr_policy, "VIBESHINE_SESSION_TYPE", "Wayland HDR source-only environment")
 
 # API restart of the private child exits back to the readiness-gating wrapper.
 # Ordinary Linux launches retain the historical atexit self-reexec path.
@@ -445,7 +456,7 @@ if prepare.index("display_power::acquire()") > prepare.index("session.virtual_di
     raise AssertionError("power recovery must precede display topology preparation")
 if prepare.index("return result;") > prepare.index("cancel_scheduled_revert()"):
     raise AssertionError("failed power admission must preserve scheduled display cleanup")
-require(rtsp, "snapshot->display_power_guard = source.display_power_guard", "pending-to-startup power handoff")
+require(rtsp, "snapshot->display_power_guard = display_power_guard", "pending-to-startup power handoff")
 require(stream, "session->display_power_guard = launch_session.display_power_guard", "active capture power ownership")
 require(stream, "session.display_power_guard.reset()", "capture teardown releases display power")
 forbid(linux_misc, "display_power::acquire()", "retained shared runtime must not inhibit sleep")
@@ -601,6 +612,22 @@ if not (
 ):
     raise AssertionError("pairing persistence must lock state before taking the client snapshot")
 
+load_body = nvhttp.split("bool load_state()", 1)[1].split("bool add_authorized_client", 1)[0]
+require(load_body, "statefile::load_primary_state(tree)", "authoritative pairing-state recovery")
+require(load_body, "sunshine_state_backup_path", "durable pairing-state recovery")
+require(load_body, "primary == statefile::json_load_result_e::failed", "pairing recovery refusal")
+require(load_body, "refusing to create a replacement identity", "durable pairing-state recovery")
+require(load_body, "http::credentials_created_this_run", "durable fresh-profile detection")
+require(state_storage, "const auto old_load_result = load_tree_for_update", "validated primary-state migration")
+primary_update_body = state_storage.split("policy_load_result_e load_tree_for_update", 1)[1].split("bool load_tree_if_exists", 1)[0]
+require(primary_update_body, "policy::load_primary_state_for_update", "primary recovery before metadata migration")
+require(state_storage, "const auto new_load_result = load_tree_for_read", "non-destructive state migration")
+save_snapshot_body = nvhttp.split("bool save_state_snapshot_locked", 1)[1].split("bool load_state()", 1)[0]
+require(save_snapshot_body, "const auto primary = statefile::load_primary_state(root)", "authoritative pairing save recovery")
+require(save_snapshot_body, "Refusing to replace unavailable Vibepollo pairing state", "pairing save recovery refusal")
+require(save_body, "authorization_state_ready", "pairing persistence load gate")
+require(nvhttp, "durable pairing state could not be loaded", "pairing persistence load gate")
+
 add_client_body = nvhttp.split("bool add_authorized_client", 1)[1].split(
     "struct resolved_client_identity_t", 1
 )[0]
@@ -677,7 +704,6 @@ require(
     "desktop and greeter KWin environment packaging",
 )
 require(packaging, "vibepollo-session-controller.service", "native packaging")
-require(packaging, '"${CMAKE_SOURCE_DIR}/packaging/linux/vibepollo-global-limiter.py"', "native packaging")
 require(packaging, "install(TARGETS vibepollo_session_broker", "native packaging")
 require(packaging, "set(CPACK_DEB_COMPONENT_INSTALL OFF)", "monolithic native DEB")
 for deb_arch_contract in (
@@ -722,8 +748,12 @@ for dependency_file, label in ((arch_pkgbuild, "Arch dependencies"), (rpm, "RPM 
     forbid(dependency_file, "libpam0g", label)
 for lifecycle, label in ((arch_install, "Arch lifecycle"), (rpm, "RPM lifecycle"), (postinst, "native lifecycle")):
     require(lifecycle, "enable vibepollo-session-controller.service", label)
-    require(lifecycle, "disable vibepollo.service", label)
+    if label != "Arch lifecycle":
+        require(lifecycle, "disable vibepollo.service", label)
     require(lifecycle, "remove-pam", label)
+require(arch_install, "vibepollo_retire_obsolete_boot_links || return 1", "Arch lifecycle")
+require(arch_install, "for unit in vibepollo.service vibepollo-session-exec.socket", "Arch lifecycle")
+require(arch_install, 'resolved=$(readlink -f -- "$link")', "Arch lifecycle")
 for lifecycle, label in ((arch_install, "Arch removal"), (rpm, "RPM removal"), (prerm, "native removal")):
     require(lifecycle, "vibepollo-session-controller", label)
 
@@ -780,6 +810,8 @@ for lifecycle, label in (
         "RefuseManualStart=yes",
         "vibepollo_upgrade_kill_mode=process",
         "vibepollo_upgrade_kill_mode=control-group",
+        "vibepollo_upgrade_kill_mode=mixed",
+        "trap request_host_shutdown TERM INT HUP",
         "SendSIGKILL=no",
         "--property=Job",
         "systemctl freeze",
@@ -930,7 +962,7 @@ for lifecycle, label in (
         "vibepollo_unmask_host_for_controller",
         "90-vibepollo-safe-upgrade.conf",
         "RefuseManualStart=no",
-        "KillMode=control-group",
+        "KillMode=mixed",
         "SendSIGKILL=no",
         "unmask --runtime vibeshine-vkms-control.socket",
         "start vibeshine-vkms-control.socket",
@@ -984,7 +1016,6 @@ for unsafe_stop in (
 require(rpm, "%{_bindir}/vibepollo-mangohud", "RPM deterministic manifest")
 require(rpm, "%attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-app-supervisor", "RPM deterministic manifest")
 require(rpm, "%attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-steam-launch", "RPM deterministic manifest")
-require(rpm, "%{_prefix}/libexec/vibeshine/vibepollo-global-limiter.py", "RPM deterministic manifest")
 require(rpm, "%attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-kwin-session-environment", "RPM deterministic manifest")
 require(rpm, "%attr(0750,root,vibepollo) %caps(cap_sys_admin,cap_sys_nice+p) %{_prefix}/libexec/vibeshine/vibepollo-host", "RPM deterministic manifest")
 require(rpm, "%attr(0700,root,root) %caps(cap_kill,cap_setgid,cap_setuid+p) %{_prefix}/libexec/vibeshine/vibepollo-session-broker", "RPM deterministic manifest")

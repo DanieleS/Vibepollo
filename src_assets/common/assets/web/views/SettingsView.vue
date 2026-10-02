@@ -1,9 +1,4 @@
 <script setup lang="ts">
-import {
-  providerSupported,
-  supportsManagedLinuxDisplay,
-  settingsCapabilitySupported,
-} from '@/utils/providerCapabilities';
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, toRaw, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router';
@@ -41,6 +36,7 @@ import {
   settingsDestinations,
   captureOptionsForPlatform,
   frameGenerationOptionsForPlatform,
+  gamepadOptionsForPlatform,
   restartRequiredKeys,
   settingsCategories,
   settingsDefaults,
@@ -233,9 +229,7 @@ const virtualDisplayUnavailable = computed(
     (hostMetadata.value.virtual_display?.capable === false ||
       hostMetadata.value.virtual_display?.ready === false),
 );
-const supportsDisplayDeviceEnumeration = computed(
-  () => isWindowsHost.value || supportsManagedLinuxDisplay(hostMetadata.value),
-);
+const supportsDisplayDeviceEnumeration = computed(() => isWindowsHost.value || isLinuxHost.value);
 
 const dummyPlugVsync = computed(() =>
   dummyPlugVsyncState(values.dd_wa_dummy_plug_hdr10, values.frame_limiter_disable_vsync),
@@ -367,14 +361,53 @@ const filteredGroups = computed(() => {
   );
 });
 
+const everydaySummary = computed(() => [
+  {
+    label: t('ui.settings.summary.display'),
+    value: optionLabel('virtual_display_mode', t('ui.settings.summary.host_default')),
+  },
+  {
+    label: t('ui.settings.summary.capture'),
+    value: optionLabel('capture', automaticCaptureLabel.value),
+  },
+  {
+    label: t('ui.settings.summary.game_smoothness'),
+    value:
+      String(values.virtual_display_mode ?? '') === 'disabled'
+        ? t('ui.settings.summary.physical_pacing')
+        : String(values.dd_refresh_rate_option ?? 'auto') === 'manual'
+          ? t('ui.settings.summary.manual_refresh_pacing')
+          : String(values.frame_limiter_provider ?? 'auto') === 'none' &&
+              String(values.frame_limiter_auto_virtual_framegen ?? 'enabled') !== 'disabled'
+            ? t(
+                String(values.frame_limiter_auto_virtual_framegen ?? 'enabled') === 'legacy'
+                  ? isLinuxHost.value
+                    ? 'ui.settings.summary.compatibility_pacing_limiter_off_linux'
+                    : 'ui.settings.summary.compatibility_pacing_limiter_off'
+                  : isLinuxHost.value
+                    ? 'ui.settings.summary.automatic_pacing_limiter_off_linux'
+                    : 'ui.settings.summary.automatic_pacing_limiter_off',
+              )
+            : t(
+                String(values.frame_limiter_auto_virtual_framegen ?? 'enabled') === 'enabled'
+                  ? isLinuxHost.value
+                    ? 'ui.settings.summary.automatic_pacing_linux'
+                    : 'ui.settings.summary.automatic_pacing'
+                  : String(values.frame_limiter_auto_virtual_framegen ?? '') === 'legacy'
+                    ? isLinuxHost.value
+                      ? 'ui.settings.summary.compatibility_pacing_linux'
+                      : 'ui.settings.summary.compatibility_pacing'
+                    : 'ui.settings.summary.pacing_off',
+              ),
+  },
+]);
+
 const destinationResults = computed(() => {
   const q = search.value.trim().toLocaleLowerCase(locale.value);
   if (!q) return [];
   return settingsDestinations.filter(
     (item) =>
       matchesPlatform(item, hostPlatform.value) &&
-      (!item.to.includes('#integration-') ||
-        providerSupported(hostMetadata.value, item.to.split('#integration-')[1])) &&
       `${t(item.labelKey)} ${item.keys.join(' ')}`.toLocaleLowerCase(locale.value).includes(q),
   );
 });
@@ -431,10 +464,7 @@ function valuesMatch(current: unknown, expected: string | boolean): boolean {
 }
 
 function fieldMatchesPlatform(field: SettingsField): boolean {
-  return (
-    matchesPlatform(field, hostPlatform.value) &&
-    settingsCapabilitySupported(field.key, hostMetadata.value)
-  );
+  return matchesPlatform(field, hostPlatform.value);
 }
 
 function visibilityMatches(condition?: SettingsVisibility): boolean {
@@ -640,7 +670,7 @@ function updateValue(key: string, event: Event, field?: SettingsField): void {
 
 function saveValue(key: string): unknown {
   const value = values[key];
-  if (key === 'global_prep_cmd' || key === 'global_state_cmd') {
+  if (key === 'global_prep_cmd') {
     return serializeCommandRows(value, hostPlatform.value).filter(
       (row) => row.do.trim() || row.undo.trim(),
     );
@@ -1053,12 +1083,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload));
             >
           </nav>
           <LinuxCaptureStatus
-            v-if="
-              isLinuxHost &&
-              supportsManagedLinuxDisplay(hostMetadata) &&
-              !isSearching &&
-              ['everyday', 'display'].includes(activeCategory)
-            "
+            v-if="isLinuxHost && !isSearching && ['everyday', 'display'].includes(activeCategory)"
             :metadata="hostMetadata"
             :virtual-mode="String(values.virtual_display_mode ?? '')"
           />
@@ -1378,7 +1403,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload));
         </template>
 
         <section
-          v-if="supportsDisplayDeviceEnumeration && activeCategory === 'display' && !isSearching"
+          v-if="(isWindowsHost || isLinuxHost) && activeCategory === 'display' && !isSearching"
           class="danger-zone"
           aria-labelledby="display-recovery-title"
         >

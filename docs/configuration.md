@@ -364,7 +364,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="6">Choices</td>
+        <td rowspan="11">Choices</td>
         <td>ds4</td>
         <td>DualShock 4 controller (PS4)
             @note{This option applies to Windows and Linux. On Linux it uses UHID and includes
@@ -804,6 +804,35 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Example</td>
         <td colspan="2">@code{}
             ds5_inputtino_randomize_mac = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### proton_dualsense_compatibility
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Supply native DualSense audio compatibility defaults to Proton games launched during streaming,
+            including games started inside an already-running Steam client. Sets
+            <code>PROTON_KEEP_SONY_AUDIO_ENDPOINT_VISIBLE=1</code> and
+            <code>PROTON_SONY_WINDOWS_DEVICE_NAMES=1</code> unless the game explicitly overrides them.
+            Independent of HDR and frame limiting. Requires a Proton build implementing these options
+            and a game with native DualSense support. Reconnect the stream and relaunch the game after changing this option.
+            @hint{Only applies on Linux. Without an active stream, the Proton hook is inert.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            proton_dualsense_compatibility = enabled
             @endcode</td>
     </tr>
 </table>
@@ -1343,6 +1372,28 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### remote_monitor_mute_audio
+
+Do not capture or transmit host audio for Remote Monitor sessions. Video and
+input continue normally. The default is `false`.
+
+### remote_monitor_disconnect_on_stream_end
+
+Release a client's owned Remote Monitor display when its RTSP stream ends. The
+default is `false`, which retains the display identity and requested topology
+after transport loss so that the paired client can Resume it.
+
+### remote_monitor_disconnect_on_client_disconnect
+
+Release a retained Remote Monitor when the paired client explicitly
+disconnects. The default is `false`.
+
+### remote_monitor_terminate_on_first_request
+
+Allow an additional paired client to terminate the active game with its first
+Terminate request. The original game client is unaffected. The default is
+`false`.
+
 ### remote_monitor_confirm_app_replacement
 
 Protect a running app while Vibepollo advertises the host as available for
@@ -1526,7 +1577,7 @@ this option to replace the running app immediately. The default is `true`.
         <td>Description</td>
         <td colspan="2">
             Perform additional HDR configuration for the display device.
-            @note{On Linux 6.16 or newer, the managed <code>vibeshine_drm</code> output advertises HDR10 and 10-bit formats. Managed display creation fails if that driver is unavailable rather than using CPU-backed stock VKMS.}
+            @note{On Linux 6.16 or newer, the managed <code>vibeshine_drm</code> output supplied by <code>libvirtualdisplay</code> advertises GPU-attached HDR10 and 10-bit formats. Managed display creation fails if that driver is unavailable rather than using CPU-backed stock VKMS.}
         </td>
     </tr>
     <tr>
@@ -2303,6 +2354,7 @@ this option to replace the running app immediately. The default is `true`.
             The default is 64 KiB.
             Lower values can improve stream stability on cheaper switches, routers, and Wi-Fi hardware by reducing burst size,
             but at the cost of less than 1 ms of additional host-side delay.
+            PyroWave resolves its send batch size automatically and ignores this setting.
         </td>
     </tr>
     <tr>
@@ -2529,7 +2581,7 @@ this option to replace the running app immediately. The default is `true`.
         <td>Description</td>
         <td colspan="2">
             The file used by new Vibepollo features to persist web authentication tokens and notification state.
-            If left unset, it defaults to <code>vibeshine_state.json</code> in the same directory as other Sunshine data.
+            If left unset, it defaults to <code>vibeshine_state.json</code> in the same directory as other Vibepollo data.
         </td>
     </tr>
     <tr>
@@ -2555,6 +2607,7 @@ this option to replace the running app immediately. The default is `true`.
         <td>Description</td>
         <td colspan="2">
             Percentage of error correcting packets per data packet in each video frame.
+            PyroWave ignores this setting; its parity is controlled by `pyrowave_critical_fec_percentage`.
             @warning{Higher values can correct for more network packet loss,
             but at the cost of increasing bandwidth usage.}
         </td>
@@ -2573,6 +2626,48 @@ this option to replace the running app immediately. The default is `true`.
         <td>Example</td>
         <td colspan="2">@code{}
             fec_percentage = 20
+            @endcode</td>
+    </tr>
+</table>
+
+### pyrowave_critical_fec_percentage
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Percentage of error correcting packets for the packets that carry the coarsest wavelet level of a
+            PyroWave frame, the first few percent of it. The client cannot decode a frame if any of these
+            packets remain missing after recovery. Protection requires record framing with shard alignment
+            and a value greater than 0, and adds at least 2 error correcting packets when the critical data
+            and parity fit in one FEC block. Length-prefixed frames and unaligned record frames receive no
+            parity; see [PyroWave protocol](pyrowave-protocol.md) for the packet-size requirements.
+            With record framing and a value greater than 0, encoded image size
+            is capped at the encoder bitrate divided by negotiated FPS. At sustained frame rates below negotiated FPS,
+            mostly unchanged pictures also receive adaptive protection for finer detail, using only unused
+            bitrate and available FEC block space. Detail parity follows the cadence shortfall, up to 50%,
+            independently of this setting's critical-packet rate. This targets flicker caused by packet loss;
+            it cannot correct encoder quantization shimmer.
+            `fec_percentage` does not apply to PyroWave. 0 disables both kinds of protection, removes the
+            cap of one negotiated frame's bitrate allowance, and allows frames up to about 5.5 MB instead
+            of 4.1 MB with 1392-byte packets. Frames remain bounded by elapsed-time bitrate allowance
+            and transport capacity.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            20
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">0-255</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            pyrowave_critical_fec_percentage = 50
             @endcode</td>
     </tr>
 </table>
@@ -2711,6 +2806,40 @@ this option to replace the running app immediately. The default is `true`.
     </tr>
 </table>
 
+### pyrowave
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Allows PyroWave-capable clients (such as the Nonary Moonlight fork) to request PyroWave, an
+            intra-only GPU wavelet codec. Every frame is coded on its own in well under a millisecond, so a lost
+            frame never needs a keyframe, but a clean picture needs hundreds of Mbps; use it on wired LANs only.
+            It is advertised only when the GPU can run the PyroWave Vulkan encoder. Windows uses Direct3D 11
+            interop; Linux imports explicit-modifier RGB DMA-BUF capture frames (including KMS) and also
+            supports BGRA system-memory capture. Linux preserves scaling, cursor composition, and the
+            negotiated color matrix/range for 8/10-bit and 4:2:0/4:4:4 profiles. CUDA-only NvFBC capture
+            is not supported. The client's bitrate setting supplies the requested bandwidth budget;
+            at session setup the host subtracts allowances for audio, packet overhead, and control traffic
+            to set the encoder bitrate. Critical packets use
+            `pyrowave_critical_fec_percentage`; `fec_percentage` does not apply.
+            See [PyroWave protocol](pyrowave-protocol.md).
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            pyrowave = disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### capture
 
 <table>
@@ -2761,7 +2890,7 @@ this option to replace the running app immediately. The default is `true`.
             With the <code>vibeshine_drm</code> presentation ABI, capture is change-driven, imports the exact
             pinned DMA-BUF associated with each completed sequence, and coalesces bursts to the
             client-requested maximum frame rate. Ordinary KMS drivers retain fixed-rate polling; older
-            Vibepollo DRM modules without the frame-export ABI are rejected.
+            <code>vibeshine_drm</code> modules without the frame-export ABI are rejected.
             @note{Applies to Linux only.}</td>
     </tr>
     <tr>
@@ -3094,7 +3223,9 @@ are detected during the stream. The host log reports hook readiness or failure.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Controls smoother capture for virtual displays. @code{}enabled@endcode uses 4x refresh while a game is active, returns to 1x on the desktop, and applies a matching frame limit. This does not change the stream FPS and can make games with uneven frame pacing capture much more smoothly. @code{}disabled@endcode turns off both the automatic virtual-display limiter and refresh adjustments. @code{}legacy@endcode uses a fixed 2x refresh with the matching limiter for the entire stream, without changing refresh when games start or close. Existing boolean values remain compatible: true maps to enabled and false maps to disabled.
+            Controls how fast the virtual display refreshes, which decides how soon each game frame is captured. Windows only hands Vibeshine a new frame when it redraws the display, so on a display that refreshes at the stream rate a frame that finishes just after a redraw waits up to a whole refresh before capture, and frames reach the client unevenly. A faster virtual display captures each frame closer to when the game drew it. None of the modes change the stream FPS or bandwidth, and all but @code{}disabled@endcode cap games to the stream rate.
+            <br>
+            @code{}vrr@endcode holds the virtual display at a fixed 1000 Hz whatever the stream rate, so every frame is captured within 1 ms of being drawn and its RTP timestamp carries accurate game timing for clients with VRR pacing. @code{}enabled@endcode keeps the display at 4x the stream rate (within ~2 ms at 120 FPS) and captures at most 2x the stream rate on the desktop. @code{}legacy@endcode uses a fixed 2x refresh, as older versions did. @code{}disabled@endcode leaves the display at the stream rate and turns off the matching game cap. Existing boolean values remain compatible: true maps to enabled and false maps to disabled.
         </td>
     </tr>
     <tr>
@@ -3104,6 +3235,7 @@ are detected during the stream. The host log reports hook readiness or failure.
     <tr>
         <td>Examples</td>
         <td colspan="2">@code{}
+            frame_limiter_auto_virtual_framegen = vrr
             frame_limiter_auto_virtual_framegen = disabled
             frame_limiter_auto_virtual_framegen = legacy
             @endcode</td>
@@ -4776,7 +4908,7 @@ their catalog.
 Default: `false`
 
 The manual application picker shows installed, importable Steam games by
-default, matching the Playnite picker. Vibeshine also reads Steam's local user
+default, matching the Playnite picker. Vibepollo also reads Steam's local user
 play-history and `appinfo.vdf` caches to rank installed games for recent-game
 synchronization without requiring a Steam Web API key or a public profile.
 
@@ -5057,6 +5189,10 @@ Sets the maximum on-disk size, in MiB, of the session-history database before ol
 
 Enables the Vulkan HDR layer used by the display stack when HDR Vulkan capture support is available.
 
+### wayland_hdr_compatibility
+
+Enables KDE Plasma Wayland HDR environment compatibility for games launched during a resolved HDR stream. This does not force HDR and does not override SDR stream outcomes.
+
 ### wgc_pacing_smoothing
 
 Enables WGC pacing smoothing so capture re-anchors to the pacing grid instead of raw frame-arrival timing.
@@ -5071,7 +5207,7 @@ Controls whether Vibepollo advertises itself for local-network discovery.
 
 ### enable_input_only_mode
 
-Enables the Remote Input entry for new input-only sessions. Defaults to enabled when absent to preserve existing synthetic Remote Input access. Set `disabled` to hide the entry and reject cached Remote Input launches. Existing sessions can still disconnect; Remote Monitor and game sessions are unaffected.
+Allows clients to connect in input-only mode without starting a video stream.
 
 ### enable_pairing
 
@@ -5111,7 +5247,7 @@ Enables legacy application ordering for clients and integrations that require it
 
 ### limit_framerate
 
-When enabled, limits encoding to the launch-requested stream cadence while retaining the separately announced capture cadence used by Artemis Warp. Fractional frame rates are preserved. When disabled, encoding follows the announced cadence. Warp bitrate compensation remains subject to `max_bitrate`.
+Limits capture and encoding to the requested stream frame rate.
 
 ### nvenc_intra_refresh
 
@@ -5141,30 +5277,3 @@ Sets the maximum network packet size used for streaming. Set `0` to use the defa
   <summary></summary>
   [TOC]
 </details>
-
-
-## Remote Monitor lifecycle
-
-### remote_monitor_mute_audio
-
-Send picture and input without sending game or desktop audio to the Remote Monitor client.
-
-Accepts `enabled` or `disabled`.
-
-### remote_monitor_disconnect_on_stream_end
-
-Remove the client's extra monitor when its stream finishes. Leave this off to keep the monitor ready for Resume.
-
-Accepts `enabled` or `disabled`.
-
-### remote_monitor_disconnect_on_client_disconnect
-
-Remove the extra monitor as soon as the client connection drops or you use Disconnect, even if the monitor was waiting for Resume.
-
-Accepts `enabled` or `disabled`.
-
-### remote_monitor_terminate_on_first_request
-
-Moonlight needs Vibepollo to advertise the host as available to extra clients so it can show the running game and Terminate control. Leave this off to require launching Terminate twice; the original game client is not affected.
-
-Accepts `enabled` or `disabled`.

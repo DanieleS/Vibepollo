@@ -148,7 +148,7 @@ TEST(SteamDiscovery, MachineHostDoesNotParseSessionHome) {
 
 TEST(SteamDiscovery, CatalogIncludesPlayedUninstalledGamesWithNames) {
   const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count() ^ static_cast<long long>(std::random_device {}());
-  const auto base = fs::temp_directory_path() / ("vibeshine-steam-catalog-test-" + std::to_string(nonce));
+  const auto base = fs::temp_directory_path() / ("vibepollo-steam-catalog-test-" + std::to_string(nonce));
   std::error_code ec;
   fs::create_directories(base / "steamapps", ec);
   fs::create_directories(base / "appcache", ec);
@@ -193,7 +193,7 @@ TEST(SteamVdf, IgnoresStrayRootBracesWithoutStalling) {
 
 TEST(SteamDiscovery, ReadsManifestsAndLibraryFolders) {
   const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count() ^ static_cast<long long>(std::random_device {}());
-  const auto base = fs::temp_directory_path() / ("vibeshine-steam-test-" + std::to_string(nonce));
+  const auto base = fs::temp_directory_path() / ("vibepollo-steam-test-" + std::to_string(nonce));
   std::error_code ec;
   fs::remove_all(base, ec);
   fs::create_directories(base / "steamapps", ec);
@@ -216,7 +216,7 @@ TEST(SteamDiscovery, ReadsManifestsAndLibraryFolders) {
 
 TEST(SteamDiscovery, FindsModernCentralPortraitForExternalLibrary) {
   const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count() ^ static_cast<long long>(std::random_device {}());
-  const auto base = fs::temp_directory_path() / ("vibeshine-steam-art-test-" + std::to_string(nonce));
+  const auto base = fs::temp_directory_path() / ("vibepollo-steam-art-test-" + std::to_string(nonce));
   const auto library = base / "external";
   std::error_code ec;
   fs::create_directories(base / "steamapps", ec);
@@ -270,7 +270,7 @@ TEST(SteamDiscovery, FindsContentHashedLibraryCapsule) {
 
 TEST(SteamDiscovery, IgnoresManifestWithoutInstalledDirectory) {
   const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count() ^ static_cast<long long>(std::random_device {}());
-  const auto base = fs::temp_directory_path() / ("vibeshine-steam-stale-test-" + std::to_string(nonce));
+  const auto base = fs::temp_directory_path() / ("vibepollo-steam-stale-test-" + std::to_string(nonce));
   std::error_code ec;
   fs::create_directories(base / "steamapps", ec);
   {
@@ -391,10 +391,11 @@ TEST(SteamLaunch, RejectsZeroAndBuildsValidatedUri) {
 }
 
 TEST(SteamLaunch, StreamOwnedEnvironmentFeaturesRequireDirectLaunch) {
-  EXPECT_TRUE(requires_direct_environment_launch(true, false));
-  EXPECT_TRUE(requires_direct_environment_launch(false, true));
-  EXPECT_TRUE(requires_direct_environment_launch(true, true));
-  EXPECT_FALSE(requires_direct_environment_launch(false, false));
+  EXPECT_TRUE(requires_direct_environment_launch(true, false, false));
+  EXPECT_TRUE(requires_direct_environment_launch(false, true, false));
+  EXPECT_TRUE(requires_direct_environment_launch(false, false, true));
+  EXPECT_TRUE(requires_direct_environment_launch(true, true, true));
+  EXPECT_FALSE(requires_direct_environment_launch(false, false, false));
 }
 
 TEST(SteamLaunch, GamingModeReplacesCachedDesktopProtonCommand) {
@@ -408,18 +409,6 @@ TEST(SteamLaunch, GamingModeReplacesCachedDesktopProtonCommand) {
 }
 
 #ifdef __linux__
-TEST(SteamLaunch, MachineClientFallbackUsesCanonicalSemanticArguments) {
-  const std::string prefix = "/usr/libexec/vibeshine/vibepollo-session-exec steam ";
-  const auto arguments = session_launch_arguments(prefix + "1182900");
-  ASSERT_TRUE(arguments);
-  EXPECT_EQ(*arguments, (std::vector<std::string> {"steam", "1182900"}));
-  for (const auto suffix : {"0", "-1", "4294967296", "01182900", "1182900 ",
-                            "1182900 trailing", "1182900;id", "1182900\n", ""}) {
-    EXPECT_FALSE(session_launch_arguments(prefix + suffix)) << suffix;
-  }
-  EXPECT_FALSE(session_launch_arguments("/tmp/vibepollo-session-exec steam 1182900"));
-}
-
 TEST(SteamLaunch, MachineSessionLaunchUsesCanonicalSemanticArguments) {
   session_launch_policy_t policy {
     .provider = "mangohud-proton",
@@ -429,12 +418,16 @@ TEST(SteamLaunch, MachineSessionLaunchUsesCanonicalSemanticArguments) {
     .limiter_method = "late",
     .smooth_motion = true,
     .smooth_motion_graphics_queue = true,
+    .hdr = true,
+    .wayland_hdr_compatibility = true,
+    .proton_dualsense_compatibility = true,
+    .playstation_controller_attached = true,
   };
   const auto command = session_launch_command(1182900, policy);
   EXPECT_EQ(
     command,
     "/usr/libexec/vibeshine/vibepollo-session-exec steam-direct "
-    "1182900 mangohud-proton 116000 3 1 late 1 1"
+    "1182900 mangohud-proton 116000 3 1 late 1 1 1 1 1 1"
   );
   const auto arguments = session_launch_arguments(command);
   ASSERT_TRUE(arguments);
@@ -442,17 +435,47 @@ TEST(SteamLaunch, MachineSessionLaunchUsesCanonicalSemanticArguments) {
     *arguments,
     (std::vector<std::string> {
       "steam-direct", "1182900", "mangohud-proton", "116000", "3",
-      "1", "late", "1", "1"
+      "1", "late", "1", "1", "1", "1", "1", "1"
     })
   );
+
+  const auto fallback = session_launch_arguments(
+    "/usr/libexec/vibeshine/vibepollo-session-exec steam 1182900"
+  );
+  ASSERT_TRUE(fallback);
+  EXPECT_EQ(*fallback, (std::vector<std::string> {"steam", "1182900"}));
+  EXPECT_FALSE(session_launch_arguments(
+    "/usr/libexec/vibeshine/vibepollo-session-exec steam 01182900"
+  ));
+  EXPECT_FALSE(session_launch_arguments(
+    "/usr/libexec/vibeshine/vibepollo-session-exec steam 0"
+  ));
 
   policy.provider = "disabled";
   EXPECT_TRUE(session_launch_command(1182900, policy).empty());
   EXPECT_FALSE(session_launch_arguments(command + " trailing"));
   EXPECT_FALSE(session_launch_arguments(
     "/usr/libexec/vibeshine/vibepollo-session-exec steam-direct "
-    "1182900 proton 116000 custom 1 late 0 0"
+    "1182900 proton 116000 custom 1 late 0 0 0"
   ));
+}
+
+TEST(SteamLaunch, DualSenseOnlyPolicyRoundTripsWithoutHdrOrLimiter) {
+  session_launch_policy_t policy;
+  policy.proton_dualsense_compatibility = true;
+  const auto command = session_launch_command(3768760, policy);
+  ASSERT_FALSE(command.empty());
+  ASSERT_TRUE(session_launch_arguments(command));
+  EXPECT_TRUE(command.ends_with(" 0 0 0 0 1 0"));
+  auto invalid = command;
+  invalid[invalid.size() - 2] = '2';
+  EXPECT_FALSE(session_launch_arguments(invalid));
+  policy.playstation_controller_attached = true;
+  const auto attached = session_launch_command(3768760, policy);
+  EXPECT_TRUE(attached.ends_with(" 0 0 0 0 1 1"));
+  EXPECT_TRUE(session_launch_arguments(attached));
+  policy.proton_dualsense_compatibility = false;
+  EXPECT_TRUE(session_launch_command(3768760, policy).empty());
 }
 
 TEST(SteamLaunch, DirectLaunchPlacesVibepolloInsideInheritedSteamOptions) {
@@ -581,7 +604,7 @@ TEST(SteamDiscovery, ReadsLastPlayedFromLocalUserData) {
     out << R"("AppState" { "appid" "42" "name" "Game" "installdir" "Game" "LastUpdated" "999" })"; }
   { std::ofstream out(base / "userdata/123/config/localconfig.vdf");
     out << R"("UserLocalConfigStore" { "Software" { "Valve" { "Steam" { "apps" { "42" { "LastPlayed" "123456" } } } } } })"; }
-  const auto games = platf::steam::discover({base});
+  const auto games = platf::steam::discover_catalog({base});
   ASSERT_EQ(games.size(), 1);
   EXPECT_EQ(games[0].last_played, 123456);
   EXPECT_EQ(games[0].last_updated, 999);

@@ -126,6 +126,11 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/video.h"
         "${CMAKE_SOURCE_DIR}/src/video_colorspace.cpp"
         "${CMAKE_SOURCE_DIR}/src/video_colorspace.h"
+        "${CMAKE_SOURCE_DIR}/src/pyrowave_host.cpp"
+        "${CMAKE_SOURCE_DIR}/src/pyrowave_host.h"
+        "${CMAKE_SOURCE_DIR}/src/pyrowave_policy.cpp"
+        "${CMAKE_SOURCE_DIR}/src/pyrowave_policy.h"
+        "${CMAKE_SOURCE_DIR}/src/pyrowave_protocol.h"
         "${CMAKE_SOURCE_DIR}/src/input.cpp"
         "${CMAKE_SOURCE_DIR}/src/input.h"
         "${CMAKE_SOURCE_DIR}/src/input_validation_policy.cpp"
@@ -240,7 +245,7 @@ include_directories(BEFORE "${CMAKE_SOURCE_DIR}")
 
 set(SUNSHINE_FFMPEG_INCLUDE_DIRS ${FFMPEG_INCLUDE_DIRS})
 
-# Minimal FFmpeg bundles used by Vibeshine intentionally omit still-image
+# Minimal FFmpeg bundles used by Vibepollo intentionally omit still-image
 # codecs. Windows packages must include the image libraries so Steam covers
 # can always be converted to client-compatible PNGs.
 if(WIN32)
@@ -270,9 +275,9 @@ else()
     find_library(STEAM_ARTWORK_WEBP_LIBRARY NAMES webp)
 endif()
 if(PNG_FOUND AND JPEG_FOUND AND STEAM_ARTWORK_WEBP_LIBRARY)
-    list(APPEND SUNSHINE_DEFINITIONS VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS=1)
+    list(APPEND SUNSHINE_DEFINITIONS VIBEPOLLO_STEAM_ARTWORK_IMAGE_LIBS=1)
     list(APPEND SUNSHINE_EXTERNAL_LIBRARIES PNG::PNG JPEG::JPEG ${STEAM_ARTWORK_WEBP_LIBRARY})
-    set(STEAM_ARTWORK_TEST_DEFINITIONS VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS=1)
+    set(STEAM_ARTWORK_TEST_DEFINITIONS VIBEPOLLO_STEAM_ARTWORK_IMAGE_LIBS=1)
     set(STEAM_ARTWORK_TEST_LIBRARIES PNG::PNG JPEG::JPEG ${STEAM_ARTWORK_WEBP_LIBRARY})
 endif()
 # Enable the bounded official Steam CDN fallback in the application target.

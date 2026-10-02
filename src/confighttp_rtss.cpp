@@ -351,7 +351,7 @@ namespace confighttp {
 
 #ifdef __linux__
 
-  #include "src/boost_process_shim.h"
+  #include <boost/process/v1/search_path.hpp>
   #include <nlohmann/json.hpp>
   #include <Simple-Web-Server/server_https.hpp>
 
@@ -374,7 +374,7 @@ namespace confighttp {
     }
     print_req(request);
 
-    const auto path = boost_process_shim::search_path("mangohud");
+    const auto path = boost::process::v1::search_path("mangohud");
     const bool available = !path.empty();
     const bool selected = platf::mangohud::provider_selected(config::frame_limiter.provider);
     const bool proton_selected = platf::mangohud::proton_provider_selected(config::frame_limiter.provider);

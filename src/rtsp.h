@@ -77,6 +77,7 @@ namespace rtsp_stream {
     int height;
     int fps;
     int gcmap;
+    int playstation_gamepad_mask {};
 
     struct app_metadata_t {
       std::string id;
@@ -110,13 +111,15 @@ namespace rtsp_stream {
     // in millihertz. The existing fps field remains the legacy stream cadence.
     std::uint32_t client_display_refresh_millihz = 0;
     bool client_requests_virtual_display;
+    // A transport joining another client's running game cannot change host-wide stream settings.
+    bool secondary_game_client = false;
     // Present only when the client explicitly selected a virtual or physical display.
     std::optional<bool> client_virtual_display_override;
     bool virtual_display;
+    uint32_t scale_factor = 100;
     bool normal_vdd_capacity_rejected = false;
     bool normal_vdd_identity_newly_reserved = false;
     std::uint64_t normal_vdd_identity_token = 0;
-    uint32_t scale_factor = 100;
     // Linux resumes retain the running app's display owner across TLS clients.
     // client_uuid remains the authenticated transport identity.
     std::string normal_vdd_owner_uuid;
@@ -151,6 +154,8 @@ namespace rtsp_stream {
     std::optional<int> framegen_refresh_rate;
     std::optional<std::uint32_t> framegen_refresh_millihz;
     int framegen_refresh_multiplier = 1;
+    /// @brief framegen_refresh_millihz is the virtual display's own rate (VRR mode), not a stream multiple.
+    bool framegen_fixed_refresh = false;
     std::string frame_generation_provider;
     std::optional<double> lossless_scaling_target_fps;
     std::optional<int> lossless_scaling_rtss_limit;
@@ -180,7 +185,7 @@ namespace rtsp_stream {
      * @brief Build an isolated copy for the background RTSP startup worker.
      *
      * stream::session::alloc()/start() run on the startup thread while the io_context
-     * thread still owns and reuses the original launch session (reserve_launch_session,
+     * thread still owns and reuses the original launch session (reservation,
      * respond() cipher/IV, expiry). The worker must therefore operate on this clone
      * rather than the live original. launch_session_t is non-copyable (the move-only
      * rtsp_cipher), so the fields are copied explicitly.
@@ -292,7 +297,8 @@ namespace rtsp_stream {
     std::string_view capture_mode,
     bool auto_capture_uses_wgc,
     bool auto_virtual_framegen_limiter,
-    int virtual_display_refresh_multiplier
+    int virtual_display_refresh_multiplier,
+    std::uint32_t virtual_display_fixed_refresh_millihz = 0
   ) {
     return framegen::make_stream_start_policy({
       .fps = session.fps,
@@ -309,6 +315,7 @@ namespace rtsp_stream {
       .auto_capture_uses_wgc = auto_capture_uses_wgc,
       .auto_virtual_framegen_limiter = auto_virtual_framegen_limiter,
       .virtual_display_refresh_multiplier = virtual_display_refresh_multiplier,
+      .virtual_display_fixed_refresh_millihz = virtual_display_fixed_refresh_millihz,
     });
   }
 

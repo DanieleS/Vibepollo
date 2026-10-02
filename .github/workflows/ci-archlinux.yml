@@ -5,6 +5,10 @@ permissions: {}
 on:
   workflow_call:
     inputs:
+      use_self_hosted:
+        required: false
+        type: boolean
+        default: false
       build_tests:
         required: false
         type: boolean
@@ -33,9 +37,7 @@ jobs:
       COMMIT: ${{ inputs.release_commit }}
     permissions:
       contents: read
-    # Trusted builds use the Linux runner registered to this repository.
-    # Pull requests and forks continue to use disposable GitHub-hosted runners.
-    runs-on: ${{ github.repository == 'Nonary/Vibepollo' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && fromJSON('["self-hosted", "Linux", "X64", "linux-release"]') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ${{ inputs.use_self_hosted && github.repository == 'Nonary/Vibepollo' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && fromJSON('["self-hosted", "Linux", "X64", "linux-release"]') || fromJSON('["ubuntu-latest"]') }}
     container:
       image: archlinux/archlinux:base-devel
       # Sized to the runner that actually gets picked. The self-hosted Linux runner has the
@@ -146,7 +148,7 @@ jobs:
           signing_key="${RUNNER_TEMP}/vibeshine-drm-mok.key"
           signing_certificate="${RUNNER_TEMP}/vibeshine-drm-mok.pub"
           openssl req -new -x509 -nodes -days 1 \
-            -subj '/CN=Vibepollo CI module signing key/' \
+            -subj '/CN=Vibeshine CI module signing key/' \
             -newkey rsa:2048 -keyout "${signing_key}" \
             -addext 'extendedKeyUsage=codeSigning' \
             -outform DER -out "${signing_certificate}" >/dev/null 2>&1
@@ -159,7 +161,7 @@ jobs:
           module_sig_key="${module_sig_key//:/}"
           [[ "${module_sig_key^^}" == "${certificate_serial^^}" ]]
           [[ "$(modinfo -F signer "${module_build_dir}/vibeshine_drm.ko")" == \
-             'Vibepollo CI module signing key' ]]
+             'Vibeshine CI module signing key' ]]
 
           dkms_ci_version=0.0.1
           dkms_source="/usr/src/vibeshine-drm-${dkms_ci_version}"
@@ -167,7 +169,7 @@ jobs:
           write_drm_version_header "${dkms_source}" "${dkms_ci_version}"
           sed "s/@PROJECT_VERSION_NUMERIC@/${dkms_ci_version}/g" \
             "${dkms_source}/dkms.conf.in" >"${dkms_source}/dkms.conf"
-          printf 'try_sign_modules=true\n' >/etc/dkms/framework.conf.d/vibepollo-ci.conf
+          printf 'try_sign_modules=true\n' >/etc/dkms/framework.conf.d/vibeshine-ci.conf
           dkms add -m vibeshine-drm -v "${dkms_ci_version}"
           MAKEFLAGS="-j${CMAKE_BUILD_PARALLEL_LEVEL}" dkms build \
             -m vibeshine-drm -v "${dkms_ci_version}" -k "${kernel_release}"
@@ -179,7 +181,7 @@ jobs:
               -print | sort
           )
           if (( ${#dkms_modules[@]} != 1 )); then
-            echo "::error::Expected exactly one DKMS-installed Vibepollo DRM module, found ${#dkms_modules[@]}."
+            echo "::error::Expected exactly one DKMS-installed Vibeshine DRM module, found ${#dkms_modules[@]}."
             printf '%s\n' "${dkms_modules[@]}" >&2
             exit 1
           fi
@@ -291,7 +293,6 @@ jobs:
           grep -qx 'pkgname = vibepollo' <<< "${package_info}"
           grep -qx 'provides = sunshine' <<< "${package_info}"
           grep -qx 'conflict = sunshine' <<< "${package_info}"
-          grep -qx 'conflict = vibeshine' <<< "${package_info}"
           grep -qx 'depend = dkms' <<< "${package_info}"
           grep -qx 'depend = mokutil>=0.7.2' <<< "${package_info}"
           grep -qx 'depend = wayland-utils' <<< "${package_info}"

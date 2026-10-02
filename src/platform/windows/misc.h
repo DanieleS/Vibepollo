@@ -15,6 +15,9 @@
 #include <system_error>
 #include <vector>
 
+// lib includes
+#include <boost/asio/ip/address.hpp>
+
 // platform includes
 #include <WinSock2.h>
 #include <Windows.h>
@@ -23,6 +26,17 @@
 #include "utf_utils.h"
 
 namespace platf {
+  /// Interface resolved by routed_link_bps(), for diagnostics.
+  struct routed_link_info_t {
+    std::uint64_t luid = 0;
+    std::string alias;
+    unsigned long if_type = 0;
+    std::uint64_t transmit_bps = 0;
+  };
+
+  /// Current transmit speed of the routed interface, or zero when unavailable.
+  std::uint64_t routed_link_bps(const boost::asio::ip::address &source, const boost::asio::ip::address &target, routed_link_info_t *info = nullptr);
+
   void print_status(const std::string_view &prefix, HRESULT status);
   HDESK syncThreadDesktop();
 
@@ -167,7 +181,7 @@ namespace platf {
   bool is_vigem_installed(std::string *version_out = nullptr);
 
   /**
-   * @brief Check whether Vibeshine's own virtual gamepad driver is usable.
+   * @brief Check whether Vibepollo's own virtual gamepad driver is usable.
    * @details Probes the driver's private control interface, so it reports what a stream would
    *          actually get rather than merely whether files are present.
    * @return true when a virtual controller can be created without ViGEmBus.

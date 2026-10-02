@@ -14,10 +14,6 @@ Vibepollo follows the normal machine-wide Linux layout:
   greeter users must not be able to change it.
 - `/var/lib/vibepollo` is persistent machine state, owned only by the
   unprivileged `vibepollo` service account and mode `0700`.
-- `/var/lib/vibepollo/logs/vibepollo-<timestamp>.log` contains persistent
-  host logs, owned by the service account with mode `0600` in a `0700`
-  directory. The logger retains at most 30 launches and 10 MiB per launch.
-  Startup readiness ignores logs that existed before the current host launch.
 - `/run/vibepollo` contains short-lived root-created coordination records.
 - User homes are neither the authoritative configuration store nor a runtime
   dependency after a one-time legacy migration.
@@ -86,8 +82,12 @@ must fail instead of falling back to the already-running Steam process.
 The default Steam Big Picture open/close commands are fixed broker actions.
 Their exact shipped command strings map to fixed Steam URIs after desktop
 identity and endpoint validation, without a shell or command-manifest entry.
-Fresh installations can have an empty administrator command manifest before
-the host creates its default application catalog. Arbitrary application
+HDR streams use the `app-wayland-hdr` verb for the same catalog commands; Big
+Picture still maps those two strings to the same helper. The helper runs in
+the selected desktop session, matching other application launches: the broker
+namespace cannot start Steam, write the session baseline, or see the user's
+games. Fresh installations can have an empty administrator command manifest
+before the host creates its default application catalog. Arbitrary application
 commands still require administrator authorization; upgrades preserve that
 policy rather than automatically trusting newly saved commands.
 

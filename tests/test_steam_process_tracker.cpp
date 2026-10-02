@@ -6,37 +6,13 @@
 #include <map>
 #include <vector>
 
+#ifdef _WIN32
+  #include <windows.h>
+#elif defined(__linux__)
+  #include <unistd.h>
+#endif
+
 namespace lifecycle = platf::steam::lifecycle;
-
-TEST(SteamTrackingExit, PersistsUntilCleanupEvenWhenTheLauncherSurvives) {
-  lifecycle::exit_latch state;
-  lifecycle::association_result gone;
-  gone.reason = "no game processes found";
-  state.observe(true, gone);
-  EXPECT_TRUE(state.exited);
-  // A retry after lifecycle-gate contention must still bypass launcher
-  // auto-detach, regardless of whether the game exited before or after
-  // the startup deadline.
-  state.observe(false, gone);
-  EXPECT_TRUE(state.exited);
-  state = {};
-  EXPECT_FALSE(state.exited);
-}
-
-TEST(SteamTrackingExit, DoesNotEndUnassociatedOrTemporarilyUnavailableGames) {
-  lifecycle::exit_latch state;
-  lifecycle::association_result result;
-  result.reason = "no game processes found";
-  state.observe(false, result);
-  EXPECT_FALSE(state.exited);
-  result.reason = "process snapshot unavailable";
-  state.observe(true, result);
-  EXPECT_FALSE(state.exited);
-  // tracker::finish retains association for an incomplete snapshot.
-  result.outcome = lifecycle::association_outcome::associated;
-  state.observe(true, result);
-  EXPECT_FALSE(state.exited);
-}
 
 namespace {
 
@@ -112,6 +88,21 @@ TEST(SteamBigPicture, IncompleteBaselineDisablesCleanup) {
   auto before = snapshot({});
   before.complete = false;
   EXPECT_TRUE(lifecycle::big_picture_tree(before, snapshot({steam_process(20, 1, "/game", 42)})).empty());
+}
+
+TEST(SteamBigPicture, WatermarkCleansNewGamesWhenBaselineIsIncomplete) {
+  auto before = snapshot({});
+  before.complete = false;
+  const auto after = snapshot({steam_process(20, 1, "/game", 42)});
+  EXPECT_TRUE(lifecycle::big_picture_tree(before, after, 2000).empty());
+  ASSERT_EQ(lifecycle::big_picture_tree(before, after, 1999).processes.size(), 1U);
+}
+
+TEST(SteamBigPicture, WatermarkExcludesOlderProcessesMissingFromBaseline) {
+  const auto before = snapshot({});
+  const auto after = snapshot({steam_process(20, 1, "/game", 42)});
+  EXPECT_TRUE(lifecycle::big_picture_tree(before, after, 2000).empty());
+  EXPECT_TRUE(lifecycle::big_picture_tree(before, after).processes.contains(20));
 }
 
 TEST(SteamBigPicture, ParsesOnlyCompleteNumericSteamAppIdEnvironmentEntries) {
@@ -292,3 +283,25 @@ TEST(SteamProcessTracker, RefusesToSignalWhenPidIdentityChanged) {
   EXPECT_EQ(result.skipped, 1U);
   EXPECT_TRUE(controller.signals.empty());
 }
+
+#ifdef _WIN32
+TEST(SteamProcessTracker, WindowsSnapshotIncludesCurrentProcessIdentity) {
+  const auto processes = lifecycle::snapshot_processes();
+  ASSERT_TRUE(processes.has_value());
+  const auto current = processes->processes.find(GetCurrentProcessId());
+  ASSERT_NE(current, processes->processes.end());
+  EXPECT_FALSE(current->second.executable.empty());
+  EXPECT_NE(current->second.start_time_ticks, 0U);
+}
+#endif
+
+#ifdef __linux__
+TEST(SteamProcessTracker, LinuxSnapshotIncludesCurrentUserProcess) {
+  const auto processes = lifecycle::snapshot_processes();
+  ASSERT_TRUE(processes.has_value());
+  const auto current = processes->processes.find(static_cast<lifecycle::process_id_t>(getpid()));
+  ASSERT_NE(current, processes->processes.end());
+  EXPECT_NE(current->second.start_time_ticks, 0U);
+  EXPECT_TRUE(processes->complete);
+}
+#endif

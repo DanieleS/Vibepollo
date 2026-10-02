@@ -2,13 +2,21 @@ cmake_minimum_required(VERSION 3.20)
 
 # This directory is also usable as a standalone entry point for focused test
 # work, and is included by the normal project build when BUILD_TESTS is enabled.
-project(VibepolloTests LANGUAGES C CXX)
+project(VibeshineTests LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(SUNSHINE_TEST_REPOSITORY_ROOT "${CMAKE_CURRENT_LIST_DIR}/..")
+
+set(SUNSHINE_TEST_FFMPEG_PLATFORM_LIBRARIES "")
+if(WIN32)
+    # FFmpeg's Windows random source calls the BCrypt API directly. Component
+    # tests that link the static FFmpeg archives must provide the system import
+    # library because they do not inherit the application's platform libraries.
+    list(APPEND SUNSHINE_TEST_FFMPEG_PLATFORM_LIBRARIES bcrypt)
+endif()
 
 # Test categories make the dependency scope of a target visible at configuration
 # time. Every target must declare the smallest sources and libraries that
@@ -208,11 +216,12 @@ if(NOT TARGET Boost::algorithm OR
         property_tree
         system)
 endif()
+find_package(OpenSSL REQUIRED)
+
 set(SUNSHINE_TEST_SOCKET_LIBRARIES "")
 if(WIN32)
     set(SUNSHINE_TEST_SOCKET_LIBRARIES ws2_32)
 endif()
-find_package(OpenSSL REQUIRED)
 
 # Header-only SDK boundaries are named targets rather than process-wide include
 # paths.  A component explicitly opts in to the one external surface it uses;
@@ -374,9 +383,15 @@ sunshine_register_component(NAME test_component_remote_session TEST_SOURCE unit/
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/remote_session.cpp")
 sunshine_register_component(NAME test_component_rtsp_pending_policy TEST_SOURCE unit/test_rtsp_pending_policy.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/rtsp_pending_policy.cpp")
+sunshine_register_component(NAME test_component_pyrowave_policy TEST_SOURCE unit/test_pyrowave_policy.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/pyrowave_policy.cpp")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    sunshine_register_component(NAME test_component_linux_routed_link
+        TEST_SOURCE unit/platform/linux/test_routed_link.cpp
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/linux/routed_link.cpp")
+endif()
 sunshine_register_component(NAME test_component_hdr_request_policy TEST_SOURCE unit/test_hdr_request_policy.cpp)
 sunshine_register_component(NAME test_component_single_flight TEST_SOURCE unit/test_single_flight.cpp)
-sunshine_register_component(NAME test_component_video_timestamp_policy TEST_SOURCE unit/test_video_timestamp_policy.cpp)
 sunshine_register_component(NAME test_component_remote_display_topology TEST_SOURCE unit/test_remote_display_topology.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/remote_display_topology.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
@@ -396,12 +411,17 @@ sunshine_register_component(NAME test_component_steam_integration TEST_SOURCE te
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/steam_integration.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/provider_scan_protocol.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
+if(WIN32)
+    # The static FFmpeg build uses BCrypt for its random seed provider.
+    list(APPEND STEAM_ARTWORK_TEST_LIBRARIES bcrypt)
+endif()
 sunshine_register_component(NAME test_component_steam_artwork TEST_SOURCE test_steam_artwork.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/steam_artwork.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/steam_integration.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/provider_scan_protocol.cpp"
     INCLUDE_DIRECTORIES ${FFMPEG_INCLUDE_DIRS}
     LINK_LIBRARIES nlohmann_json::nlohmann_json ${FFMPEG_LIBRARIES} ${STEAM_ARTWORK_TEST_LIBRARIES}
+                   ${SUNSHINE_TEST_FFMPEG_PLATFORM_LIBRARIES}
     DEFINITIONS ${STEAM_ARTWORK_TEST_DEFINITIONS})
 sunshine_register_component(NAME test_component_config_steam TEST_SOURCE test_config_steam.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/config_steam.cpp"
@@ -428,6 +448,7 @@ sunshine_register_component(NAME test_component_lutris_integration TEST_SOURCE t
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/steam_artwork.cpp"
     INCLUDE_DIRECTORIES ${FFMPEG_INCLUDE_DIRS}
     LINK_LIBRARIES nlohmann_json::nlohmann_json ${SQLITE3_LIBRARIES} ${FFMPEG_LIBRARIES} ${STEAM_ARTWORK_TEST_LIBRARIES}
+                   ${SUNSHINE_TEST_FFMPEG_PLATFORM_LIBRARIES}
     DEFINITIONS ${STEAM_ARTWORK_TEST_DEFINITIONS})
 sunshine_register_component(NAME test_component_lutris_sync TEST_SOURCE test_lutris_sync.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/lutris_sync_policy.cpp"
@@ -485,12 +506,6 @@ sunshine_register_component(NAME test_component_mouse_policy TEST_SOURCE unit/te
 sunshine_register_component(NAME test_component_platform_common TEST_SOURCE unit/platform/test_common.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/common_services.cpp")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    pkg_check_modules(TEST_PIPEWIRE QUIET IMPORTED_TARGET libpipewire-0.3)
-    if(TEST_PIPEWIRE_FOUND)
-        sunshine_register_component(NAME test_component_linux_pipewire_format
-            TEST_SOURCE unit/platform/linux/test_pipewire_format.cpp
-            LINK_LIBRARIES PkgConfig::TEST_PIPEWIRE)
-    endif()
     if(NOT TARGET sunshine_libvirtualdisplay_uapi)
         if(SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR)
             set(_sunshine_test_libvirtualdisplay_source "${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}")
@@ -516,16 +531,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             "${CMAKE_CURRENT_LIST_DIR}/tests_main.cpp"
             "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_vibeshine_present_policy.cpp"
         LINK_LIBRARIES GTest::gtest sunshine_libvirtualdisplay_uapi)
-    sunshine_register_component(NAME test_component_linux_kmsgrab_selection TEST_SOURCE unit/platform/linux/test_kmsgrab_selection.cpp
-        LINK_LIBRARIES sunshine_libvirtualdisplay_uapi)
-    find_package(Boost CONFIG REQUIRED COMPONENTS process)
     sunshine_register_component(NAME test_component_linux_boost_process_shim TEST_SOURCE unit/platform/linux/test_boost_process_shim.cpp
         LINK_LIBRARIES Boost::process)
+    sunshine_register_component(NAME test_component_linux_kmsgrab_selection TEST_SOURCE unit/platform/linux/test_kmsgrab_selection.cpp
+        LINK_LIBRARIES sunshine_libvirtualdisplay_uapi)
     sunshine_register_component(NAME test_component_linux_kmsgrab_framebuffer TEST_SOURCE unit/platform/linux/test_kmsgrab_framebuffer.cpp)
     sunshine_register_component(NAME test_component_linux_private_display_cleanup_policy TEST_SOURCE unit/platform/linux/test_private_display_cleanup_policy.cpp)
     sunshine_register_component(NAME test_component_linux_render_device TEST_SOURCE unit/platform/linux/test_render_device.cpp)
     sunshine_register_component(NAME test_component_linux_dmabuf_surface TEST_SOURCE unit/platform/linux/test_dmabuf_surface.cpp)
     sunshine_register_component(NAME test_component_linux_hdr_policy TEST_SOURCE unit/platform/linux/test_hdr_policy.cpp)
+    sunshine_register_component(NAME test_component_linux_wayland_hdr_compatibility TEST_SOURCE unit/platform/linux/test_wayland_hdr_compatibility.cpp)
     sunshine_register_component(NAME test_component_linux_private_display_mode_policy TEST_SOURCE unit/platform/linux/test_private_display_mode_policy.cpp)
     sunshine_register_component(NAME test_component_linux_private_display_mode_client
         TEST_SOURCE unit/platform/linux/test_private_display_mode_client.cpp
@@ -584,6 +599,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     sunshine_register_component(NAME test_component_linux_private_display_restore_policy TEST_SOURCE unit/platform/linux/test_private_display_restore_policy.cpp
         LINK_LIBRARIES nlohmann_json::nlohmann_json)
     sunshine_register_component(NAME test_component_linux_private_display_resume_policy TEST_SOURCE unit/platform/linux/test_private_display_resume_policy.cpp)
+    pkg_check_modules(TEST_PIPEWIRE QUIET IMPORTED_TARGET libpipewire-0.3)
+    if(TEST_PIPEWIRE_FOUND)
+        sunshine_register_component(NAME test_component_linux_pipewire_format
+            TEST_SOURCE unit/platform/linux/test_pipewire_format.cpp
+            LINK_LIBRARIES PkgConfig::TEST_PIPEWIRE)
+    endif()
 endif()
 find_package(ZLIB REQUIRED)
 sunshine_register_component(NAME test_component_log_sessions TEST_SOURCE unit/test_log_sessions.cpp
@@ -607,12 +628,15 @@ sunshine_register_component(NAME test_component_video_policy TEST_SOURCE unit/te
 sunshine_register_component(NAME test_component_wgc_monitor_selection TEST_SOURCE unit/test_wgc_monitor_selection.cpp)
 sunshine_register_component(NAME test_component_screen_saver_state TEST_SOURCE unit/test_screen_saver_state.cpp
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_present_timing_policy TEST_SOURCE unit/test_present_timing_policy.cpp)
 sunshine_register_component(NAME test_component_encoder_probe_policy TEST_SOURCE unit/test_encoder_probe_policy.cpp)
 sunshine_register_component(NAME test_component_resource_config_catalog TEST_SOURCE unit/test_config_catalog_contract.cpp
     INCLUDE_DIRECTORIES "${SUNSHINE_TEST_GENERATED_INCLUDE_DIR}")
 sunshine_register_component(NAME test_component_resource_locale_catalog TEST_SOURCE integration/test_locale_consistency.cpp
     SUPPORT_SOURCES "${CMAKE_CURRENT_LIST_DIR}/support/file_handler_read_only.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
+set_tests_properties(test_component_resource_locale_catalog PROPERTIES
+    WORKING_DIRECTORY "${SUNSHINE_TEST_REPOSITORY_ROOT}")
 sunshine_register_component(NAME test_component_external_command_policy TEST_SOURCE integration/test_external_commands.cpp)
 sunshine_register_component(NAME test_component_virtual_display_manifest TEST_SOURCE integration/test_virtual_display_packaging.cpp
     INCLUDE_DIRECTORIES "${SUNSHINE_TEST_GENERATED_INCLUDE_DIR}")
@@ -690,6 +714,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
 
     find_program(SUNSHINE_TEST_BASH_EXECUTABLE bash)
     if(SUNSHINE_TEST_BASH_EXECUTABLE)
+        add_test(NAME test_component_linux_vibeshine_ds5_install
+            COMMAND "${SUNSHINE_TEST_BASH_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_ds5_install.sh"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/packaging/linux/vibeshine-ds5-install.in")
+        set_tests_properties(test_component_linux_vibeshine_ds5_install PROPERTIES LABELS "component")
         add_test(
             NAME test_component_linux_vkms_setup
             COMMAND "${SUNSHINE_TEST_BASH_EXECUTABLE}"
@@ -697,18 +726,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
                 "${LIBVIRTUALDISPLAY_LINUX_ROOT}/packaging/vibeshine-vkms")
         set_tests_properties(test_component_linux_vkms_setup PROPERTIES LABELS "component")
         add_test(
-            NAME test_component_linux_vibeshine_drm_install
+            NAME test_component_linux_vibepollo_drm_install
             COMMAND "${SUNSHINE_TEST_BASH_EXECUTABLE}"
                 "${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}/tests/linux/test-vibeshine-drm-install.sh"
                 "${LIBVIRTUALDISPLAY_LINUX_ROOT}/packaging/vibeshine-drm-install.in")
-        set_tests_properties(test_component_linux_vibeshine_drm_install PROPERTIES LABELS "component")
+        set_tests_properties(test_component_linux_vibepollo_drm_install PROPERTIES LABELS "component")
         add_test(
-            NAME test_component_linux_vibeshine_drm_build_module
+            NAME test_component_linux_vibepollo_drm_build_module
             COMMAND "${SUNSHINE_TEST_BASH_EXECUTABLE}"
                 "${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}/tests/linux/test-vibeshine-drm-build-module.sh"
                 "${LIBVIRTUALDISPLAY_LINUX_ROOT}/vibeshine-drm/build-module"
                 "${LIBVIRTUALDISPLAY_LINUX_ROOT}/vibeshine-drm/dkms.conf.in")
-        set_tests_properties(test_component_linux_vibeshine_drm_build_module PROPERTIES LABELS "component")
+        set_tests_properties(test_component_linux_vibepollo_drm_build_module PROPERTIES LABELS "component")
         add_test(
             NAME test_component_linux_session_controller
             COMMAND "${SUNSHINE_TEST_BASH_EXECUTABLE}"
@@ -732,23 +761,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
     endif()
 
     find_program(SUNSHINE_TEST_PYTHON_EXECUTABLE NAMES python3)
-    add_executable(test_linux_profile_sources
-        "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_profile_sources.c")
-    target_include_directories(test_linux_profile_sources PRIVATE "${SUNSHINE_TEST_REPOSITORY_ROOT}")
-    target_link_libraries(test_linux_profile_sources PRIVATE cap)
-    target_compile_options(test_linux_profile_sources PRIVATE -UNDEBUG)
-    add_test(NAME test_component_linux_profile_sources COMMAND test_linux_profile_sources)
-    set_tests_properties(test_component_linux_profile_sources PROPERTIES LABELS "component")
     if(SUNSHINE_TEST_PYTHON_EXECUTABLE)
-        add_test(NAME test_component_linux_profile_normalize
-            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
-                "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_profile_normalize.py")
-        set_tests_properties(test_component_linux_profile_normalize PROPERTIES LABELS "component")
         if(SUNSHINE_TEST_BASH_EXECUTABLE)
-            add_test(NAME test_component_linux_installer
-                COMMAND "${SUNSHINE_TEST_BASH_EXECUTABLE}"
-                    "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_linux_installer.sh")
-            set_tests_properties(test_component_linux_installer PROPERTIES LABELS "component")
             add_test(NAME test_component_linux_profile_upgrade
                 COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                     "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_profile_upgrade.py"
@@ -766,17 +780,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
                 "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_local_deploy.py")
         set_tests_properties(test_component_linux_local_deploy PROPERTIES LABELS "component" TIMEOUT 30)
         add_test(
-            NAME test_component_linux_vkms_peercred
+            NAME test_component_linux_vibepollo_vkms_peercred
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                 "${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}/tests/linux/test-vkms-peercred.py"
                 "$<TARGET_FILE:vibeshine_vkms_peercred>")
-        set_tests_properties(test_component_linux_vkms_peercred PROPERTIES LABELS "component")
+        set_tests_properties(test_component_linux_vibepollo_vkms_peercred PROPERTIES LABELS "component")
         add_test(
-            NAME test_component_linux_vibeshine_drm_contract
+            NAME test_component_linux_vibepollo_drm_contract
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                 "${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}/tests/linux/test-vibeshine-drm-contract.py"
                 "${LIBVIRTUALDISPLAY_LINUX_ROOT}/vibeshine-drm")
-        set_tests_properties(test_component_linux_vibeshine_drm_contract PROPERTIES LABELS "component")
+        set_tests_properties(test_component_linux_vibepollo_drm_contract PROPERTIES LABELS "component")
         add_test(
             NAME test_component_linux_kwin_gpu_bridge_contract
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
@@ -784,7 +798,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
                 "${LIBVIRTUALDISPLAY_LINUX_ROOT}")
         set_tests_properties(test_component_linux_kwin_gpu_bridge_contract PROPERTIES LABELS "component")
     else()
-        message(WARNING "python3 was not found; skipping the Vibeshine DRM source contract test")
+        message(WARNING "python3 was not found; skipping the Vibepollo DRM source contract test")
     endif()
 endif()
 
@@ -874,6 +888,9 @@ if(WIN32)
     sunshine_register_component(NAME test_component_virtual_display_policy TEST_SOURCE unit/platform/windows/test_virtual_display_sunshine.cpp
         PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/virtual_display_identity.cpp"
         DEFINITIONS "SUNSHINE_SOURCE_DIR=\"${SUNSHINE_TEST_REPOSITORY_ROOT}\"")
+    sunshine_register_component(NAME test_component_display_mode_resolution TEST_SOURCE unit/platform/windows/test_display_mode_resolution.cpp
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/third-party/libdisplaydevice/src/windows/display_mode_resolution.cpp"
+        LINK_LIBRARIES sunshine_test_displaydevice_headers)
     sunshine_register_component(NAME test_component_vhf_gamepad_policy TEST_SOURCE unit/platform/windows/test_vhf_gamepad_policy.cpp
         PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/vhf_gamepad_policy.cpp"
         INCLUDE_DIRECTORIES "${SUNSHINE_LIBVIRTUALGAMEPAD_INCLUDE_DIR}"
@@ -893,7 +910,6 @@ if(APPLE)
         PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/macos/av_audio_policy.cpp")
 endif()
 
-sunshine_register_component(NAME test_component_hdr_request TEST_SOURCE unit/test_hdr_request_policy.cpp)
 
 # Production-code regression harnesses exercise Windows policies on the native host.
 find_package(Python3 COMPONENTS Interpreter)
@@ -903,12 +919,6 @@ if(Python3_Interpreter_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_cuda_release_policy.py")
 endif()
 if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
-    add_test(NAME regression_synthetic_capture
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_synthetic_capture.py")
-    add_test(NAME regression_hdr_probe_fallback
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_hdr_probe_fallback.py")
-    add_test(NAME regression_resume_color_policy
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_resume_color_policy.py")
     add_test(NAME regression_delayed_mouse_release
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/input/test_delayed_mouse_release.py")
     add_test(NAME regression_windows_absolute_mouse
@@ -929,10 +939,6 @@ if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_cancel_after_app_exit.py")
     add_test(NAME regression_display_policy_adapter
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_policy_adapter.py")
-    add_test(NAME regression_retained_resume_policy
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_retained_resume_policy.py")
-    add_test(NAME regression_terminate_lock
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_terminate_lock.py")
 endif()
 
 if(TARGET test_component_resource_locale_catalog)
@@ -940,5 +946,37 @@ if(TARGET test_component_resource_locale_catalog)
         WORKING_DIRECTORY "${SUNSHINE_TEST_REPOSITORY_ROOT}")
 endif()
 
-add_test(NAME build_version_contract
-    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_LIST_DIR}/cmake/BuildVersionContract.cmake")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET libinputtino)
+    add_executable(test_ds5_haptics unit/platform/linux/test_ds5_haptics.cpp)
+    target_include_directories(test_ds5_haptics PRIVATE
+        "${SUNSHINE_TEST_REPOSITORY_ROOT}"
+        "${SUNSHINE_TEST_REPOSITORY_ROOT}/third-party/moonlight-common-c/src")
+    add_test(NAME test_ds5_haptics COMMAND test_ds5_haptics)
+    foreach(profile ds4 ds5)
+        add_executable(test_${profile}_usb unit/platform/linux/test_${profile}_usb.cpp)
+        target_include_directories(test_${profile}_usb PRIVATE "${SUNSHINE_TEST_REPOSITORY_ROOT}/third-party/inputtino/include")
+        add_test(NAME test_component_${profile}_usb COMMAND test_${profile}_usb)
+    endforeach()
+    # Manual only: creates temporary devices visible to the desktop and Steam.
+    add_executable(probe_playstation_uhid integration/probe_playstation_uhid.cpp
+        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/linux/input/inputtino_ds4.cpp")
+    target_include_directories(probe_playstation_uhid PRIVATE "${SUNSHINE_TEST_REPOSITORY_ROOT}")
+    target_link_libraries(probe_playstation_uhid PRIVATE inputtino::libinputtino)
+    add_executable(probe_ds5_gadget_lifecycle integration/probe_ds5_gadget_lifecycle.cpp)
+    target_include_directories(probe_ds5_gadget_lifecycle PRIVATE "${SUNSHINE_TEST_REPOSITORY_ROOT}")
+    target_link_libraries(probe_ds5_gadget_lifecycle PRIVATE inputtino::libinputtino)
+    find_package(ALSA QUIET)
+    if(ALSA_FOUND)
+        add_executable(probe_ds5_haptics integration/probe_ds5_haptics.cpp)
+        target_include_directories(probe_ds5_haptics PRIVATE ${ALSA_INCLUDE_DIRS})
+        target_link_libraries(probe_ds5_haptics PRIVATE inputtino::libinputtino ${ALSA_LIBRARIES})
+    endif()
+endif()
+
+if(TARGET pyrowave-linux)
+    add_executable(test_pyrowave_linux_gpu test_pyrowave_linux_gpu.cpp)
+    target_include_directories(test_pyrowave_linux_gpu PRIVATE "${SUNSHINE_TEST_REPOSITORY_ROOT}")
+    target_link_libraries(test_pyrowave_linux_gpu PRIVATE pyrowave-linux pyrowave::capi gbm vulkan)
+    add_test(NAME pyrowave_linux_gpu COMMAND test_pyrowave_linux_gpu)
+    set_tests_properties(pyrowave_linux_gpu PROPERTIES SKIP_RETURN_CODE 77 LABELS "integration;gpu")
+endif()

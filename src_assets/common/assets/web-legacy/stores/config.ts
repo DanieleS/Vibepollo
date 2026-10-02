@@ -103,6 +103,7 @@ const defaultGroups = [
       controller: 'enabled',
       gamepad: 'auto',
       ds4_back_as_touchpad_click: 'enabled',
+      proton_dualsense_compatibility: 'enabled',
       motion_as_ds4: 'enabled',
       touchpad_as_ds4: 'enabled',
       back_button_timeout: -1,
@@ -114,7 +115,7 @@ const defaultGroups = [
       mouse: 'enabled',
       high_resolution_scrolling: 'enabled',
       native_pen_touch: 'enabled',
-      enable_input_only_mode: 'enabled',
+      enable_input_only_mode: 'disabled',
       forward_rumble: 'enabled',
       keybindings: '[0x10,0xA0,0x11,0xA2,0x12,0xA4]',
       ds5_inputtino_randomize_mac: true,
@@ -158,6 +159,7 @@ const defaultGroups = [
       dd_snapshot_restore_hotkey_modifiers: 'ctrl+alt+shift',
       dd_use_sunshine_virtual_display_driver: true,
       vulkan_hdr_layer: true,
+      wayland_hdr_compatibility: false,
       dd_activate_virtual_display: false,
       dd_virtual_display_scale: 0,
       dd_virtual_display_permanent_count: 0,
@@ -196,6 +198,7 @@ const defaultGroups = [
       wan_encryption_mode: 1,
       ping_timeout: 10000,
       video_max_batch_size_kb: 64,
+      pyrowave_critical_fec_percentage: 20,
     },
   },
   {
@@ -247,6 +250,7 @@ const defaultGroups = [
       min_threads: 2,
       hevc_mode: 0,
       av1_mode: 0,
+      pyrowave: true,
       envvar_compatibility_mode: 'disabled',
       legacy_ordering: 'disabled',
       ignore_encoder_probe_failure: 'disabled',
@@ -653,7 +657,9 @@ export const useConfigStore = defineStore('config', () => {
           .toLowerCase()
           .trim();
         (data as Record<string, unknown>)[virtualCaptureKey] =
-          normalized === 'legacy' || normalized === '2x' || normalized === 'fixed-2x'
+          ['vrr', '1000hz', '1000', 'fixed-1000hz', 'fixed_1000hz'].includes(normalized)
+            ? 'vrr'
+            : normalized === 'legacy' || normalized === '2x' || normalized === 'fixed-2x'
             ? 'legacy'
             : raw === false ||
                 raw === 0 ||
@@ -691,6 +697,7 @@ export const useConfigStore = defineStore('config', () => {
       'frame_limiter_disable_vsync',
       'dd_use_sunshine_virtual_display_driver',
       'vulkan_hdr_layer',
+      'wayland_hdr_compatibility',
       'dd_wa_dummy_plug_hdr10',
       'realtime_stats_enabled',
       'realtime_stats_pause_when_hidden',

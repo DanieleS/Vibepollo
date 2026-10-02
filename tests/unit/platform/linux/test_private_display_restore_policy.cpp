@@ -118,6 +118,14 @@ TEST(LinuxPrivateDisplayRestorePolicy, PrefersConnectedPhysicalGuard) {
   EXPECT_EQ(policy::select_guard(candidates), "HDMI-A-1");
 }
 
+TEST(LinuxPrivateDisplayRestorePolicy, CandidateOwnsNameAfterOriginalChanges) {
+  std::string output_name {"HDMI-A-1"};
+  const std::array candidates {policy::candidate_t {output_name, true, true, false}};
+  output_name.assign("changed");
+
+  EXPECT_EQ(policy::select_guard(candidates), "HDMI-A-1");
+}
+
 TEST(LinuxPrivateDisplayRestorePolicy, FallsBackToPrivateGuardForPrivateBaseline) {
   const std::array candidates {
     policy::candidate_t {"Virtual-2", true, true, true},

@@ -161,12 +161,19 @@ else()
                 "${LIBVIRTUALDISPLAY_LINUX_ROOT}/packaging/vibeshine-vkms"
                 "${LIBVIRTUALDISPLAY_LINUX_ROOT}/packaging/vibeshine-vkms-quiesce"
                 "${CMAKE_SOURCE_DIR}/packaging/linux/vibepollo-machine-host"
-                "${CMAKE_SOURCE_DIR}/packaging/linux/vibepollo-profile-normalize.py"
-                "${CMAKE_SOURCE_DIR}/packaging/linux/steamos/local/pairing_migration.py"
+                "${CMAKE_SOURCE_DIR}/packaging/linux/Arch/vibepollo-package-preflight"
                 "${CMAKE_SOURCE_DIR}/packaging/linux/vibepollo-session-controller"
                 "${CMAKE_SOURCE_DIR}/packaging/linux/vibepollo-global-limiter.py"
                 "${CMAKE_CURRENT_BINARY_DIR}/vibeshine-drm-install"
+                "${CMAKE_CURRENT_BINARY_DIR}/vibeshine-ds5-install"
                 DESTINATION "${VIBESHINE_PRIVILEGED_LIBEXEC_INSTALL_DIR}")
+        # Pacman loads hooks before extraction. Future upgrades use the
+        # previously installed function library to abort an unsafe transaction.
+        install(FILES "${CMAKE_SOURCE_DIR}/packaging/linux/Arch/vibepollo.install"
+                DESTINATION "${CMAKE_INSTALL_DATADIR}/vibepollo"
+                RENAME "arch-package-hooks")
+        install(FILES "${CMAKE_SOURCE_DIR}/packaging/linux/Arch/00-vibepollo-quiesce.hook"
+                DESTINATION "${CMAKE_INSTALL_DATADIR}/libalpm/hooks")
         install(TARGETS vibepollo_session_exec vibepollo_app_supervisor
                 vibepollo_profile_import vibepollo_kwin_session_environment
                 vibepollo_provider_scan vibepollo_steam_launch vibepollo_display_power
@@ -209,6 +216,16 @@ else()
         install(FILES "${CMAKE_CURRENT_BINARY_DIR}/vibeshine-drm-dkms.conf"
                 DESTINATION "${VIBESHINE_DRM_SOURCE_INSTALL_DIR}"
                 RENAME dkms.conf)
+        install(DIRECTORY "${VIBESHINE_DS5_SOURCE_DIR}/"
+                DESTINATION "${VIBESHINE_DS5_SOURCE_INSTALL_DIR}"
+                FILES_MATCHING PATTERN "*.c" PATTERN "*.mod.c" EXCLUDE
+                PATTERN "*.h" PATTERN "Makefile" PATTERN "README*" PATTERN "LICENSE*")
+        install(PROGRAMS "${VIBESHINE_DS5_SOURCE_DIR}/build-module"
+                DESTINATION "${VIBESHINE_DS5_SOURCE_INSTALL_DIR}")
+        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/vibeshine-ds5-dkms.conf"
+                DESTINATION "${VIBESHINE_DS5_SOURCE_INSTALL_DIR}" RENAME dkms.conf)
+        install(FILES "${CMAKE_SOURCE_DIR}/packaging/linux/70-vibeshine-ds5.conf"
+                DESTINATION "/usr/lib/modules-load.d")
     endif()
 
     if(UDEV_FOUND)
@@ -264,12 +281,6 @@ endif()
 
 # RPM specific
 set(CPACK_RPM_PACKAGE_LICENSE "GPLv3")
-set(CPACK_RPM_PACKAGE_CONFLICTS "Sunshine, sunshine, vibeshine")
-
-# Native hosts share the same ports, input integration, and virtual-display
-# driver. Let package managers replace either legacy host without deleting
-# users' configuration or pairing data.
-set(CPACK_DEBIAN_PACKAGE_CONFLICTS "sunshine, vibeshine")
 
 # FreeBSD specific
 set(CPACK_FREEBSD_PACKAGE_MAINTAINER "${CPACK_PACKAGE_VENDOR}")
@@ -348,7 +359,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             libopus0, \
             libpulse0, \
             pulseaudio-utils, \
-            python3, \
+            python3 (>= 3.9), \
             libva2, \
             libva-drm2, \
             libwayland-client0, \
@@ -364,6 +375,7 @@ set(CPACK_RPM_PACKAGE_REQUIRES "\
             /usr/bin/pactl, \
             /usr/bin/parec, \
             /usr/bin/python3, \
+            (python3 >= 3.9 or /usr/bin/python3.11), \
             /usr/bin/wayland-info, \
             /usr/bin/xdpyinfo, \
             libcap >= 2.22, \
@@ -384,7 +396,6 @@ set(CPACK_RPM_PACKAGE_REQUIRES "\
             numactl-libs >= 2.0.14, \
             openssl >= 3.0.2, \
             pulseaudio-libs >= 10.0, \
-            python3, \
             socat, \
             util-linux")
 set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "dkms")

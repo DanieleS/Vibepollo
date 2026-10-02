@@ -26,11 +26,11 @@ $manifestPayload = @(
 )
 $localTestCertificate = 'driver/VibeshineVhfGamepad.cer'
 $expectedProducerRepository = 'Nonary/libvirtualgamepad'
-$expectedProducerTag = 'v0.1.0-beta.4'
-$expectedProducerAsset = 'libvirtualgamepad-0.1.0-beta.4-windows-x64.zip'
-$expectedProducerArchiveSha256 = '7830a91ba281c44ae9d01e92e9086f72384a07ca1b35ee87150592f8f960361a'
-$expectedProducerSourceRevision = '0b3970e1a8c839f14f20a7c8eaf48ff59b8c1986'
-$expectedDriverVer = '09/13/2026,0.1.0.34'
+$expectedProducerTag = 'v0.1.0-beta.6'
+$expectedProducerAsset = 'libvirtualgamepad-0.1.0-beta.6-windows-x64.zip'
+$expectedProducerArchiveSha256 = 'a45a8ae27d2764ad26a4b89d43d1e2dc43510d84bddd5899aac7c80499754782'
+$expectedProducerSourceRevision = '4b56fb9da177f320fb2d7ddb1b6262e5d55d2750'
+$expectedDriverVer = '09/22/2026,0.1.0.39'
 $expectedProtocolVersion = 2
 $expectedSignPathFoundationSignerSubject = 'CN=SignPath Foundation, O=SignPath Foundation, L=Lewes, S=Delaware, C=US'
 
@@ -374,9 +374,8 @@ function Assert-DriverPackage {
     }
     $signedDownstream = $manifest.signing.channel -eq $msiRequestChannel
     if ($signedDownstream -and
-        (@($manifest.signing.signed_downstream).Count -ne 2 -or
-         (@($manifest.signing.signed_downstream) -join ',') -cne ($downstreamSignedFiles -join ','))) {
-        throw '[VibeshineVhfGamepad] MSI-signing manifest does not declare exactly the catalog and setup tool.'
+        (@($manifest.signing.signed_downstream) -join "`n") -cne ($downstreamSignedFiles -join "`n")) {
+        throw '[VibeshineVhfGamepad] MSI-signing manifest does not declare the exact downstream-signed payloads.'
     }
     Assert-ManifestPayloadContract -Manifest $manifest -Root $Root
 
@@ -554,7 +553,7 @@ function Uninstall-DriverPackage {
         Write-DriverMessage 'VIRTUAL_GAMEPAD_RESTART_REQUIRED'
         return $rebootExitCode
     }
-    Write-DriverMessage 'Removed only Vibeshine-owned VHF source devices.'
+    Write-DriverMessage 'Removed only Vibepollo-managed VHF source devices.'
     return 0
 }
 

@@ -70,17 +70,6 @@ namespace platf::steam::lifecycle {
     bool associated() const { return outcome == association_outcome::associated; }
   };
 
-  // Once an owned game exits, launcher lifetime and auto-detach must not
-  // resurrect it, including when cleanup must retry a busy lifecycle gate.
-  struct exit_latch {
-    bool exited = false;
-
-    void observe(bool previously_associated, const association_result &result) {
-      exited = exited || (previously_associated && !result.associated() &&
-                          result.reason.find("unavailable") == std::string::npos);
-    }
-  };
-
   // A process id in this list is never selected as a game process.  Steam
   // itself is also recognized by executable/cmdline below; explicit roots are
   // useful when a launcher uses a wrapper with a non-Steam executable name.
@@ -106,9 +95,8 @@ namespace platf::steam::lifecycle {
     virtual std::optional<process_snapshot> snapshot() = 0;
   };
 
-  // Linux implementation reads /proc.  Other platforms provide an empty,
-  // successful snapshot so this boundary remains buildable until a native
-  // provider is added there.
+  // Linux reads /proc and Windows uses the Toolhelp process snapshot API.
+  // Other platforms provide an empty successful snapshot.
   std::optional<process_snapshot> snapshot_processes();
 
   class tracker {
@@ -170,8 +158,7 @@ namespace platf::steam::lifecycle {
                         process_controller &controller,
                         const stop_options &options = {});
 
-  // Native controller used by production integration.  It is deliberately a
-  // no-op on Windows until a Job Object based controller is wired in.
+  // Native controller used by production integration.
   std::shared_ptr<process_controller> native_process_controller();
 
 }  // namespace platf::steam::lifecycle

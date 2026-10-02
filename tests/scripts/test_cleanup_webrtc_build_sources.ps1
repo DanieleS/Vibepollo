@@ -85,7 +85,7 @@ function Assert-CleanupFails {
   Assert-True (Test-Path -LiteralPath $Fixture.BuildDir) "Failed cleanup removed the build workspace."
 }
 
-$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) "vibeshine-webrtc-cleanup-$([System.Guid]::NewGuid().ToString('N'))"
+$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) "vibepollo-webrtc-cleanup-$([System.Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 try {
   $success = New-WebrtcFixture -CaseRoot (Join-Path $testRoot "success")
@@ -98,6 +98,11 @@ try {
   Assert-True (-not (Test-Path -LiteralPath $success.BuildDir)) "Successful cleanup retained the build workspace."
   Assert-True (Test-Path -LiteralPath (Join-Path $success.OutDir "lib\libwebrtc.dll")) "Successful cleanup removed the staged SDK."
   & $cleanupScript -BuildDir $success.BuildDir -OutDir $success.OutDir
+
+  $driveRoot = [System.IO.Path]::GetPathRoot($testRoot)
+  Assert-CleanupFails `
+    -Fixture ([pscustomobject]@{ BuildDir = $driveRoot; OutDir = $testRoot }) `
+    -ExpectedMessage "drive root"
 
   $inside = New-WebrtcFixture -CaseRoot (Join-Path $testRoot "inside") -OutputInsideBuild
   Assert-CleanupFails -Fixture $inside -ExpectedMessage "must be outside"

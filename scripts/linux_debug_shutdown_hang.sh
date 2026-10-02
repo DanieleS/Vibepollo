@@ -5,7 +5,7 @@ IFS=$'\n\t'
 
 readonly expected_user="chasep"
 readonly expected_home="/home/chasep"
-readonly sysrq_config="/etc/sysctl.d/50-vibepollo-shutdown-debug.conf"
+readonly sysrq_config="/etc/sysctl.d/50-vibeshine-shutdown-debug.conf"
 readonly netconsole_port=6666
 
 target=""
@@ -90,7 +90,7 @@ fi
 # full mask so the keys are live during the shutdown window too, not just
 # until the next boot.
 log "enabling the full SysRq mask (persisted in ${sysrq_config})"
-printf '# Vibepollo shutdown-hang diagnosis. Remove with --revert.\nkernel.sysrq = 1\nkernel.printk = 7 4 1 7\n' | \
+printf '# Vibeshine shutdown-hang diagnosis. Remove with --revert.\nkernel.sysrq = 1\nkernel.printk = 7 4 1 7\n' | \
   sudo tee "$sysrq_config" >/dev/null
 sudo sysctl -q -p "$sysrq_config"
 
@@ -104,7 +104,7 @@ sudo systemd-analyze log-target kmsg
 if [[ -n "$target" ]]; then
   [[ "$target" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "not an IPv4 address: $target"
 
-  IFS=' ' read -r source_ip source_dev <<<"$(
+  read -r source_ip source_dev <<<"$(
     ip -o -4 route get "$target" | sed -n 's/.* dev \([^ ]*\) src \([^ ]*\).*/\2 \1/p'
   )"
   [[ -n "${source_ip:-}" && -n "${source_dev:-}" ]] || die "no route to $target"
@@ -123,7 +123,7 @@ if [[ -n "$target" ]]; then
 
 [shutdown-debug] On ${target}, start the collector BEFORE rebooting:
 
-    nc -u -l ${netconsole_port} | tee vibepollo-hang.log
+    nc -u -l ${netconsole_port} | tee vibeshine-hang.log
 
 EOF
 fi
@@ -145,7 +145,7 @@ cat <<EOF
     sudo modprobe -r vibeshine_drm
     sudo systemctl reboot
 
-  Reboots cleanly  -> the wedge is in the vibepollo DRM module's shutdown path.
+  Reboots cleanly  -> the wedge is in the vibeshine DRM module's shutdown path.
   Still wedges     -> the wedge is below it (NVIDIA device_shutdown, or btrfs).
 
 [shutdown-debug] Undo everything with: $(basename "$0") --revert

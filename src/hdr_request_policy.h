@@ -7,6 +7,7 @@
 #include "config.h"
 
 #include <optional>
+
 namespace rtsp_stream::hdr_request_policy {
 
   struct state_t {
@@ -25,6 +26,7 @@ namespace rtsp_stream::hdr_request_policy {
   ) {
     return app_preference.value_or(client_preference);
   }
+
   [[nodiscard]] constexpr state_t apply(
     state_t state,
     const config::video_t::dd_t::hdr_request_override_e override

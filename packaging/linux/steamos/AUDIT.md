@@ -1,9 +1,5 @@
 # SteamOS support audit
 
-Migration note: the validation results below describe the source Vibeshine
-implementation. They are historical evidence, not a claim that this Vibepollo
-migration has been tested on a live SteamOS host.
-
 Audit date: 2026-09-04. Starting revision: `017cc604` plus the existing
 untracked SteamOS packaging and Gamescope source files.
 
@@ -173,6 +169,10 @@ This remains a local SDK setup. The companion Gamescope archive is a development
 candidate with source/patch hashes and host metadata, not a signed sysext image.
 Privileged activation, Moonlight HDR playback, actual native/Proton HDR games,
 mode switching and OS update/rollback behavior remain unvalidated.
+
+> The results in this section describe the source Vibeshine implementation.
+> They are historical evidence; this Vibepollo migration has not been
+> validated on a live SteamOS host.
 
 ## Local native deployment validation, 2026-09-05
 

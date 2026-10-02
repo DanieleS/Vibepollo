@@ -11,8 +11,8 @@ export const extendedDefaults: Record<string, unknown> = {
   playnite_install_dir: '',
   playnite_extensions_dir: '',
 
-  nvenc_intra_refresh: 'disabled',
   nvenc_preset: 1,
+  nvenc_intra_refresh: 'disabled',
   nvenc_twopass: 'quarter_res',
   nvenc_spatial_aq: 'disabled',
   nvenc_split_encode: 'auto',

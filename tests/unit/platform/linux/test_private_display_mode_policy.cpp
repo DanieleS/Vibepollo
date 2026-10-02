@@ -17,21 +17,11 @@ TEST(LinuxPrivateDisplayConfigurationPolicy, RejectsKScreenFailureWithSuccessful
   EXPECT_TRUE(configuration::command_succeeded(true, "Output 1 set mode 1", "locale warning"));
 }
 
-TEST(LinuxPrivateDisplayConfigurationPolicy, AllowsUsableExistingModeWithoutMatchingPreference) {
-  EXPECT_TRUE(configuration::usable_current_mode(true, true, 3840, 2160, 115.88, 2.5));
-  EXPECT_TRUE(configuration::usable_current_mode(true, true, 1920, 1080, 60, 1));
-  EXPECT_FALSE(configuration::usable_current_mode(false, true, 3840, 2160, 120, 1));
-  EXPECT_FALSE(configuration::usable_current_mode(true, false, 3840, 2160, 120, 1));
-  EXPECT_FALSE(configuration::usable_current_mode(true, true, 0, 2160, 120, 1));
-  EXPECT_FALSE(configuration::usable_current_mode(true, true, 3840, 0, 120, 1));
-  EXPECT_FALSE(configuration::usable_current_mode(true, true, 3840, 2160, 0, 1));
-  EXPECT_FALSE(configuration::usable_current_mode(true, true, 3840, 2160, 120, 0));
-  EXPECT_FALSE(configuration::usable_current_mode(true, true, 3840, 2160, std::numeric_limits<double>::quiet_NaN(), 1));
-}
-
 TEST(LinuxPrivateDisplayModePolicy, AcceptsFractionalEquivalentRefresh) {
   EXPECT_TRUE(policy::refresh_matches(59.95, 60.0));
   EXPECT_TRUE(policy::refresh_matches(119.88, 120.0));
+  EXPECT_TRUE(policy::refresh_matches(240.0 * 1000.0 / 1001.0, 240.0));
+  EXPECT_TRUE(policy::refresh_matches(480.0 * 1000.0 / 1001.0, 480.0));
 }
 
 TEST(LinuxPrivateDisplayModePolicy, RejectsNearestDifferentRefresh) {

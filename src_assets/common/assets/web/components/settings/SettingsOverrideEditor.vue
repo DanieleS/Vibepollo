@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n';
 
 import {
   clientOverrideableKeys,
+  gamepadOptionsForPlatform,
   settingsCategories,
   settingsFields,
   fieldForPlatform,

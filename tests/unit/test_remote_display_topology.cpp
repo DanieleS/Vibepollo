@@ -197,6 +197,38 @@ TEST(RemoteDisplayTopology, RemoteMonitorExtendsExistingPhysicalDesktop) {
   EXPECT_EQ(composed[1].x, 2020);
 }
 
+TEST(RemoteDisplayTopology, RemoteMonitorUsesLogicalFootprintOfScaledPhysicalDesktop) {
+  remote_display_topology::coordinator_t coordinator;
+  std::vector<remote_display_topology::node_t> composed;
+  remote_display_topology::node_t physical {
+    .id = "scaled-physical",
+    .label = "Scaled 4K Display",
+    .physical = true,
+    .active = true,
+    .x = 0,
+    .y = 0,
+    .configured_mode = {3840, 2160, 120},
+  };
+  physical.layout_width = 1920;
+  physical.layout_height = 1080;
+  coordinator.set_physical_baseline({physical});
+  coordinator.set_runtime_callbacks({
+    .create_or_reclaim = [](const auto &, const auto &, const auto &) { return true; },
+    .apply_composed_topology = [&composed](const auto &nodes) {
+      composed = nodes;
+      return true;
+    },
+    .exact_target_has_current_mode_and_dxgi = [](const auto &, const auto &) {
+      return std::optional<std::string> {"Virtual-1"};
+    },
+  });
+
+  ASSERT_TRUE(coordinator.activate_or_resume("client", "Client", {3024, 1890, 120}, 1).ready);
+  ASSERT_EQ(composed.size(), 2);
+  EXPECT_EQ(composed[0].configured_mode.width, 3840);
+  EXPECT_EQ(composed[1].x, 1920);
+}
+
 TEST(RemoteDisplayTopology, RemoteMonitorExtendsPreexistingStreamedVirtualDisplay) {
   remote_display_topology::coordinator_t coordinator;
   std::vector<remote_display_topology::node_t> composed;
@@ -292,13 +324,18 @@ TEST(RemoteDisplayTopology, LinuxCrossClientResumeRetainsOneAppOwnedDisplay) {
   ASSERT_TRUE(app.accepted);
   // Disconnecting the transport leaves the app and its display lease alive.
   const std::string owner {platf::linux_private_display::resume_policy::reservation_owner("mac", "deck", app.token)};
-  const auto resumed = coordinator.reserve_normal_game_identity(owner, "Mac", {3024, 1890, 120});
+  const auto resumed = coordinator.reserve_normal_game_identity(owner, "Mac", {3024, 1890, 120, true});
   ASSERT_TRUE(resumed.accepted);
   EXPECT_FALSE(resumed.newly_reserved);
   EXPECT_EQ(resumed.token, app.token);
   ASSERT_TRUE(coordinator.reapply_composed_topology());
   ASSERT_EQ(composed.size(), 1);
   EXPECT_EQ(composed.front().id, "deck");
+  EXPECT_EQ(composed.front().label, "Mac");
+  EXPECT_EQ(composed.front().configured_mode.width, 3024);
+  EXPECT_EQ(composed.front().configured_mode.height, 1890);
+  EXPECT_EQ(composed.front().configured_mode.refresh_hz, 120);
+  EXPECT_TRUE(composed.front().configured_mode.hdr);
 
   // Only an explicit Remote Monitor request adds the Mac's separate output.
   ASSERT_TRUE(coordinator.activate_or_resume("mac", "Mac", {3024, 1890, 120}, 1).ready);
@@ -527,6 +564,35 @@ TEST(RemoteDisplayTopology, SharedMonitorSurvivesDeferredNormalReleaseAndFailedR
   coordinator.release_drained_normal_game_identities();
   EXPECT_EQ(removed, (std::vector<std::string> {"game"}));
   EXPECT_EQ(coordinator.managed_client_identity_count(), 1u);
+}
+
+TEST(RemoteDisplayTopology, TerminateReleasesAllGameDisplaysAndRetainsMonitorRoles) {
+  remote_display_topology::coordinator_t coordinator;
+  std::vector<std::string> removals;
+  coordinator.set_runtime_callbacks({
+    .create_or_reclaim = [](const auto &, const auto &, const auto &) { return true; },
+    .apply_composed_topology = [](const auto &) { return true; },
+    .exact_target_has_current_mode_and_dxgi = [](const auto &uuid, const auto &) { return std::optional<std::string> {uuid}; },
+    .remove_owned_display = [&removals](const auto &uuid) { removals.push_back(uuid); return true; },
+  });
+  ASSERT_TRUE(coordinator.reserve_normal_game_identity("original", "Original", {}).accepted);
+  ASSERT_TRUE(coordinator.reserve_normal_game_identity("resumed", "Resumed", {}).accepted);
+  ASSERT_TRUE(coordinator.reserve_normal_game_identity("shared", "Shared", {}).accepted);
+  ASSERT_TRUE(coordinator.activate_or_resume("shared", "Shared", {}, 7).ready);
+  ASSERT_TRUE(coordinator.activate_or_resume("monitor", "Monitor", {}, 8).ready);
+  coordinator.transport_lost("monitor", 8);
+
+  coordinator.release_all_normal_game_identities();
+
+  EXPECT_EQ(removals.size(), 2u);
+  EXPECT_NE(std::find(removals.begin(), removals.end(), "original"), removals.end());
+  EXPECT_NE(std::find(removals.begin(), removals.end(), "resumed"), removals.end());
+  EXPECT_TRUE(coordinator.snapshot("shared", 7).ready);
+  EXPECT_TRUE(coordinator.snapshot("monitor", 8).accepted);
+  EXPECT_FALSE(coordinator.generic_virtual_display_cleanup_allowed());
+  EXPECT_EQ(coordinator.managed_client_identity_count(), 2u);
+  coordinator.release_all_normal_game_identities();
+  EXPECT_EQ(removals.size(), 2u);
 }
 
 TEST(RemoteDisplayTopology, TransportLossDefersGlobalCleanupAndExplicitReleasePreservesPeers) {

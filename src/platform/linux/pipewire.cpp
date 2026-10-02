@@ -17,9 +17,9 @@
 // local includes
 #include "cuda.h"
 #include "graphics.h"
-#include "pipewire_format.h"
 #include "hdr_policy.h"
 #include "pipewire_cuda_policy.h"
+#include "pipewire_format.h"
 #include "private_display.h"
 #include "src/main.h"
 #include "src/platform/common.h"
@@ -441,9 +441,7 @@ namespace pipewire {
       spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_Id(format), 0);
       spa_pod_builder_add(b, SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&sizes[0], &sizes[1], &sizes[2]), 0);
       if (gamescope_requested_size_) {
-        // Valve's private SPA_FORMAT_VIDEO_requested_size property:
-        // gamescope/src/pipewire_gamescope.hpp. The ordinary size property
-        // still accepts the native aspect ratio chosen by the compositor.
+        // Valve's private SPA_FORMAT_VIDEO_requested_size property.
         spa_pod_builder_add(b, 0x70000, SPA_POD_Rectangle(&sizes[0]), 0);
       }
       add_framerate_parameters(b, negotiate_maxframerate_);

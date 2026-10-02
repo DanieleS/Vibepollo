@@ -104,6 +104,7 @@ namespace platf {
     set_motion_event_state,  ///< Set motion event state
     set_rgb_led,  ///< Set RGB LED
     set_adaptive_triggers,  ///< Set adaptive triggers
+    haptics_pcm,  ///< 5 ms of 48 kHz S16LE stereo actuator samples
   };
 
   struct gamepad_feedback_msg_t {
@@ -152,6 +153,10 @@ namespace platf {
     std::uint16_t id;
 
     union {
+      struct {
+        std::uint32_t sequence;
+        std::array<std::uint8_t, 960> samples;
+      } haptics;
       struct {
         std::uint16_t lowfreq;
         std::uint16_t highfreq;
@@ -229,7 +234,7 @@ namespace platf {
     dxgi,  ///< DXGI
     cuda,  ///< CUDA
     videotoolbox,  ///< VideoToolbox
-    vulkan,  ///< Vulkan video memory
+    vulkan,  ///< Vulkan
     unknown  ///< Unknown
   };
 
@@ -644,16 +649,6 @@ namespace platf {
      *          consumer joins. Fixed-rate sources retain the normal queue flow.
      */
     [[nodiscard]] virtual bool is_event_driven_capture() const {
-      return false;
-    }
-
-    /**
-     * @brief Whether source timestamps must reach the client without normalization.
-     * @details Initialized before publishing this display and immutable for its
-     *          lifetime, including after capture fails. Encoder threads may read
-     *          this independently of mutable capture delivery state.
-     */
-    [[nodiscard]] virtual bool preserves_source_presentation_timestamps() const {
       return false;
     }
 
@@ -1080,9 +1075,10 @@ namespace platf {
   std::unique_ptr<host_stats_provider_t>
     create_host_stats_provider();
 
+  /** Resolve the render device path used for hardware encoding. */
   std::string resolve_render_device();
   bool has_elevated_privileges(bool all_caps = true);
   [[nodiscard]] bool drop_elevated_privileges(bool all_caps = true);
-  [[nodiscard]] bool drop_effective_elevated_privileges(bool all_caps);
+  [[nodiscard]] bool drop_effective_elevated_privileges(bool all_caps = true);
 
 }  // namespace platf

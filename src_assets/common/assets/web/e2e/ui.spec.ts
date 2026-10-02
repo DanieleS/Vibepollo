@@ -5,7 +5,7 @@ async function host(
   platform = 'linux',
   config: Record<string, unknown> = {},
   ready = true,
-  providers: Record<string, boolean> = {},
+  providers: Record<string, boolean> = { steam: true, lutris: platform === 'linux', mangohud: platform === 'linux' },
 ) {
   const patches: Record<string, unknown>[] = [];
   await page.route('**/api/**', async (route) => {
@@ -63,6 +63,29 @@ async function host(
   return patches;
 }
 
+test('Linux Everyday presents essentials and preserves unrelated values when saving', async ({
+  page,
+}) => {
+  const patches = await host(page, 'linux', {
+    nvenc_twopass: 'full_res',
+    dd_manual_resolution: '2560x1440',
+  });
+  await page.goto('/v2/settings');
+  await expect(page.getByText('Display readiness')).toBeVisible();
+  await expect(page.getByText('Configured for direct capture')).toBeVisible();
+  await expect(page.locator('#setting-virtual_display_mode option').first()).toHaveAttribute(
+    'value',
+    'per_client',
+  );
+  await expect(page.locator('#setting-frame_limiter_auto_virtual_framegen')).toHaveCount(0);
+  await expect(page.locator('#setting-capture')).toHaveCount(0);
+  await expect(page.locator('#setting-controller')).toBeVisible();
+  await page.locator('#setting-stream_audio').uncheck();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect.poll(() => patches.length).toBe(1);
+  expect(patches[0]).toEqual({ stream_audio: false });
+});
+
 test('settings deep links open advanced encoders and back navigation preserves drafts', async ({
   page,
 }) => {
@@ -82,6 +105,19 @@ test('Windows keeps automatic smoothness and platform-specific controls', async 
   await expect(page.getByText('Display readiness')).toHaveCount(0);
   await page.goto('/v2/settings?category=display');
   await expect(page.locator('#setting-dd_use_sunshine_virtual_display_driver')).toBeVisible();
+});
+
+test('unavailable virtual screens explain repair and keep physical selection available', async ({
+  page,
+}) => {
+  await host(page, 'linux', {}, false);
+  await page.goto('/v2/settings');
+  await expect(page.getByText('Setup needs attention', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('link', { name: 'Open Linux setup and troubleshooting' }),
+  ).toBeVisible();
+  await page.locator('#setting-virtual_display_mode').selectOption('disabled');
+  await expect(page.locator('#setting-output_name')).toBeVisible();
 });
 
 test('HTTP save rejection retains the draft', async ({ page }) => {
@@ -144,7 +180,7 @@ test('Linux maintenance offers logs and display setup', async ({ page }) => {
 for (const theme of ['dark', 'light']) {
   test(`${theme} theme and keyboard switches remain usable`, async ({ page }) => {
     await host(page);
-    await page.addInitScript((theme) => localStorage.setItem('vibeshine.theme', theme), theme);
+    await page.addInitScript((theme) => localStorage.setItem('vibepollo.theme', theme), theme);
     await page.goto('/v2/settings');
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
     await page.locator('#setting-stream_audio').focus();
@@ -182,7 +218,14 @@ test('all canonical v2 pages render without client-side exceptions', async ({ pa
   expect(errors).toEqual([]);
 });
 
-test('Linux adapters remain editable while unsupported provider destinations stay hidden', async ({
+test('Linux integration metadata exposes Steam controls', async ({ page }) => {
+  await host(page);
+  await page.goto('/v2/integrations');
+  await expect(page.locator('.integration-row--steam')).toBeVisible();
+  await expect(page.locator('#steam-auto-sync')).toBeVisible();
+});
+
+test('search reaches integration settings and Linux adapters accept a render-device path', async ({
   page,
 }) => {
   const patches = await host(page);
@@ -192,7 +235,10 @@ test('Linux adapters remain editable while unsupported provider destinations sta
   await expect.poll(() => patches.length).toBe(1);
   expect(patches[0]).toEqual({ adapter_name: '/dev/dri/renderD129' });
   await page.getByRole('searchbox', { name: 'Search settings' }).fill('lutris');
-  await expect(page.locator('.settings-destinations a')).toHaveCount(0);
+  await expect(page.locator('.settings-destinations a')).toHaveAttribute(
+    'href',
+    '/v2/integrations#integration-lutris',
+  );
 });
 
 test('Windows Playnite policies load and save inside v2', async ({ page }) => {
@@ -266,7 +312,7 @@ test('edits made during a settings save remain unsaved', async ({ page }) => {
 test('physical screen controls fit with long output names at intermediate widths', async ({
   page,
 }) => {
-  await host(page, 'windows', {
+  await host(page, 'linux', {
     virtual_display_mode: 'disabled',
     output_name:
       'An unusually long display name with a persistent device identifier - ' + 'a'.repeat(100),
@@ -294,6 +340,47 @@ test('settings reflow at a 200% zoom-equivalent viewport with forced colors and 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(page.locator('.save-bar')).toHaveCount(0);
+});
+
+test('MangoHud saves preserve later edits and report rejected requests', async ({ page }) => {
+  await host(page);
+  await page.route('**/api/frame-limiter/status', async (route) => {
+    await route.fulfill({
+      json: {
+        enabled: true,
+        configured_provider: 'mangohud',
+        fps_limit: 0,
+        mangohud_available: true,
+      },
+    });
+  });
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  let calls = 0;
+  await page.route('**/api/config', async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.fallback();
+      return;
+    }
+    const call = ++calls;
+    if (call === 1) await pending;
+    await route.fulfill({ json: { status: call === 1 } });
+  });
+  await page.goto('/v2/integrations#integration-mangohud');
+  await page.locator('#mangohud-fps-limit').fill('90');
+  const section = page.locator('section[aria-labelledby="mangohud-settings-heading"]');
+  await section.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect.poll(() => calls).toBe(1);
+  await page.locator('#mangohud-fps-limit').fill('120');
+  finish();
+  await expect(section.getByRole('button', { name: 'Apply', exact: true })).toBeEnabled();
+  await expect(page.locator('#mangohud-fps-limit')).toHaveValue('120');
+  await section.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect.poll(() => calls).toBe(2);
+  await expect(section.getByRole('button', { name: 'Apply', exact: true })).toBeEnabled();
+  await expect(page.locator('#mangohud-fps-limit')).toHaveValue('120');
 });
 
 test('mobile navigation keeps hidden controls out of the tab order and releases the page on resize', async ({
@@ -341,6 +428,36 @@ test('appearance controls persist the chosen theme and follow system appearance'
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await page.emulateMedia({ colorScheme: 'light' });
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+});
+
+test('overview leads with readiness and keeps display guidance available on demand', async ({
+  page,
+}) => {
+  await host(page);
+  await page.goto('/v2/');
+  await expect(page.getByRole('heading', { name: 'Ready to stream' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Pair a device', exact: true })).toHaveAttribute(
+    'href',
+    '/v2/pair',
+  );
+  await expect(page.locator('.linux-capture')).not.toHaveAttribute('open', '');
+  await page.locator('.linux-capture > summary').click();
+  await expect(page.locator('.linux-capture__body')).toBeVisible();
+  await page.getByRole('link', { name: 'Pair a device', exact: true }).click();
+  await expect(page.locator('.nav-link[aria-current="page"]')).toHaveText('Devices');
+});
+
+test('overview shows repair guidance when display setup is unavailable', async ({ page }) => {
+  await host(page, 'linux', {}, false);
+  await page.goto('/v2/');
+  await expect(page.getByRole('heading', { name: 'Needs attention', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Review setup', exact: true })).toHaveAttribute(
+    'href',
+    '/v2/settings?category=display',
+  );
+  await expect(
+    page.getByRole('link', { name: 'Open Linux setup and troubleshooting' }),
+  ).toBeVisible();
 });
 
 test('unknown readiness and unavailable utilization do not render as successful measurements', async ({
@@ -462,9 +579,8 @@ for (const platform of ['linux', 'windows']) {
     });
     await page.goto('/v2/library/new');
     await page.locator('#app-name').fill('A new game');
-    expect(requests.some((path) => /^\/api\/(steam|lutris)\//.test(path))).toBe(false);
+    await expect(page.getByRole('button', { name: 'Browse games', exact: true })).toBeVisible();
     if (platform === 'linux') {
-      await expect(page.getByRole('button', { name: 'Browse games', exact: true })).toHaveCount(0);
       expect(requests.some((path) => path.startsWith('/api/playnite/'))).toBe(false);
     } else {
       await expect.poll(() => requests.includes('/api/playnite/status')).toBe(true);
@@ -662,8 +778,8 @@ test('encoder failures direct the overview to diagnostics', async ({ page }) => 
   );
 });
 
-test('unmigrated Linux services are neither offered nor called', async ({ page }) => {
-  await host(page, 'linux');
+test('unavailable Linux providers are neither offered nor called', async ({ page }) => {
+  await host(page, 'linux', {}, true, {});
   const providerRequests: string[] = [];
   page.on('request', (request) => {
     if (/\/api\/(steam|lutris|frame-limiter)\//.test(request.url()))
@@ -677,11 +793,6 @@ test('unmigrated Linux services are neither offered nor called', async ({ page }
   const setup = page.getByRole('dialog');
   await expect(setup.getByRole('checkbox')).toHaveCount(0);
   await setup.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await page.goto('/v2/settings');
-  await expect(
-    page.locator('#setting-virtual_display_mode, #setting-frame_limiter_provider'),
-  ).toHaveCount(0);
-  await expect(page.locator('.linux-capture')).toHaveCount(0);
   expect(providerRequests).toEqual([]);
 });
 

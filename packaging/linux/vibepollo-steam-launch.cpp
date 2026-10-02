@@ -6,6 +6,9 @@
  * helper. User-owned Steam metadata is therefore never parsed by the
  * capability-bearing machine host or broker.
  */
+#ifndef _GNU_SOURCE
+  #define _GNU_SOURCE
+#endif
 #include "src/platform/linux/mangohud_policy.h"
 #include "src/platform/linux/mangohud_state.h"
 #include "src/steam_integration.h"
@@ -165,11 +168,13 @@ namespace {
     char **argv,
     std::uint32_t &app_id
   ) {
-    if (argc != 9 || (std::string_view(argv[1]) != "--global" &&
-                      (!parse_u32(argv[1], app_id) || app_id == 0))) {
+    if (argc < 2) return std::nullopt;
+    const bool global = std::string_view(argv[1]) == "--global";
+    if ((global && argc != 12) ||
+        (!global && (argc != 13 || !parse_u32(argv[1], app_id) || app_id == 0))) {
       return std::nullopt;
     }
-    if (std::string_view(argv[1]) == "--global") app_id = 1;
+    if (global) app_id = 1;
     platf::steam::session_launch_policy_t policy;
     policy.provider = argv[2];
     if (!parse_u32(argv[3], policy.limit_millihz)) {
@@ -178,14 +183,38 @@ namespace {
     policy.preset = argv[4];
     if ((std::string_view(argv[5]) != "0" && std::string_view(argv[5]) != "1") ||
         (std::string_view(argv[7]) != "0" && std::string_view(argv[7]) != "1") ||
-        (std::string_view(argv[8]) != "0" && std::string_view(argv[8]) != "1")) {
+        (std::string_view(argv[8]) != "0" && std::string_view(argv[8]) != "1") ||
+        (!global && std::string_view(argv[9]) != "0" && std::string_view(argv[9]) != "1") ||
+        (global && std::string_view(argv[9]) != "sdr" &&
+                   std::string_view(argv[9]) != "sdr10" &&
+                   std::string_view(argv[9]) != "hdr") ||
+        (std::string_view(argv[10]) != "0" && std::string_view(argv[10]) != "1") ||
+        (std::string_view(argv[11]) != "0" && std::string_view(argv[11]) != "1") ||
+        (!global && std::string_view(argv[12]) != "0" && std::string_view(argv[12]) != "1")) {
       return std::nullopt;
     }
     policy.always_show_graph = std::string_view(argv[5]) == "1";
     policy.limiter_method = argv[6];
     policy.smooth_motion = std::string_view(argv[7]) == "1";
     policy.smooth_motion_graphics_queue = std::string_view(argv[8]) == "1";
-    if (platf::steam::session_launch_command(app_id, policy).empty()) {
+    policy.hdr = global ? std::string_view(argv[9]) == "hdr" : std::string_view(argv[9]) == "1";
+    policy.wayland_hdr_compatibility = std::string_view(argv[10]) == "1";
+    policy.proton_dualsense_compatibility = std::string_view(argv[11]) == "1";
+    policy.playstation_controller_attached = !global && std::string_view(argv[12]) == "1";
+    if (policy.playstation_controller_attached && !policy.proton_dualsense_compatibility) {
+      return std::nullopt;
+    }
+    if (policy.wayland_hdr_compatibility && !policy.hdr) {
+      return std::nullopt;
+    }
+    auto validation_policy = policy;
+    if (global) {
+      // A global SDR policy still needs the hook even when no limiter is
+      // active. Use HDR solely to exercise the direct policy validator's
+      // feature-presence requirement; the helper receives argv[9] verbatim.
+      validation_policy.hdr = true;
+    }
+    if (platf::steam::session_launch_command(app_id, validation_policy).empty()) {
       return std::nullopt;
     }
     return policy;
@@ -369,6 +398,72 @@ namespace {
                           std::to_string(ready_timeout_ms / 1000) + " s; launching anyway");
   }
 
+  bool virtual_dualsense_ready() {
+    std::error_code error;
+    const fs::path usb_devices = "/sys/bus/usb/devices";
+    for (fs::directory_iterator entry(usb_devices, error), end;
+         !error && entry != end;
+         entry.increment(error)) {
+      const auto canonical = fs::weakly_canonical(entry->path(), error);
+      if (error) {
+        error.clear();
+        continue;
+      }
+      if (canonical.string().find("/devices/platform/vibeshine_ds5_hcd.") == std::string::npos) {
+        continue;
+      }
+      std::ifstream vendor(entry->path() / "idVendor");
+      std::ifstream product(entry->path() / "idProduct");
+      std::string vendor_id;
+      std::string product_id;
+      if (vendor >> vendor_id && product >> product_id &&
+          vendor_id == "054c" && product_id == "0ce6") {
+        const auto interface_prefix = entry->path().filename().string() + ":";
+        std::error_code interface_error;
+        for (fs::directory_iterator interface(usb_devices, interface_error), interface_end;
+             !interface_error && interface != interface_end;
+             interface.increment(interface_error)) {
+          if (!interface->path().filename().string().starts_with(interface_prefix)) {
+            continue;
+          }
+          const auto sound_root = interface->path() / "sound";
+          std::error_code card_error;
+          for (fs::directory_iterator card(sound_root, card_error), card_end;
+               !card_error && card != card_end;
+               card.increment(card_error)) {
+            std::error_code pcm_error;
+            for (fs::directory_iterator pcm(card->path(), pcm_error), pcm_end;
+                 !pcm_error && pcm != pcm_end;
+                 pcm.increment(pcm_error)) {
+              const auto name = pcm->path().filename().string();
+              if (name.starts_with("pcm") && name.ends_with("p")) {
+                return true;
+              }
+            }
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  void wait_for_virtual_dualsense() {
+    if (virtual_dualsense_ready()) {
+      return;
+    }
+    report(LOG_INFO, "PlayStation controller attached; waiting for the virtual DualSense before Proton launch");
+    constexpr int ready_timeout_ms = 2000;
+    constexpr int poll_ms = 25;
+    for (int waited = 0; waited < ready_timeout_ms; waited += poll_ms) {
+      sleep_milliseconds(poll_ms);
+      if (virtual_dualsense_ready()) {
+        report(LOG_INFO, "Virtual DualSense ready after " + std::to_string(waited + poll_ms) + " ms");
+        return;
+      }
+    }
+    report(LOG_WARNING, "Virtual DualSense did not enumerate within 2 s; launching anyway");
+  }
+
   int global_limiter(char **argv) {
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
         !install_clean_environment()) return 126;
@@ -389,7 +484,7 @@ namespace {
     std::vector<std::string> arguments {
       "/usr/bin/python3", "-I",
       "/usr/libexec/vibeshine/vibepollo-global-limiter.py",
-      argv[2], argv[3], argv[4], argv[5], argv[6]
+      argv[2], argv[3], argv[4], argv[5], argv[6], argv[9], argv[10], argv[11]
     };
     arguments.insert(arguments.end(), roots.begin(), roots.end());
     std::vector<char *> pointers;
@@ -457,14 +552,35 @@ namespace {
       }
     }
 
+    const bool proton_wayland_hdr_compatibility =
+      policy.wayland_hdr_compatibility && game->launch_os == "windows";
     if (setenv("NVPRESENT_ENABLE_SMOOTH_MOTION", policy.smooth_motion ? "1" : "", 1) != 0 ||
         setenv("NVPRESENT_QUEUE_FAMILY",
-               policy.smooth_motion_graphics_queue ? "1" : "", 1) != 0) {
+               policy.smooth_motion_graphics_queue ? "1" : "", 1) != 0 ||
+        setenv("PROTON_ENABLE_HDR", policy.hdr ? "1" : "0", 1) != 0 ||
+        setenv("DXVK_HDR", policy.hdr ? "1" : "0", 1) != 0 ||
+        (proton_wayland_hdr_compatibility &&
+         (setenv("ENABLE_HDR_WSI", "1", 1) != 0 ||
+          setenv("PROTON_ENABLE_WAYLAND", "1", 1) != 0))) {
       report(LOG_ERR, "could not install launch policy");
       return 1;
     }
+    if (policy.proton_dualsense_compatibility && game->launch_os == "windows") {
+      if (setenv("PROTON_KEEP_SONY_AUDIO_ENDPOINT_VISIBLE", "1", 0) != 0 ||
+          setenv("PROTON_SONY_WINDOWS_DEVICE_NAMES", "1", 0) != 0) {
+        report(LOG_ERR, "could not install DualSense compatibility policy");
+        return 1;
+      }
+    }
+    if (proton_wayland_hdr_compatibility) {
+      report(LOG_INFO, "Wayland HDR compatibility enabled for direct Proton launch");
+    }
 
     ensure_steam_client();
+    if (policy.proton_dualsense_compatibility &&
+        policy.playstation_controller_attached && game->launch_os == "windows") {
+      wait_for_virtual_dualsense();
+    }
 
     // Steam Launch Options are user-authored shell expressions. They are
     // interpreted only here, after irreversible transition to that same UID.
@@ -489,42 +605,93 @@ namespace {
     return result;
   }
 
+  std::uint64_t current_boot_ticks() {
+    const long ticks_per_sec = sysconf(_SC_CLK_TCK);
+    if (ticks_per_sec <= 0) return 0;
+    timespec boot {};
+    if (clock_gettime(CLOCK_BOOTTIME, &boot) != 0) return 0;
+    return static_cast<std::uint64_t>(boot.tv_sec) * static_cast<std::uint64_t>(ticks_per_sec) +
+           static_cast<std::uint64_t>(boot.tv_nsec) *
+             static_cast<std::uint64_t>(ticks_per_sec) / 1000000000ULL;
+  }
+
+  int lock_big_picture_state(const char *path) {
+    const int state = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+    if (state < 0) return -1;
+    struct stat attributes {};
+    if (fchmod(state, 0600) != 0 || fstat(state, &attributes) != 0 ||
+        !S_ISREG(attributes.st_mode) || attributes.st_uid != getuid() ||
+        (attributes.st_mode & 0777) != 0600 || attributes.st_nlink != 1 ||
+        flock(state, LOCK_EX | LOCK_NB) != 0) {
+      close(state);
+      return -1;
+    }
+    return state;
+  }
+
   // Runs as the selected desktop user. The machine host cannot inspect or
   // signal that user's games, and must never parse this user-owned state.
   int big_picture(std::string_view uri) {
-    if (!install_clean_environment()) return 126;
-    const bool opening = uri == "steam://open/bigpicture";
-    const auto state_path = fs::path(std::getenv("XDG_RUNTIME_DIR")) / "vibepollo-big-picture.json";
-    const int state = open(state_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
-    struct stat attributes {};
-    if (state < 0) return 126;
-    if (fstat(state, &attributes) != 0 || !S_ISREG(attributes.st_mode) ||
-        attributes.st_uid != getuid() || (attributes.st_mode & 0777) != 0600 ||
-        attributes.st_nlink != 1 || flock(state, LOCK_EX | LOCK_NB) != 0) {
-      close(state);
-      return 126;
+    const bool env_ok = install_clean_environment();
+    if (!env_ok) {
+      syslog(LOG_WARNING, "Big Picture environment sanitization failed; handing off to Steam without cleanup state");
     }
+    const bool opening = uri == "steam://open/bigpicture";
+    // The URI is delivered to an already-running client. Start that client in
+    // its own user unit first, or a cold host never reaches Big Picture.
+    if (opening) ensure_steam_client();
+
+    int state = -1;
+    struct stat attributes {};
+    if (env_ok) {
+      if (const char *runtime = std::getenv("XDG_RUNTIME_DIR")) {
+        const auto state_path = fs::path(runtime) / "vibepollo-big-picture.json";
+        state = lock_big_picture_state(state_path.c_str());
+      }
+      if (state >= 0) {
+        if (fstat(state, &attributes) != 0) {
+          close(state);
+          state = -1;
+        }
+      } else {
+        syslog(LOG_WARNING, "Big Picture game cleanup unavailable: cannot lock session state");
+      }
+    }
+
     try {
-      if (opening) {
+      if (state >= 0 && opening) {
         // Invalidate a previous session even if configuration or sampling fails.
         if (ftruncate(state, 0) != 0) throw std::runtime_error("cannot reset baseline");
         bool close_games = true;
-        std::ifstream settings(fs::path(std::getenv("XDG_CONFIG_HOME")) / "vibepollo/steam-big-picture.json");
-        if (settings) {
-          const auto config = nlohmann::json::parse(settings);
-          close_games = config.value("close-games", true);
+        if (const char *config_home = std::getenv("XDG_CONFIG_HOME")) {
+          std::ifstream settings(fs::path(config_home) / "vibepollo/steam-big-picture.json");
+          if (settings) {
+            const auto config = nlohmann::json::parse(settings);
+            close_games = config.value("close-games", true);
+          }
         }
         if (close_games) {
+          const auto started_after_ticks = current_boot_ticks();
           const auto baseline = big_picture_snapshot();
-          if (!baseline || !baseline->complete) throw std::runtime_error("complete baseline unavailable");
-          nlohmann::json saved = {{"version", 1}, {"pids", nlohmann::json::array()}};
-          for (const auto &[pid, process] : baseline->processes) saved["pids"].push_back({pid, process.steam_app_id});
+          if (!baseline) throw std::runtime_error("baseline unavailable");
+          if (!started_after_ticks && !baseline->complete) {
+            throw std::runtime_error("complete baseline unavailable");
+          }
+          nlohmann::json saved = {
+            {"version", 2},
+            {"started_after_ticks", started_after_ticks},
+            {"pids", nlohmann::json::array()}
+          };
+          for (const auto &[pid, process] : baseline->processes) {
+            saved["pids"].push_back({pid, process.steam_app_id});
+          }
           const auto bytes = saved.dump();
-          if (bytes.size() > 4 * 1024 * 1024 || write(state, bytes.data(), bytes.size()) != static_cast<ssize_t>(bytes.size())) {
+          if (bytes.size() > 4 * 1024 * 1024 ||
+              write(state, bytes.data(), bytes.size()) != static_cast<ssize_t>(bytes.size())) {
             throw std::runtime_error("cannot write baseline");
           }
         }
-      } else {
+      } else if (state >= 0) {
         // Consume once before signalling; repeated Quit requests cannot reuse
         // a baseline to claim a later game. Missing state means close UI only.
         std::string bytes;
@@ -535,15 +702,19 @@ namespace {
         if (ftruncate(state, 0) != 0) throw std::runtime_error("cannot consume baseline");
         if (!bytes.empty()) {
           const auto saved = nlohmann::json::parse(bytes);
-          if (saved.at("version").get<int>() != 1) throw std::runtime_error("unknown baseline version");
+          const auto version = saved.at("version").get<int>();
+          if (version != 1 && version != 2) throw std::runtime_error("unknown baseline version");
           platf::steam::lifecycle::process_snapshot baseline;
           for (const auto &value : saved.at("pids")) {
             const auto pid = value.at(0).get<platf::steam::lifecycle::process_id_t>();
             baseline.processes[pid].pid = pid;
             baseline.processes[pid].steam_app_id = value.at(1).get<std::uint32_t>();
           }
+          const auto started_after_ticks = version == 2 ?
+            saved.at("started_after_ticks").get<std::uint64_t>() : 0;
           if (const auto current = big_picture_snapshot()) {
-            const auto tree = platf::steam::lifecycle::big_picture_tree(baseline, *current);
+            const auto tree = platf::steam::lifecycle::big_picture_tree(
+              baseline, *current, started_after_ticks);
             auto controller = platf::steam::lifecycle::native_process_controller();
             platf::steam::lifecycle::stop_options options;
             options.grace_period = std::chrono::seconds(5);
@@ -554,15 +725,17 @@ namespace {
         }
       }
     } catch (const std::exception &error) {
-      (void) ftruncate(state, 0);
+      if (state >= 0) (void) ftruncate(state, 0);
       syslog(LOG_WARNING, "Big Picture game cleanup unavailable: %s", error.what());
     }
     // Keep the lock until the fixed Steam handoff replaces this process.
     // Ordinary stream disconnects never execute the app's undo command.
     const std::string target(uri);
     execl("/usr/bin/steam", "/usr/bin/steam", target.c_str(), nullptr);
-    (void) ftruncate(state, 0);
-    close(state);
+    if (state >= 0) {
+      (void) ftruncate(state, 0);
+      close(state);
+    }
     return 126;
   }
 }
@@ -578,7 +751,9 @@ int main(int argc, char **argv) {
   const auto policy = parse_policy(argc, argv, app_id);
   if (!policy) {
     std::cerr << "usage: vibepollo-steam-launch APPID PROVIDER LIMIT_MILLIHZ "
-                 "PRESET GRAPH METHOD SMOOTH QUEUE\n";
+                 "PRESET GRAPH METHOD SMOOTH QUEUE HDR WAYLAND_HDR_COMPATIBILITY DUALSENSE_COMPATIBILITY\n"
+                 "       vibepollo-steam-launch --global PROVIDER LIMIT_MILLIHZ "
+                 "PRESET GRAPH METHOD 0 0 COLOR_MODE WAYLAND_HDR_COMPATIBILITY DUALSENSE_COMPATIBILITY\n";
     return 2;
   }
   if (std::string_view(argv[1]) == "--global") return global_limiter(argv);
