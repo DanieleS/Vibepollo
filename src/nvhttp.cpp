@@ -5975,7 +5975,13 @@ namespace nvhttp {
       std::vector<remote_session::app_t> remote_configured_apps;
       remote_configured_apps.reserve(configured_apps.size());
       for (const auto &configured : configured_apps) {
-        remote_configured_apps.push_back({static_cast<std::int32_t>(util::from_view(configured.id)), configured.uuid, configured.name, false});
+        const auto appid = util::from_view(configured.id);
+        // Matches /applist: the remote-session controls replace the legacy synthetic
+        // input/terminate entries, so those are never part of the catalogue.
+        if (appid == proc::input_only_app_id || appid == proc::terminate_app_id) {
+          continue;
+        }
+        remote_configured_apps.push_back({static_cast<std::int32_t>(appid), configured.uuid, configured.name, false});
       }
 
       const auto current_appid = proc::proc.running();
@@ -5985,13 +5991,12 @@ namespace nvhttp {
       const remote_session::caller_t caller {
         .uuid = identity.uuid,
         .paired = !identity.uuid.empty(),
-        .may_view = has_client_perm(verified_client, PERM::_allow_view),
+        .may_view = has_client_perm(verified_client, PERM::view),
         .may_launch = has_client_perm(verified_client, PERM::launch),
         .may_terminate = has_client_perm(verified_client, PERM::launch),
-        .input_enabled = config::input.enable_input_only_mode,
       };
       const remote_session::game_t game {
-        .running = current_appid > 0,
+        .running = current_appid > 0 && current_appid != proc::input_only_app_id,
         .owner_uuid = active_session.client_uuid,
         .generation = active_session_generation(active_session),
         .app = current_app ? remote_session::app_t {static_cast<std::int32_t>(util::from_view(current_app->id)), current_app->uuid, current_app->name, false} : remote_session::app_t {},
