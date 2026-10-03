@@ -1,6 +1,7 @@
 #!/usr/bin/bash
 
 set -uo pipefail
+export LC_ALL=C
 
 readonly settings_file=/etc/vibepollo/machine.conf
 readonly runtime_root=/run/vibepollo

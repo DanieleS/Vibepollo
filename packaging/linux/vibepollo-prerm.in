@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# stat %F and other tool output is compared against English strings below.
+LC_ALL=C
+export LC_ALL
+
 vibepollo_controller="@VIBESHINE_PRIVILEGED_LIBEXEC_INSTALL_DIR@/vibepollo-session-controller"
 vibepollo_machine_host="@VIBESHINE_PRIVILEGED_LIBEXEC_INSTALL_DIR@/vibepollo-machine-host"
 vibepollo_session_record=/run/vibepollo/session.env

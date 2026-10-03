@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# stat %F and other tool output is compared against English strings below.
+LC_ALL=C
+export LC_ALL
+
 if command -v systemd-sysusers >/dev/null 2>&1; then
   systemd-sysusers "@VIBESHINE_SYSUSERS_INSTALL_DIR@/vibeshine-vkms.conf" || \
     echo "warning: could not create the dedicated vibeshine-vkms control group."

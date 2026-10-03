@@ -1,5 +1,8 @@
 # shellcheck shell=bash
 
+# stat %F output is compared against English strings below.
+export LC_ALL=C
+
 do_secure_executables() {
   # pacman's own systemd-sysusers hook only runs after the whole transaction,
   # but this scriptlet starts vibeshine-vkms-control.socket (SocketGroup=

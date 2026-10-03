@@ -98,6 +98,9 @@ require(controller_unit, "WantedBy=graphical.target", "controller unit")
 for forbidden in ("Requires=", "CAP_SYS_ADMIN", "CAP_DAC_OVERRIDE", "ConditionPathExists=", "ReadWritePaths="):
     forbid(controller_unit_directives, forbidden, "controller unit")
 
+# stat %F is localized; on a non-English host every policy check would fail.
+require(controller, "set -uo pipefail\nexport LC_ALL=C\n", "controller locale")
+
 for field in (
     "--property=User",
     "--property=Name",
