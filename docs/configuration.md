@@ -4958,8 +4958,9 @@ itself keeps only totals), and [SuccessStory](https://github.com/Lacro59/playnit
 achievements. Vibepollo only reads their files. It keeps those paths, with the last complete library, in
 `playnite_stats.json` next to its other state, and serves them to clients as play statistics and achievements; see
 [GameStream Migration](gamestream_migration.md#play-statistics-and-achievements). Without GameActivity, clients get
-Playnite's totals but no history; without SuccessStory, no achievements. Either can be turned off with
-[playnite_gameactivity](#playnite_gameactivity) and [playnite_successstory](#playnite_successstory).
+Playnite's totals but no history; without SuccessStory, no achievements. The web UI's Playnite section shows whether
+each extension's data was found. Either can be turned off with [playnite_gameactivity](#playnite_gameactivity) and
+[playnite_successstory](#playnite_successstory).
 
 ### playnite_enabled
 

@@ -320,6 +320,24 @@ namespace successstory {
     return std::nullopt;
   }
 
+  bool data_found(const fs::path &data_dir) {
+    if (data_dir.empty()) {
+      return false;
+    }
+    std::error_code ec;
+    fs::directory_iterator it(data_dir / "SuccessStory", ec);
+    const fs::directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+      const auto &path = it->path();
+      std::error_code file_ec;
+      if (lower(utf8_string(path.extension())) == ".json" && is_guid_like(play_stats::normalize_id(utf8_string(path.stem()))) &&
+          fs::is_regular_file(path, file_ec)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   fs::path utf8_path(std::string_view text) {
     // A std::string is the ANSI code page to MSVC's std::filesystem; char8_t is UTF-8 everywhere.
     std::u8string u8;

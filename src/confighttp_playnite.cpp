@@ -38,12 +38,14 @@
   // local includes
   #include "config_playnite.h"
   #include "confighttp.h"
+  #include "gameactivity.h"
   #include "httpcommon.h"
   #include "logging.h"
   #include "log_export.h"
   #include "src/platform/windows/ipc/misc_utils.h"
   #include "src/platform/windows/playnite_integration.h"
   #include "state_storage.h"
+  #include "successstory.h"
   #include "version_compare.h"
   #include "uuid.h"
 
@@ -129,6 +131,33 @@ namespace confighttp {
 
   // No longer needed: old fallback path resolver removed with AssocQueryString-based detection
 
+  // The compatible Playnite extensions whose data Vibepollo reads for clients: whether each is
+  // turned on in the config, whether the connector has said where its data lives, and whether
+  // any data is there. Looking for one *.json per extension is cheap enough for a status poll.
+  static nlohmann::json compatible_extensions_status() {
+    const auto paths = platf::playnite::get_stats_paths();
+    const auto success_story_dir = successstory::utf8_path(paths.success_story_data);
+    const auto game_activity_dir = gameactivity::resolve_data_dir(paths.game_activity_data, paths.success_story_data);
+    return {
+      {"successstory",
+       {
+         {"enabled", config::playnite.successstory},
+         {"known", !success_story_dir.empty()},
+         {"found", successstory::data_found(success_story_dir)},
+         {"data_dir", successstory::utf8_string(success_story_dir)},
+         {"url", "https://github.com/Lacro59/playnite-successstory-plugin"},
+       }},
+      {"gameactivity",
+       {
+         {"enabled", config::playnite.gameactivity},
+         {"known", !game_activity_dir.empty()},
+         {"found", gameactivity::data_found(game_activity_dir)},
+         {"data_dir", successstory::utf8_string(game_activity_dir)},
+         {"url", "https://github.com/Lacro59/playnite-gameactivity-plugin"},
+       }},
+    };
+  }
+
   void getPlayniteStatus(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -171,6 +200,11 @@ namespace confighttp {
       update_available = version_compare::compare_semver(installed_ver, packaged_ver) < 0;
     }
     out["update_available"] = update_available;
+    try {
+      out["extensions"] = compatible_extensions_status();
+    } catch (const std::exception &e) {
+      BOOST_LOG(debug) << "Playnite status: compatible extensions unavailable: " << e.what();
+    }
     // No session readiness flag; IPC works through RDP/lock. Frontend derives readiness from installed/active.
     // Reduce verbosity: this endpoint can be polled frequently by the UI.
     // Log at debug level instead of info to avoid log spam while still

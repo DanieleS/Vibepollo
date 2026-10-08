@@ -107,6 +107,12 @@ namespace successstory {
    */
   std::optional<std::filesystem::path> resolve_icon(std::string_view url, const std::vector<std::filesystem::path> &roots);
 
+  /**
+   * @brief SuccessStory has written something under @p data_dir: at least one game file in its
+   * `SuccessStory` subfolder. The same test as store_t::available(), without reading any file.
+   */
+  bool data_found(const std::filesystem::path &data_dir);
+
   /// @brief A path from UTF-8 text, as the connector and SuccessStory write them.
   std::filesystem::path utf8_path(std::string_view text);
 

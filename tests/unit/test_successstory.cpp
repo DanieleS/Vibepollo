@@ -245,6 +245,16 @@ TEST(SuccessStoryStore, ReadsCachesAndNoticesChanges) {
   EXPECT_FALSE(store.game("..\\..\\boot"));
 }
 
+TEST(SuccessStoryStore, DataFoundLooksForOneGameFile) {
+  temp_dir_t tmp;
+  EXPECT_FALSE(successstory::data_found({}));
+  EXPECT_FALSE(successstory::data_found(tmp.path()));
+  write(tmp.path() / "SuccessStory" / "notes.json", "{}");
+  EXPECT_FALSE(successstory::data_found(tmp.path()));
+  write(tmp.path() / "SuccessStory" / (k_hades + ".json"), game_file(k_hades, {item("a", nullptr)}).dump());
+  EXPECT_TRUE(successstory::data_found(tmp.path()));
+}
+
 TEST(SuccessStoryStore, UnlocksInARangeNewestFirstSkippingIgnoredGames) {
   temp_dir_t tmp;
   const auto folder = tmp.path() / "SuccessStory";
