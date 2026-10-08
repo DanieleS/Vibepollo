@@ -4958,7 +4958,8 @@ itself keeps only totals), and [SuccessStory](https://github.com/Lacro59/playnit
 achievements. Vibepollo only reads their files. It keeps those paths, with the last complete library, in
 `playnite_stats.json` next to its other state, and serves them to clients as play statistics and achievements; see
 [GameStream Migration](gamestream_migration.md#play-statistics-and-achievements). Without GameActivity, clients get
-Playnite's totals but no history; without SuccessStory, no achievements.
+Playnite's totals but no history; without SuccessStory, no achievements. Either can be turned off with
+[playnite_gameactivity](#playnite_gameactivity) and [playnite_successstory](#playnite_successstory).
 
 ### playnite_enabled
 
@@ -5050,6 +5051,50 @@ Default: `true` on Windows
     <tr>
         <td>Example</td>
         <td>@code{}playnite_sync_metadata = false@endcode</td>
+    </tr>
+</table>
+
+### playnite_gameactivity
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td>
+            Reads the play history that Playnite's <a href="https://github.com/Lacro59/playnite-gameactivity-plugin">GameActivity</a>
+            extension records, to show clients when and how much each game is played (<code>/appstats</code>).
+            Set it to <code>false</code> and Vibepollo behaves exactly as if GameActivity were not installed:
+            <code>/appstats</code> answers with <code>activity: false</code> and only Playnite's totals.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td>@code{}true@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td>@code{}playnite_gameactivity = false@endcode</td>
+    </tr>
+</table>
+
+### playnite_successstory
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td>
+            Reads the achievements that Playnite's <a href="https://github.com/Lacro59/playnite-successstory-plugin">SuccessStory</a>
+            extension keeps, to show them to clients (<code>/appachievements</code>, and the achievements part of
+            <code>/appstats</code>). Set it to <code>false</code> and Vibepollo behaves exactly as if SuccessStory were
+            not installed: the achievements endpoints answer 404 and <code>/appstats</code> has <code>achievements: null</code>.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td>@code{}true@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td>@code{}playnite_successstory = false@endcode</td>
     </tr>
 </table>
 

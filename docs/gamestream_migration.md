@@ -53,8 +53,9 @@ Playnite itself keeps only totals (playtime, play count, last played), which the
 The history of sessions is read from the files of Playnite's [GameActivity](https://github.com/Lacro59/playnite-gameactivity-plugin)
 extension (`<ExtensionsData>\afbb1a0d-04a1-4d0c-9afa-c6e42ca855b4\GameActivity\<game id>.json`), and achievements from
 those of [SuccessStory](https://github.com/Lacro59/playnite-successstory-plugin); the connector tells the host where
-both live. The host never contacts Steam, Xbox or any other service for them. Without GameActivity there is no history: `activity` is `false` and only Playnite's totals are
-filled in; without SuccessStory there are no achievements. The endpoints share
+both live. The host never contacts Steam, Xbox or any other service for them. Without GameActivity (not installed,
+or turned off with `playnite_gameactivity`) there is no history: `activity` is `false` and only Playnite's totals are
+filled in; without SuccessStory (or with `playnite_successstory` off) there are no achievements. The endpoints share
 `/appmetadata`'s permission check and catalogue: games the caller's `/applist` doesn't show are counted in totals but
 never named. They answer 404 on other platforms, and before the host has heard from the connector.
 

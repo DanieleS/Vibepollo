@@ -46,6 +46,7 @@
 // local includes
 #include "app_display_policy.h"
 #include "config.h"
+#include "config_playnite.h"
 #include "display_device.h"
 #include "display_helper_integration.h"
 #include "file_handler.h"
@@ -6185,11 +6186,12 @@ namespace nvhttp {
     }
 
     /// @brief SuccessStory's files, kept across requests so their cache is; replaced when the
-    /// connector reports other folders.
+    /// connector reports other folders. Null when turned off (playnite_successstory), exactly as
+    /// if SuccessStory were not installed: the achievements endpoints answer 404.
     std::shared_ptr<successstory::store_t> successstory_store(const platf::playnite::stats_paths_t &paths) {
       static std::mutex store_mutex;
       static std::shared_ptr<successstory::store_t> store;
-      if (paths.success_story_data.empty()) {
+      if (!config::playnite.successstory || paths.success_story_data.empty()) {
         return nullptr;
       }
       const auto data_dir = successstory::utf8_path(paths.success_story_data);
@@ -6202,10 +6204,14 @@ namespace nvhttp {
     }
 
     /// @brief GameActivity's files, kept across requests so their cache is; replaced when the
-    /// connector reports another folder.
+    /// connector reports another folder. Null when turned off (playnite_gameactivity), exactly as
+    /// if GameActivity were not installed.
     std::shared_ptr<gameactivity::store_t> game_activity_store(const platf::playnite::stats_paths_t &paths) {
       static std::mutex store_mutex;
       static std::shared_ptr<gameactivity::store_t> store;
+      if (!config::playnite.gameactivity) {
+        return nullptr;
+      }
       const auto data_dir = gameactivity::resolve_data_dir(paths.game_activity_data, paths.success_story_data);
       if (data_dir.empty()) {
         return nullptr;
