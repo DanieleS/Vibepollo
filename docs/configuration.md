@@ -4952,6 +4952,12 @@ Default: `false`
 
 ## Playnite Integration
 
+The Playnite connector also logs every game session Playnite reports, launched by Vibepollo or not, to
+`sessions.jsonl` in its extension data folder (a CouchPilot log found there is imported once), and tells Vibepollo
+where that log and SuccessStory's achievement data are. Vibepollo keeps those paths, with the last complete library,
+in `playnite_stats.json` next to its other state, and serves them to clients as play statistics; see
+[GameStream Migration](gamestream_migration.md#play-statistics-and-achievements).
+
 ### playnite_enabled
 
 Enables Playnite library synchronization and launch support on Windows. Disable this setting to use Steam by itself, or leave both providers enabled to combine their catalogs. Playnite is unavailable on Linux.

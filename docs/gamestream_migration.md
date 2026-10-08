@@ -47,6 +47,63 @@ Clients that want more than a title and a cover can call `GET /appmetadata`. It 
 When `has_background` is true, `GET /appbackground?appid=<id>` (or `appuuid=<uuid>`) returns the hero image as a PNG.
 It answers 404 when the app has no background, so clients can simply try it.
 
+## Play Statistics and Achievements
+On Windows hosts with Playnite, clients can show how much each game is played and which achievements were unlocked.
+The numbers come from the Playnite connector: it appends every game session to its own log (Playnite keeps only
+totals), and achievements are read from the files of Playnite's [SuccessStory](https://github.com/Lacro59/playnite-successstory-plugin)
+extension. The host never contacts Steam, Xbox or any other service for them. The endpoints share `/appmetadata`'s
+permission check and catalogue: games the caller's `/applist` doesn't show are counted in totals but never named.
+They answer 404 on other platforms, and before the connector has told the host where its data is.
+
+All keys are snake_case. Dates are `YYYY-MM-DD` in the host's local time, and instants are UTC ISO 8601
+(`2024-03-11T18:00:00Z`). A day of play runs from 5:00 to 5:00 local time, so a session from 23:00 to 1:00 counts for
+the evening it started, and a session across 5:00 is split between the two days.
+
+`GET /appstats?range=week|month|year&offset=0` describes a period. Weeks run Monday to Monday; `week` and `month` have
+one bucket per day, `year` one per month (dated the first of the month). `offset` steps back from the current period,
+from `0` down to `-500`. `to` is the day after the last one. While the current period is under way,
+`previous_total_seconds` covers the previous period only up to the same point (the first 5 days of last month on the
+5th of this one).
+
+| Key                      | Meaning                                                                                 |
+|:-------------------------|:----------------------------------------------------------------------------------------|
+| `range`, `offset`        | The period asked for (an unknown range is a week)                                       |
+| `from`, `to`, `today`    | The period's first day, the day after its last, and today                               |
+| `tracking_since`         | The first day in the session log, or `null` when it is empty                            |
+| `total_seconds`          | Played in the period, every game                                                        |
+| `previous_total_seconds` | Played in the previous period, from `previous_from`                                     |
+| `sessions`               | Sessions that started in the period                                                     |
+| `buckets`                | `[{date, seconds}]`                                                                     |
+| `top`                    | `[{uuid, name, seconds}]`: the caller's 5 most played games in the period               |
+| `library`                | `{playtime_seconds, games, installed, installed_never_played, played_this_year}`, from Playnite's totals of every game that isn't hidden |
+| `resume`                 | `[{uuid, name, playtime_seconds, last_activity}]`: up to 6 installed games with an hour or more, untouched for 90 days, longest-played first |
+| `achievements`           | `null` without SuccessStory, else `{unlocked, recent}`: unlocks in the period, and the 8 latest as in `/appachievements/recent` |
+
+`GET /appstats?appuuid=<uuid>` describes one game: `{uuid, playtime_seconds, play_count, last_activity,
+sessions, average_seconds, weeks, last_session, tracking_since}`. `weeks` holds 12 values, the current week last;
+`last_session` is `{start, seconds}` or `null`. A game being played counts up to now in both forms.
+
+`GET /appachievements?appuuid=<uuid>` lists one game's achievements as `{uuid, total, unlocked, last_refresh, items}`,
+unlocked ones first, newest first, then the locked ones, the most common first. It answers 404 when SuccessStory has
+nothing on the game or was told to ignore it. Each item is:
+
+| Key            | Meaning                                                                                       |
+|:---------------|:----------------------------------------------------------------------------------------------|
+| `id`           | The source's own name for it, or its position when there is none                             |
+| `name`, `description`, `hidden` | As the game describes it; hidden ones should stay masked until the user asks  |
+| `unlocked`, `unlocked_at` | `unlocked_at` is `null` while locked, and also when the source doesn't say when    |
+| `percent`      | Players who have it, 0-100, or `null` when unknown                                            |
+| `gamer_score`  | Xbox gamerscore, or `null`                                                                    |
+| `icon`         | An absolute web URL, a `/appachievementicon?...` path on this host, or `null`                 |
+| `locked_icon`  | The same for the locked icon, or `null` to grey out `icon` instead                            |
+
+`GET /appachievements/recent?since=<unix seconds>&limit=40` returns `{"achievements": [...]}`: the latest unlocks with
+a known date at or after `since` (`0` for all), newest first, across the caller's games. Each entry is an item as above
+plus the game's `uuid` and its `game` name. `limit` defaults to 40 and is capped at 200.
+
+`GET /appachievementicon?appuuid=<uuid>&index=<n>[&locked=1]` returns the bytes of an icon SuccessStory keeps on disk;
+the `icon` and `locked_icon` URLs above already point at it. Web icons are linked directly and answer 404 here.
+
 ## Limitations
 Sunshine does have some limitations, as compared to Nvidia GameStream.
 
