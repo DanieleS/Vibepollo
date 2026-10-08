@@ -146,6 +146,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/common_services.h"
         "${CMAKE_SOURCE_DIR}/src/game_metadata.cpp"
         "${CMAKE_SOURCE_DIR}/src/game_metadata.h"
+        "${CMAKE_SOURCE_DIR}/src/gameactivity.cpp"
+        "${CMAKE_SOURCE_DIR}/src/gameactivity.h"
         "${CMAKE_SOURCE_DIR}/src/play_stats.cpp"
         "${CMAKE_SOURCE_DIR}/src/play_stats.h"
         "${CMAKE_SOURCE_DIR}/src/successstory.cpp"

@@ -195,10 +195,11 @@ namespace platf::playnite {
    *
    * Reported by the connector's `paths` message and persisted, so the statistics endpoints work
    * after a restart before Playnite reconnects. Empty fields are unknown: an older connector, or
-   * SuccessStory not installed.
+   * SuccessStory not installed. GameActivity's folder is sent whether or not the extension is
+   * installed; the reader finds out.
    */
   struct stats_paths_t {
-    std::string session_log;  ///< The connector's sessions.jsonl.
+    std::string game_activity_data;  ///< GameActivity's data folder (its files are in `GameActivity\`).
     std::string success_story_data;  ///< SuccessStory's data folder (its files are in `SuccessStory\`).
     std::string success_story_resources;  ///< The Resources folder next to SuccessStory's assembly.
   };

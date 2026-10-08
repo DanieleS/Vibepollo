@@ -1,6 +1,7 @@
 /**
  * @file tests/unit/test_play_stats.cpp
- * @brief Play statistics: the session log, the 5:00 day, periods, top, resume and per-game stats.
+ * @brief Play statistics: the 5:00 day, periods, top, resume, per-game stats, the running game and
+ * what is left without GameActivity.
  */
 #include "src/play_stats.h"
 
@@ -57,29 +58,6 @@ namespace {
     return -1;
   }
 }  // namespace
-
-TEST(PlayStatsLog, ReadsCouchPilotLinesAndSkipsTheBrokenOnes) {
-  const std::string log =
-    "{\"Game\":\"11111111-1111-1111-1111-111111111111\",\"Start\":\"2024-03-11T18:00:00.1234567Z\",\"Seconds\":3600}\r\n"
-    "\n"
-    "{\"Game\":\"22222222-2222-2222-2222-222222222222\",\"Start\":\"2024-03-11T20:00:00Z\",\"Seconds\":0}\n"
-    "{\"Game\":\"22222222-2222-2222-2222-222222222222\",\"Start\":\"2024-03-11T20:00:00+01:00\",\"Seconds\":60}\n"
-    "{\"Game\":\"{33333333-3333-3333-3333-33333333333F}\",\"Start\":\"2024-03-12T20:00:00Z\",\"Seconds\":-5}\n"
-    "{\"Game\":\"33333333-3333-3333-3333-333333333333\",\"Start\":\"2024-03-1";  // cut short mid-write
-  const auto sessions = play_stats::parse_session_log(log, plus_two);
-  ASSERT_EQ(sessions.size(), 2u);
-  EXPECT_EQ(sessions[0].game, k_hades);
-  EXPECT_EQ(sessions[0].start, day_number(2024, 3, 11) * k_day + 18 * k_hour);
-  EXPECT_EQ(sessions[0].seconds, 3600);
-  EXPECT_EQ(sessions[1].game, k_celeste);
-  EXPECT_EQ(sessions[1].start, day_number(2024, 3, 11) * k_day + 19 * k_hour);
-}
-
-TEST(PlayStatsLog, NormalizesIdsAndToleratesABom) {
-  const auto sessions = play_stats::parse_session_log("\xEF\xBB\xBF{\"Game\":\"{AAAAAAAA-1111-1111-1111-111111111111}\",\"Start\":\"2024-03-11T18:00:00Z\",\"Seconds\":5}", plus_two);
-  ASSERT_EQ(sessions.size(), 1u);
-  EXPECT_EQ(sessions[0].game, "aaaaaaaa-1111-1111-1111-111111111111");
-}
 
 TEST(PlayStatsTime, ParsesIso8601TheWayDotNetWritesIt) {
   const auto base = day_number(2024, 3, 11) * k_day + 18 * k_hour;
@@ -290,20 +268,67 @@ TEST(PlayStatsOverview, ARunningGameCountsUpToNow) {
   EXPECT_EQ(stats["tracking_since"], "2024-03-13");
 }
 
-TEST(PlayStatsOverview, ARunningGameWhoseStopTheLogHasIsNotCountedTwice) {
+TEST(PlayStatsOverview, GameActivitysItemForTheRunningGameIsReplacedByTheLiveOne) {
   const auto now = local(2024, 3, 13, 21);
   auto in = base_input(now);
-  // The host missed the stop; the connector logged it.
   in.running.push_back({k_hades, now - 3 * k_hour});
-  in.sessions.push_back({k_hades, now - 3 * k_hour - 120, 2 * k_hour});
+  // GameActivity heard the same start a little earlier, and holds a partial count for this run.
+  in.sessions.push_back({k_hades, now - 3 * k_hour - 90, k_hour});
+  const auto stats = play_stats::overview(in, "week", 0, catalogue());
+  EXPECT_EQ(stats["total_seconds"], 3 * k_hour);
+  EXPECT_EQ(stats["sessions"], 1);
+}
+
+TEST(PlayStatsOverview, AnItemStartingAfterTheRunsStartIsThatRunToo) {
+  const auto now = local(2024, 3, 13, 21);
+  auto in = base_input(now);
+  in.running.push_back({k_hades, now - 2 * k_hour});
+  in.sessions.push_back({k_hades, now - 2 * k_hour + 5, 600});
   const auto stats = play_stats::overview(in, "week", 0, catalogue());
   EXPECT_EQ(stats["total_seconds"], 2 * k_hour);
   EXPECT_EQ(stats["sessions"], 1);
 }
 
-TEST(PlayStatsOverview, NothingLoggedYet) {
+TEST(PlayStatsOverview, EarlierSessionsOfTheRunningGameAndOtherGamesStay) {
+  const auto now = local(2024, 3, 13, 21);
+  auto in = base_input(now);
+  in.running.push_back({k_hades, now - k_hour});
+  in.sessions.push_back({k_hades, now - k_hour - 5 * 60, 60});  // ended just before: another run
+  in.sessions.push_back({k_celeste, now - 30 * 60, 600});  // another game, after the start
+  const auto stats = play_stats::overview(in, "week", 0, catalogue());
+  EXPECT_EQ(stats["total_seconds"], k_hour + 60 + 600);
+  EXPECT_EQ(stats["sessions"], 3);
+}
+
+TEST(PlayStatsOverview, WithoutGameActivityOnlyTheLibraryIsLeft) {
+  const auto now = local(2024, 3, 13, 21);
+  auto in = base_input(now);
+  in.activity = false;
+  in.games.push_back({k_hades, "Hades", 50 * k_hour, 12, now - 200 * k_day, true, false});
+  in.sessions.push_back({k_hades, local(2024, 3, 12, 20), 2 * k_hour});  // ignored
+  in.running.push_back({k_celeste, now - k_hour});  // not counted either
+  const auto stats = play_stats::overview(in, "week", 0, catalogue(), [](std::int64_t, std::int64_t) {
+    return nlohmann::json {{"unlocked", 1}, {"recent", nlohmann::json::array()}};
+  });
+  EXPECT_EQ(stats["activity"], false);
+  EXPECT_TRUE(stats["tracking_since"].is_null());
+  EXPECT_EQ(stats["total_seconds"], 0);
+  EXPECT_EQ(stats["previous_total_seconds"], 0);
+  EXPECT_EQ(stats["sessions"], 0);
+  ASSERT_EQ(stats["buckets"].size(), 7u);
+  for (const auto &b : stats["buckets"]) {
+    EXPECT_EQ(b["seconds"], 0);
+  }
+  EXPECT_TRUE(stats["top"].empty());
+  EXPECT_EQ(stats["library"]["playtime_seconds"], 50 * k_hour);
+  ASSERT_EQ(stats["resume"].size(), 1u);
+  EXPECT_EQ(stats["achievements"]["unlocked"], 1);
+}
+
+TEST(PlayStatsOverview, NothingRecordedYet) {
   auto in = base_input(local(2024, 3, 13, 21));
   const auto stats = play_stats::overview(in, "week", 0, catalogue());
+  EXPECT_EQ(stats["activity"], true);
   EXPECT_TRUE(stats["tracking_since"].is_null());
   EXPECT_TRUE(stats["achievements"].is_null());
   EXPECT_EQ(stats["total_seconds"], 0);
@@ -329,7 +354,7 @@ TEST(PlayStatsGame, SessionsWeeksAndTheLastOne) {
   const auto now = local(2024, 3, 13, 21);
   auto in = base_input(now);
   in.games.push_back({k_hades, "Hades", 50 * k_hour, 12, local(2024, 3, 12, 22), true, false});
-  in.sessions.push_back({k_celeste, local(2024, 1, 2, 20), k_hour});  // the log's first line
+  in.sessions.push_back({k_celeste, local(2024, 1, 2, 20), k_hour});
   in.sessions.push_back({k_hades, local(2024, 3, 12, 20), 2 * k_hour});  // this week
   in.sessions.push_back({k_hades, local(2024, 3, 4, 20), k_hour});  // last week
   in.sessions.push_back({k_hades, local(2023, 3, 4, 20), k_hour});  // a year ago: no bucket
@@ -337,6 +362,7 @@ TEST(PlayStatsGame, SessionsWeeksAndTheLastOne) {
   ASSERT_TRUE(stats);
   const auto &s = *stats;
   EXPECT_EQ(s["uuid"], "uuid-hades");
+  EXPECT_EQ(s["activity"], true);
   EXPECT_EQ(s["playtime_seconds"], 50 * k_hour);
   EXPECT_EQ(s["play_count"], 12);
   EXPECT_EQ(s["last_activity"], play_stats::format_utc(local(2024, 3, 12, 22)));
@@ -351,7 +377,7 @@ TEST(PlayStatsGame, SessionsWeeksAndTheLastOne) {
   EXPECT_EQ(s["tracking_since"], "2023-03-04");
 }
 
-TEST(PlayStatsGame, AGameNeverLoggedOrUnknown) {
+TEST(PlayStatsGame, AGameNeverPlayedOrUnknown) {
   auto in = base_input(local(2024, 3, 13, 21));
   in.games.push_back({k_celeste, "Celeste", 0, 0, std::nullopt, true, false});
   const auto stats = play_stats::game(in, k_celeste, "uuid-celeste");
@@ -372,6 +398,27 @@ TEST(PlayStatsGame, ARunningSessionIsTheLastOne) {
   ASSERT_TRUE(stats);
   EXPECT_EQ((*stats)["sessions"], 2);
   EXPECT_EQ((*stats)["last_session"]["seconds"], 600);
+}
+
+TEST(PlayStatsGame, WithoutGameActivityOnlyPlayniteTotalsAreLeft) {
+  const auto now = local(2024, 3, 13, 21);
+  auto in = base_input(now);
+  in.activity = false;
+  in.games.push_back({k_hades, "Hades", 50 * k_hour, 12, local(2024, 3, 12, 22), true, false});
+  in.sessions.push_back({k_hades, local(2024, 3, 12, 20), 2 * k_hour});
+  in.running.push_back({k_hades, now - 600});
+  const auto stats = play_stats::game(in, k_hades, "uuid-hades");
+  ASSERT_TRUE(stats);
+  const auto &s = *stats;
+  EXPECT_EQ(s["activity"], false);
+  EXPECT_EQ(s["playtime_seconds"], 50 * k_hour);
+  EXPECT_EQ(s["play_count"], 12);
+  EXPECT_EQ(s["last_activity"], play_stats::format_utc(local(2024, 3, 12, 22)));
+  EXPECT_EQ(s["sessions"], 0);
+  EXPECT_EQ(s["average_seconds"], 0);
+  EXPECT_EQ(s["weeks"], nlohmann::json(std::vector<int>(12, 0)));
+  EXPECT_TRUE(s["last_session"].is_null());
+  EXPECT_TRUE(s["tracking_since"].is_null());
 }
 
 TEST(PlayStatsTime, TheOsZoneIsWithinAFewHoursOfUtcAndRoundTrips) {

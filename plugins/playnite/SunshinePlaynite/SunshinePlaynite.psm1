@@ -1694,14 +1694,14 @@ function Get-PlayniteGames {
 }
 
 # --- Play statistics -------------------------------------------------------------------------
-# Playnite keeps only totals, so every game session is appended to a log of our own, one JSON
-# object per line, in CouchPilot's format: {"Game":"<guid>","Start":"<ISO 8601 UTC>","Seconds":N}.
-# Vibepollo reads it (and SuccessStory's achievement files) to answer /appstats and
-# /appachievements, after the paths message below has told it where they are. None of this may
-# ever break the connector: every failure is logged and swallowed.
+# Playnite keeps only totals. The session history comes from GameActivity (Lacro59's extension,
+# like SuccessStory for achievements), which keeps one JSON file per game; Vibepollo reads those
+# files and SuccessStory's to answer /appstats and /appachievements, once the paths message below
+# has told it where they are. The connector writes no history of its own. None of this may ever
+# break the connector: every failure is logged and swallowed.
 
 $script:SuccessStoryPluginId = 'cebe6d32-8c46-4459-b993-5a5189d60788'
-$script:CouchPilotPluginId = '6de22bd5-1691-40df-9a93-4a319d8f2d3a'
+$script:GameActivityPluginId = 'afbb1a0d-04a1-4d0c-9afa-c6e42ca855b4'
 
 function Get-ExtensionsDataRoot {
   try {
@@ -1713,16 +1713,19 @@ function Get-ExtensionsDataRoot {
   return $null
 }
 
-function Get-SessionLogPath {
-  $root = Get-ExtensionsDataRoot
-  if (-not $root) { return $null }
-  return (Join-Path (Join-Path $root 'Sunshine.Playnite.PowerShell') 'sessions.jsonl')
-}
-
 function Get-SuccessStoryDataPath {
   $root = Get-ExtensionsDataRoot
   if (-not $root) { return '' }
   return (Join-Path $root $script:SuccessStoryPluginId)
+}
+
+# GameActivity's data folder; its per-game files are in the GameActivity subfolder. Sent whether
+# or not the extension is installed: Vibepollo looks for the files itself and says when there are
+# none, so installing GameActivity later needs no reconnect.
+function Get-GameActivityDataPath {
+  $root = Get-ExtensionsDataRoot
+  if (-not $root) { return '' }
+  return (Join-Path $root $script:GameActivityPluginId)
 }
 
 # SuccessStory keeps a few games' icons under its own Resources folder, next to its assembly.
@@ -1744,72 +1747,25 @@ function Get-SuccessStoryResourcesPath {
   return ''
 }
 
-# Someone coming from CouchPilot keeps their history: its log is copied once, before ours exists.
-function Import-CouchPilotSessionLog {
-  param([string]$Path)
-  try {
-    if (-not $Path) { return }
-    if (Test-Path -LiteralPath $Path) { return }
-    $root = Get-ExtensionsDataRoot
-    if (-not $root) { return }
-    $source = Join-Path (Join-Path $root $script:CouchPilotPluginId) 'sessions.jsonl'
-    if (-not (Test-Path -LiteralPath $source)) { return }
-    $dir = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
-    Copy-Item -LiteralPath $source -Destination $Path -ErrorAction Stop
-    Write-Log ("SessionLog: imported CouchPilot's history from {0}" -f $source)
-  } catch {
-    Write-Log ("SessionLog: CouchPilot import skipped: {0}" -f $_.Exception.Message) -Level 'WARN'
-  }
-}
-
-# Playnite's own count of the session's length, so the days add up to its totals.
-function Add-SessionLogEntry {
-  param([object]$Game, [object]$ElapsedSeconds)
-  try {
-    $seconds = [long]0
-    try { if ($null -ne $ElapsedSeconds) { $seconds = [long]$ElapsedSeconds } } catch { $seconds = 0 }
-    if ($seconds -le 0) { return }
-    $id = ''
-    try { if ($Game -and $Game.Id) { $id = $Game.Id.ToString().ToLowerInvariant() } } catch {}
-    if (-not $id) { return }
-    $path = Get-SessionLogPath
-    if (-not $path) {
-      Write-Log 'SessionLog: no extensions data path; session not recorded' -Level 'WARN'
-      return
-    }
-    $dir = Split-Path -Parent $path
-    if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
-    Import-CouchPilotSessionLog -Path $path
-    $start = [DateTime]::UtcNow.AddSeconds(-$seconds).ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
-    $line = '{{"Game":"{0}","Start":"{1}","Seconds":{2}}}' -f $id, $start, $seconds.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-    [System.IO.File]::AppendAllText($path, $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
-    Write-Log ("SessionLog: recorded {0}s for {1}" -f $seconds, $id) -Level 'DEBUG'
-  } catch {
-    Write-Log ("SessionLog: recording the session failed: {0}" -f $_.Exception.Message) -Level 'WARN'
-  }
-}
-
-# Where Vibepollo finds the session log and SuccessStory's data. Older Vibepollo builds parse an
+# Where Vibepollo finds GameActivity's and SuccessStory's data. Older Vibepollo builds parse an
 # unknown message type as Unknown and ignore it.
 function Send-StatsPaths {
   try {
-    $sessionLog = Get-SessionLogPath
-    if (-not $sessionLog) {
+    if (-not (Get-ExtensionsDataRoot)) {
       Write-Log 'Paths: no extensions data path; not sent' -Level 'WARN'
       return
     }
-    Import-CouchPilotSessionLog -Path $sessionLog
+    $gameActivityData = Get-GameActivityDataPath
     $successStoryData = Get-SuccessStoryDataPath
     $successStoryResources = Get-SuccessStoryResourcesPath
     $json = [ordered]@{
       type                  = 'paths'
-      sessionLog            = $sessionLog
+      gameActivityData      = $gameActivityData
       successStoryData      = $successStoryData
       successStoryResources = $successStoryResources
     } | ConvertTo-Json -Compress
     Send-JsonMessage -Json $json -AllowConnectIfMissing
-    Write-Log ("Paths: sessionLog='{0}' successStoryData='{1}' successStoryResources='{2}'" -f $sessionLog, $successStoryData, $successStoryResources)
+    Write-Log ("Paths: gameActivityData='{0}' successStoryData='{1}' successStoryResources='{2}'" -f $gameActivityData, $successStoryData, $successStoryResources)
   } catch {
     Write-Log ("Paths: sending failed: {0}" -f $_.Exception.Message) -Level 'WARN'
   }
@@ -2574,10 +2530,6 @@ function OnGameStopped() {
   param($evnArgs)
   $game = $evnArgs.Game
   Write-Log "OnGameStopped: $($game.Name) [$($game.Id)]"
-  # Every game's session is logged, not only the ones Sunshine launched: the statistics are the
-  # whole library's. Before anything below can return early, and never in its way.
-  try { Add-SessionLogEntry -Game $game -ElapsedSeconds $evnArgs.ElapsedSeconds }
-  catch { Write-Log ("OnGameStopped: session log failed: {0}" -f $_.Exception.Message) -Level 'WARN' }
   $gameId = $null
   try { $gameId = $game.Id } catch {}
   if (-not (Remove-SunshineLaunchedGame -Id $gameId)) {

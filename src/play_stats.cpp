@@ -139,30 +139,35 @@ namespace play_stats {
       }
     }
 
-    // The log, plus whatever is being played right now, up to now.
+    // GameActivity's sessions, plus whatever is being played right now, up to now.
     //
-    // The host hears about running games over an IPC link that comes and goes, so a "running"
-    // game may be one whose stop was never heard. The log is the authority: once it holds a
-    // session of that game that ended after the running one started, the game has stopped.
+    // GameActivity adds a run's item when the game starts and fills in its length when it stops,
+    // so while the game runs its file may already hold that item, with 0 seconds (which the
+    // reader drops) or a partial count. Any item of the same game that starts within a couple of
+    // minutes before the host's start of the run, or after it, is that run: the live count
+    // replaces it, so the run is never counted twice. Without GameActivity nothing is counted,
+    // not even the running game, so every per-period figure agrees that there is no history.
     std::vector<session_t> sessions_with_running(const input_t &input) {
+      if (!input.activity) {
+        return {};
+      }
       std::vector<session_t> all = input.sessions;
       for (const auto &r : input.running) {
         const auto id = normalize_id(r.game);
-        if (id.empty()) {
-          continue;
-        }
-        const bool stopped = std::any_of(input.sessions.begin(), input.sessions.end(), [&](const session_t &s) {
-          return s.game == id && s.start + s.seconds >= r.started_at;
-        });
         const std::int64_t seconds = input.now - r.started_at;
-        if (stopped || seconds <= 0) {
+        if (id.empty() || seconds <= 0) {
           continue;
         }
+        std::erase_if(all, [&](const session_t &s) {
+          return s.game == id && s.start >= r.started_at - k_running_match_slack;
+        });
         all.push_back({id, r.started_at, seconds});
       }
       return all;
     }
 
+    // The first day GameActivity has a session for (the running one included: GameActivity
+    // already has its start), or null.
     nlohmann::json tracking_since(const std::vector<session_t> &sessions, const to_local_t &to_local) {
       if (sessions.empty()) {
         return nullptr;
@@ -373,40 +378,6 @@ namespace play_stats {
     return out;
   }
 
-  std::vector<session_t> parse_session_log(std::string_view text, const to_local_t &to_local) {
-    std::vector<session_t> out;
-    while (!text.empty()) {
-      const auto nl = text.find('\n');
-      auto line = trim(text.substr(0, nl));
-      text = nl == std::string_view::npos ? std::string_view {} : text.substr(nl + 1);
-      if (line.starts_with("\xEF\xBB\xBF")) {
-        line.remove_prefix(3);
-      }
-      if (line.empty()) {
-        continue;
-      }
-      // A line cut short by a crash mid-write: skip it, keep the rest.
-      const auto j = nlohmann::json::parse(line.begin(), line.end(), nullptr, false);
-      if (j.is_discarded() || !j.is_object()) {
-        continue;
-      }
-      const auto game = j.find("Game");
-      const auto start = j.find("Start");
-      const auto seconds = j.find("Seconds");
-      if (game == j.end() || !game->is_string() || start == j.end() || !start->is_string() || seconds == j.end() || !seconds->is_number()) {
-        continue;
-      }
-      const auto when = parse_iso8601(start->get_ref<const std::string &>(), to_local);
-      const auto secs = seconds->is_number_float() ? static_cast<std::int64_t>(seconds->get<double>()) : seconds->get<std::int64_t>();
-      const auto id = normalize_id(game->get_ref<const std::string &>());
-      if (!when || secs <= 0 || id.empty()) {
-        continue;
-      }
-      out.push_back({id, *when, secs});
-    }
-    return out;
-  }
-
   int parse_offset(std::string_view text) {
     text = trim(text);
     if (text.empty() || text.size() > 6) {
@@ -523,6 +494,7 @@ namespace play_stats {
     }
 
     nlohmann::json out = nlohmann::json::object();
+    out["activity"] = input.activity;
     out["range"] = p.range;
     out["offset"] = p.offset;
     out["from"] = format_day(p.from);
@@ -579,6 +551,7 @@ namespace play_stats {
 
     nlohmann::json out = nlohmann::json::object();
     out["uuid"] = std::string(uuid);
+    out["activity"] = input.activity;
     out["playtime_seconds"] = g->playtime_seconds;
     out["play_count"] = g->play_count;
     out["last_activity"] = g->last_activity ? nlohmann::json(format_utc(*g->last_activity)) : nlohmann::json(nullptr);

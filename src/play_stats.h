@@ -2,12 +2,12 @@
  * @file src/play_stats.h
  * @brief How much is played, by day, week, month and year: the pure half of `/appstats`.
  *
- * A port of CouchPilot's StatsService. The Playnite connector appends one line per game session
- * to a log (Playnite itself keeps only totals, so the history starts the day the connector learns
- * to write it); this file reads that log and adds it up, together with the library totals Playnite
- * reports. Nothing here touches Playnite, the file system or the clock: the caller hands in the
- * sessions, the games, what is running and when "now" is, which is what lets the tests pin a time
- * zone and a date.
+ * A port of CouchPilot's StatsService. Playnite itself keeps only totals; the sessions come from
+ * GameActivity (Lacro59's Playnite extension, read by gameactivity.h), and this file adds them
+ * up, together with the library totals Playnite reports. Without GameActivity there is no
+ * history, and only the totals are filled in. Nothing here touches Playnite, the file system or
+ * the clock: the caller hands in the sessions, the games, what is running and when "now" is,
+ * which is what lets the tests pin a time zone and a date.
  *
  * Everything is in the host's local time, and a day of play runs from 5:00 to 5:00: a session from
  * 23:00 to 1:00 is all the evening's.
@@ -66,11 +66,7 @@ namespace play_stats {
   /// @brief A Playnite id as it is compared: lowercase, without braces or surrounding blanks.
   std::string normalize_id(std::string_view id);
 
-  /**
-   * @brief One game session from the connector's log.
-   *
-   * The log's lines are CouchPilot's: `{"Game":"<guid>","Start":"<ISO 8601 UTC>","Seconds":N}`.
-   */
+  /// @brief One game session, as GameActivity recorded it.
   struct session_t {
     std::string game;  ///< Normalized Playnite id.
     std::int64_t start {0};  ///< Unix seconds.
@@ -78,10 +74,10 @@ namespace play_stats {
   };
 
   /**
-   * @brief Read the session log. Blank lines, lines cut short by a crash mid-write and sessions
-   * of zero seconds or less are skipped; the rest are kept in file order.
+   * @brief How close to the host's start of a running game GameActivity's own record of that run
+   * may start: both hear the same OnGameStarted, but not at the same instant.
    */
-  std::vector<session_t> parse_session_log(std::string_view text, const to_local_t &to_local = os_utc_to_local);
+  inline constexpr std::int64_t k_running_match_slack = 120;
 
   /// @brief What the stats need of one Playnite game: its totals, as Playnite keeps them.
   struct game_t {
@@ -102,7 +98,10 @@ namespace play_stats {
 
   /// @brief Everything the stats are computed from.
   struct input_t {
-    std::vector<session_t> sessions;
+    /// GameActivity's data was found. Without it there is no history at all: no sessions, not
+    /// even the running game's, and every per-period figure is zero; the library totals remain.
+    bool activity {true};
+    std::vector<session_t> sessions;  ///< Ignored without `activity`.
     std::vector<game_t> games;  ///< The whole Playnite library, hidden games included.
     std::vector<running_t> running;
     std::int64_t now {0};  ///< Unix seconds.
@@ -153,7 +152,7 @@ namespace play_stats {
    * @brief The `/appstats?range=&offset=` body.
    *
    * `top` and `resume` list only games in @p catalogue (then take their 5 and 6); totals,
-   * buckets, sessions and `library` count everything.
+   * buckets, sessions and `library` count everything. `activity` echoes the input's.
    */
   nlohmann::json overview(const input_t &input, std::string_view range, int offset, const catalogue_t &catalogue, const achievements_fn &achievements = {});
 

@@ -171,7 +171,7 @@ namespace platf::playnite {
           const auto it = j.find(key);
           return it != j.end() && it->is_string() ? it->get<std::string>() : std::string {};
         };
-        m.paths_session_log = text("sessionLog");
+        m.paths_game_activity_data = text("gameActivityData");
         m.paths_success_story_data = text("successStoryData");
         m.paths_success_story_resources = text("successStoryResources");
       } else if (type == "status") {

@@ -407,6 +407,10 @@ sunshine_register_component(NAME test_component_game_metadata TEST_SOURCE unit/t
 sunshine_register_component(NAME test_component_play_stats TEST_SOURCE unit/test_play_stats.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/play_stats.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_gameactivity TEST_SOURCE unit/test_gameactivity.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/gameactivity.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/play_stats.cpp"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json)
 sunshine_register_component(NAME test_component_successstory TEST_SOURCE unit/test_successstory.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/successstory.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/play_stats.cpp"

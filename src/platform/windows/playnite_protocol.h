@@ -23,7 +23,7 @@ namespace platf::playnite {
     SnapshotStart,  ///< A full library snapshot (plugins/categories/games batches) begins.
     SnapshotComplete,  ///< The library snapshot is fully delivered.
     CommandResult,  ///< Result of a command sent from Sunshine to Playnite.
-    Paths  ///< Where the connector's session log and SuccessStory's data live.
+    Paths  ///< Where GameActivity's and SuccessStory's data live.
   };
 
   /**
@@ -97,9 +97,9 @@ namespace platf::playnite {
     std::string command_request_id;  ///< Correlation ID for a command-result message.
     bool command_success = false;  ///< Whether the connector completed the command.
     std::string command_error;  ///< Optional connector error detail.
-    // Paths payload (if type == Paths). Any of them may be empty: SuccessStory not installed, or
-    // its assembly not found.
-    std::string paths_session_log;  ///< The connector's session log (sessionLog).
+    // Paths payload (if type == Paths). Any of them may be empty: an older connector, SuccessStory
+    // not installed, or its assembly not found.
+    std::string paths_game_activity_data;  ///< GameActivity's data folder (gameActivityData).
     std::string paths_success_story_data;  ///< SuccessStory's data folder (successStoryData).
     std::string paths_success_story_resources;  ///< SuccessStory's Resources folder (successStoryResources).
   };

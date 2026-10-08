@@ -57,6 +57,7 @@
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
+#include "gameactivity.h"
 #include "play_stats.h"
 #include "remote_session.h"
 #include "remote_display_topology.h"
@@ -6200,16 +6201,31 @@ namespace nvhttp {
       return store;
     }
 
-    /// @brief The session log, the last whole library and what is running now.
+    /// @brief GameActivity's files, kept across requests so their cache is; replaced when the
+    /// connector reports another folder.
+    std::shared_ptr<gameactivity::store_t> game_activity_store(const platf::playnite::stats_paths_t &paths) {
+      static std::mutex store_mutex;
+      static std::shared_ptr<gameactivity::store_t> store;
+      const auto data_dir = gameactivity::resolve_data_dir(paths.game_activity_data, paths.success_story_data);
+      if (data_dir.empty()) {
+        return nullptr;
+      }
+      std::scoped_lock lock {store_mutex};
+      if (!store || store->data_dir() != data_dir) {
+        store = std::make_shared<gameactivity::store_t>(data_dir);
+      }
+      return store;
+    }
+
+    /// @brief GameActivity's sessions, the last whole library and what is running now.
     play_stats::input_t play_stats_input(const platf::playnite::stats_paths_t &paths) {
       play_stats::input_t input;
       input.now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-      if (!paths.session_log.empty()) {
-        std::ifstream in(successstory::utf8_path(paths.session_log), std::ios::binary);
-        if (in) {
-          const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-          input.sessions = play_stats::parse_session_log(text, input.to_local);
-        }
+      input.activity = false;
+      if (const auto store = game_activity_store(paths)) {
+        auto snapshot = store->snapshot();
+        input.activity = snapshot.found;
+        input.sessions = std::move(snapshot.sessions);
       }
       for (const auto &g : platf::playnite::get_library_games()) {
         input.games.push_back({
@@ -6240,11 +6256,13 @@ namespace nvhttp {
   }  // namespace
 
   /**
-   * @brief How much is played, from the Playnite connector's session log and library totals.
+   * @brief How much is played, from GameActivity's sessions and Playnite's library totals.
    *
    * `?range=week|month|year&offset=0` answers the overview, `?appuuid=<uuid>` one game. Listed
-   * games are only those in the caller's /applist; totals count the whole library. 404 without
-   * Playnite data (an older connector, a host that never heard from it, or not Windows).
+   * games are only those in the caller's /applist; totals count the whole library. `activity`
+   * says whether GameActivity's data was found: without it the history is empty and only
+   * Playnite's totals are filled in. 404 without Playnite data (a host that never heard from the
+   * connector, or not Windows).
    */
   void appstats(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
@@ -6264,7 +6282,9 @@ namespace nvhttp {
     // Wakes the on-demand link so the running games and the library are current next time.
     platf::playnite::ensure_client_for_api();
     const auto paths = platf::playnite::get_stats_paths();
-    if (paths.session_log.empty()) {
+    auto input = play_stats_input(paths);
+    if (input.games.empty() && paths.game_activity_data.empty() && paths.success_story_data.empty()) {
+      // Nothing heard from the connector yet, not even a library: nothing to describe.
       fg.disable();
       write_not_found(response);
       return;
@@ -6273,7 +6293,6 @@ namespace nvhttp {
     auto args = request->parse_query_string();
     const auto appuuid = get_arg(args, "appuuid", "");
     const auto configured_apps = proc::proc.get_apps();
-    auto input = play_stats_input(paths);
 
     nlohmann::json body;
     if (!appuuid.empty()) {

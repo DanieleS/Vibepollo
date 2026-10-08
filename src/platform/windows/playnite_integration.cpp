@@ -171,7 +171,7 @@ namespace platf::playnite {
         });
       }
       nlohmann::json paths = {
-        {"session_log", g_stats_paths.session_log},
+        {"game_activity_data", g_stats_paths.game_activity_data},
         {"success_story_data", g_stats_paths.success_story_data},
         {"success_story_resources", g_stats_paths.success_story_resources},
       };
@@ -201,7 +201,8 @@ namespace platf::playnite {
         }
         const auto paths = root.value("paths", nlohmann::json::object());
         if (paths.is_object()) {
-          g_stats_paths.session_log = paths.value("session_log", "");
+          // An older build's "session_log" is left behind: the connector's own log is no longer read.
+          g_stats_paths.game_activity_data = paths.value("game_activity_data", "");
           g_stats_paths.success_story_data = paths.value("success_story_data", "");
           g_stats_paths.success_story_resources = paths.value("success_story_resources", "");
         }
@@ -225,7 +226,7 @@ namespace platf::playnite {
           }
         }
         g_stats_saved = stats_state_json().dump();
-        BOOST_LOG(info) << "Playnite: play statistics state loaded: sessionLog='" << g_stats_paths.session_log
+        BOOST_LOG(info) << "Playnite: play statistics state loaded: gameActivityData='" << g_stats_paths.game_activity_data
                         << "' successStoryData='" << g_stats_paths.success_story_data
                         << "' games=" << g_stats_library.size();
       } catch (const std::exception &e) {
@@ -1110,11 +1111,11 @@ namespace platf::playnite {
         }
         command_result_cv_.notify_all();
       } else if (msg.type == MT::Paths) {
-        BOOST_LOG(info) << "Playnite: connector paths sessionLog='" << msg.paths_session_log
+        BOOST_LOG(info) << "Playnite: connector paths gameActivityData='" << msg.paths_game_activity_data
                         << "' successStoryData='" << msg.paths_success_story_data
                         << "' successStoryResources='" << msg.paths_success_story_resources << "'";
         remember_stats_paths({
-          .session_log = msg.paths_session_log,
+          .game_activity_data = msg.paths_game_activity_data,
           .success_story_data = msg.paths_success_story_data,
           .success_story_resources = msg.paths_success_story_resources,
         });

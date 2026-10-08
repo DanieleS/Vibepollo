@@ -175,18 +175,18 @@ TEST(PlayniteProtocol_Parse, Status_ParsesFieldsWithUtf8Bom) {
 
 TEST(PlayniteProtocol_Parse, Paths_ParsesEveryField) {
   auto m = platf::playnite::parse(bytes(
-    "{\"type\":\"paths\",\"sessionLog\":\"C:\\\\Data\\\\sessions.jsonl\","
+    "{\"type\":\"paths\",\"gameActivityData\":\"C:\\\\Data\\\\afbb1a0d-04a1-4d0c-9afa-c6e42ca855b4\","
     "\"successStoryData\":\"C:\\\\Data\\\\cebe6d32-8c46-4459-b993-5a5189d60788\",\"successStoryResources\":\"\"}"
   ));
   EXPECT_EQ(m.type, MessageType::Paths);
-  EXPECT_EQ(m.paths_session_log, "C:\\Data\\sessions.jsonl");
+  EXPECT_EQ(m.paths_game_activity_data, "C:\\Data\\afbb1a0d-04a1-4d0c-9afa-c6e42ca855b4");
   EXPECT_EQ(m.paths_success_story_data, "C:\\Data\\cebe6d32-8c46-4459-b993-5a5189d60788");
   EXPECT_TRUE(m.paths_success_story_resources.empty());
 
   // Missing or mistyped fields are empty, never a parse failure.
-  m = platf::playnite::parse(bytes("{\"type\":\"paths\",\"sessionLog\":42}"));
+  m = platf::playnite::parse(bytes("{\"type\":\"paths\",\"gameActivityData\":42}"));
   EXPECT_EQ(m.type, MessageType::Paths);
-  EXPECT_TRUE(m.paths_session_log.empty());
+  EXPECT_TRUE(m.paths_game_activity_data.empty());
   EXPECT_TRUE(m.paths_success_story_data.empty());
 }
 

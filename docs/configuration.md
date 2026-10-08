@@ -4952,11 +4952,13 @@ Default: `false`
 
 ## Playnite Integration
 
-The Playnite connector also logs every game session Playnite reports, launched by Vibepollo or not, to
-`sessions.jsonl` in its extension data folder (a CouchPilot log found there is imported once), and tells Vibepollo
-where that log and SuccessStory's achievement data are. Vibepollo keeps those paths, with the last complete library,
-in `playnite_stats.json` next to its other state, and serves them to clients as play statistics; see
-[GameStream Migration](gamestream_migration.md#play-statistics-and-achievements).
+The Playnite connector also tells Vibepollo where two compatible Playnite extensions by Lacro59 keep their data:
+[GameActivity](https://github.com/Lacro59/playnite-gameactivity-plugin), which records every game session (Playnite
+itself keeps only totals), and [SuccessStory](https://github.com/Lacro59/playnite-successstory-plugin), which keeps
+achievements. Vibepollo only reads their files. It keeps those paths, with the last complete library, in
+`playnite_stats.json` next to its other state, and serves them to clients as play statistics and achievements; see
+[GameStream Migration](gamestream_migration.md#play-statistics-and-achievements). Without GameActivity, clients get
+Playnite's totals but no history; without SuccessStory, no achievements.
 
 ### playnite_enabled
 
