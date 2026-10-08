@@ -105,6 +105,11 @@ namespace platf::playnite {
               }
             } catch (...) {}
           }
+          try {
+            if (g.contains("playCount") && g["playCount"].is_number()) {
+              game.play_count = g["playCount"].get<uint64_t>();
+            }
+          } catch (...) {}
           game.last_played = g.value("lastPlayed", "");
           game.box_art_path = g.value("boxArtPath", "");
           game.icon_path = g.value("iconPath", "");
@@ -160,6 +165,15 @@ namespace platf::playnite {
         m.command_request_id = j.value("requestId", "");
         m.command_success = j.value("success", false);
         m.command_error = j.value("error", "");
+      } else if (type == "paths") {
+        m.type = MessageType::Paths;
+        auto text = [&](const char *key) {
+          const auto it = j.find(key);
+          return it != j.end() && it->is_string() ? it->get<std::string>() : std::string {};
+        };
+        m.paths_session_log = text("sessionLog");
+        m.paths_success_story_data = text("successStoryData");
+        m.paths_success_story_resources = text("successStoryResources");
       } else if (type == "status") {
         m.type = MessageType::Status;
         const auto &st = j.value("status", json::object());

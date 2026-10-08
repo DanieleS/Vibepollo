@@ -22,7 +22,8 @@ namespace platf::playnite {
     Status,  ///< Message contains a status update for a specific game / session.
     SnapshotStart,  ///< A full library snapshot (plugins/categories/games batches) begins.
     SnapshotComplete,  ///< The library snapshot is fully delivered.
-    CommandResult  ///< Result of a command sent from Sunshine to Playnite.
+    CommandResult,  ///< Result of a command sent from Sunshine to Playnite.
+    Paths  ///< Where the connector's session log and SuccessStory's data live.
   };
 
   /**
@@ -59,6 +60,7 @@ namespace platf::playnite {
     std::string plugin_name;  ///< Library plugin display name (best effort).
     std::string store_id;  ///< Owning plugin's own id for the game, e.g. the Steam appid (gameId).
     uint64_t playtime_minutes = 0;  ///< Total playtime in minutes (playtimeMinutes).
+    uint64_t play_count = 0;  ///< How many times Playnite saw it played (playCount); 0 from older plugins.
     std::string last_played;  ///< Last played timestamp (ISO8601) (lastPlayed).
     std::string box_art_path;  ///< Path/URL to cover art (boxArtPath).
     std::string icon_path;  ///< Path/URL to game icon (iconPath).
@@ -95,6 +97,11 @@ namespace platf::playnite {
     std::string command_request_id;  ///< Correlation ID for a command-result message.
     bool command_success = false;  ///< Whether the connector completed the command.
     std::string command_error;  ///< Optional connector error detail.
+    // Paths payload (if type == Paths). Any of them may be empty: SuccessStory not installed, or
+    // its assembly not found.
+    std::string paths_session_log;  ///< The connector's session log (sessionLog).
+    std::string paths_success_story_data;  ///< SuccessStory's data folder (successStoryData).
+    std::string paths_success_story_resources;  ///< SuccessStory's Resources folder (successStoryResources).
   };
 
   /**

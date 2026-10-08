@@ -31,7 +31,9 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <KnownFolders.h>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -83,12 +85,24 @@ namespace platf::playnite {
       g_install_dirs[lower_copy(id)] = dir;
     }
 
+    std::int64_t unix_now() {
+      return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
     void remember_active_game_started(const std::string &id, const std::string &exe, const std::string &install_dir) {
       if (id.empty()) {
         return;
       }
       std::scoped_lock lk(g_active_game_mutex);
       const auto normalized_id = lower_copy(id);
+      // The plugin resends gameStarted for every running game whenever it reconnects; the game
+      // started when we first heard of it, not when the link came back.
+      std::int64_t started_at = unix_now();
+      for (const auto &game : g_active_games) {
+        if (lower_copy(game.id) == normalized_id && game.started_at != 0) {
+          started_at = game.started_at;
+        }
+      }
       std::erase_if(g_active_games, [&](const auto &game) {
         return lower_copy(game.id) == normalized_id;
       });
@@ -97,6 +111,7 @@ namespace platf::playnite {
         .id = id,
         .exe = exe,
         .install_dir = install_dir,
+        .started_at = started_at,
       });
       g_active_game = g_active_games.back();
     }
@@ -114,6 +129,163 @@ namespace platf::playnite {
       g_active_game = g_active_games.empty() ? active_game_status_t {} : g_active_games.back();
     }
   }  // namespace
+
+  namespace {
+    // What the play statistics read: the paths the connector reported and the last library that
+    // arrived whole. Both are kept in a file next to the other Vibepollo state, so /appstats can
+    // answer after a restart, before Playnite reconnects; the live snapshot cannot, because it is
+    // dropped whenever the on-demand IPC client stops.
+    std::mutex g_stats_mutex;
+    bool g_stats_loaded = false;
+    stats_paths_t g_stats_paths;
+    std::vector<Game> g_stats_library;
+    std::string g_stats_saved;  // The last content written, to skip identical rewrites.
+
+    std::filesystem::path stats_state_path() {
+      return platf::appdata() / "playnite_stats.json";
+    }
+
+    Game compact_game(const Game &g) {
+      Game out;
+      out.id = g.id;
+      out.name = g.name;
+      out.playtime_minutes = g.playtime_minutes;
+      out.play_count = g.play_count;
+      out.last_played = g.last_played;
+      out.installed = g.installed;
+      out.hidden = g.hidden;
+      return out;
+    }
+
+    nlohmann::json stats_state_json() {
+      nlohmann::json library = nlohmann::json::array();
+      for (const auto &g : g_stats_library) {
+        library.push_back({
+          {"id", g.id},
+          {"name", g.name},
+          {"playtime_minutes", g.playtime_minutes},
+          {"play_count", g.play_count},
+          {"last_played", g.last_played},
+          {"installed", g.installed},
+          {"hidden", g.hidden},
+        });
+      }
+      nlohmann::json paths = {
+        {"session_log", g_stats_paths.session_log},
+        {"success_story_data", g_stats_paths.success_story_data},
+        {"success_story_resources", g_stats_paths.success_story_resources},
+      };
+      return {
+        {"paths", std::move(paths)},
+        {"library", std::move(library)},
+      };
+    }
+
+    void load_stats_state_locked() {
+      if (g_stats_loaded) {
+        return;
+      }
+      g_stats_loaded = true;
+      try {
+        const auto path = stats_state_path();
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+          return;
+        }
+        std::ifstream in(path, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto root = nlohmann::json::parse(text, nullptr, false);
+        if (root.is_discarded() || !root.is_object()) {
+          BOOST_LOG(warning) << "Playnite: ignoring unreadable play statistics state at " << path.string();
+          return;
+        }
+        const auto paths = root.value("paths", nlohmann::json::object());
+        if (paths.is_object()) {
+          g_stats_paths.session_log = paths.value("session_log", "");
+          g_stats_paths.success_story_data = paths.value("success_story_data", "");
+          g_stats_paths.success_story_resources = paths.value("success_story_resources", "");
+        }
+        const auto library = root.value("library", nlohmann::json::array());
+        if (library.is_array()) {
+          for (const auto &j : library) {
+            if (!j.is_object()) {
+              continue;
+            }
+            Game g;
+            g.id = j.value("id", "");
+            g.name = j.value("name", "");
+            g.playtime_minutes = j.value("playtime_minutes", static_cast<uint64_t>(0));
+            g.play_count = j.value("play_count", static_cast<uint64_t>(0));
+            g.last_played = j.value("last_played", "");
+            g.installed = j.value("installed", false);
+            g.hidden = j.value("hidden", false);
+            if (!g.id.empty()) {
+              g_stats_library.push_back(std::move(g));
+            }
+          }
+        }
+        g_stats_saved = stats_state_json().dump();
+        BOOST_LOG(info) << "Playnite: play statistics state loaded: sessionLog='" << g_stats_paths.session_log
+                        << "' successStoryData='" << g_stats_paths.success_story_data
+                        << "' games=" << g_stats_library.size();
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "Playnite: failed to load play statistics state: " << e.what();
+      } catch (...) {
+        BOOST_LOG(warning) << "Playnite: failed to load play statistics state";
+      }
+    }
+
+    void save_stats_state_locked() {
+      try {
+        auto root = stats_state_json();
+        auto text = root.dump();
+        if (text == g_stats_saved) {
+          return;
+        }
+        // Written through a temporary file and renamed, so a crash never leaves half of it.
+        if (file_handler::write_file(stats_state_path().string().c_str(), text) != 0) {
+          BOOST_LOG(warning) << "Playnite: failed to save play statistics state to " << stats_state_path().string();
+          return;
+        }
+        g_stats_saved = std::move(text);
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "Playnite: failed to save play statistics state: " << e.what();
+      } catch (...) {
+        BOOST_LOG(warning) << "Playnite: failed to save play statistics state";
+      }
+    }
+
+    void remember_stats_paths(const stats_paths_t &paths) {
+      std::scoped_lock lk(g_stats_mutex);
+      load_stats_state_locked();
+      g_stats_paths = paths;
+      save_stats_state_locked();
+    }
+
+    void remember_stats_library(const std::vector<Game> &games) {
+      std::vector<Game> compact;
+      compact.reserve(games.size());
+      for (const auto &g : games) {
+        compact.push_back(compact_game(g));
+      }
+      std::scoped_lock lk(g_stats_mutex);
+      load_stats_state_locked();
+      g_stats_library = std::move(compact);
+      save_stats_state_locked();
+    }
+  }  // namespace
+
+  stats_paths_t get_stats_paths() {
+    std::scoped_lock lk(g_stats_mutex);
+    load_stats_state_locked();
+    return g_stats_paths;
+  }
+
+  std::vector<Game> get_library_games() {
+    std::scoped_lock lk(g_stats_mutex);
+    load_stats_state_locked();
+    return g_stats_library;
+  }
 
   bool get_cached_install_dir(const std::string &playnite_id, std::string &out) {
     if (playnite_id.empty()) {
@@ -873,6 +1045,7 @@ namespace platf::playnite {
         std::size_t total = 0;
         std::size_t received = 0;
         bool whole = true;
+        std::vector<platf::playnite::Game> whole_library;
         {
           std::scoped_lock lk(mutex_);
           snapshot_markers_supported_ = true;
@@ -889,8 +1062,16 @@ namespace platf::playnite {
           library_confirmed_empty_ = last_games_.empty() && msg.snapshot_games_count == 0;
           ++snapshot_generation_;
           total = last_games_.size();
+          if (whole) {
+            whole_library = last_games_;
+          }
         }
         snapshot_cv_.notify_all();
+        if (whole && (!whole_library.empty() || msg.snapshot_games_count == 0)) {
+          // Only a library that arrived whole replaces the one the statistics read, and only an
+          // explicit zero empties it, as for the reconcile above.
+          remember_stats_library(whole_library);
+        }
         if (!whole) {
           BOOST_LOG(warning) << "Playnite: library snapshot incomplete: plugin sent " << msg.snapshot_games_count
                              << " games, received " << received << "; keeping synced apps until a full snapshot arrives";
@@ -928,6 +1109,15 @@ namespace platf::playnite {
           command_errors_[msg.command_request_id] = msg.command_error;
         }
         command_result_cv_.notify_all();
+      } else if (msg.type == MT::Paths) {
+        BOOST_LOG(info) << "Playnite: connector paths sessionLog='" << msg.paths_session_log
+                        << "' successStoryData='" << msg.paths_success_story_data
+                        << "' successStoryResources='" << msg.paths_success_story_resources << "'";
+        remember_stats_paths({
+          .session_log = msg.paths_session_log,
+          .success_story_data = msg.paths_success_story_data,
+          .success_story_resources = msg.paths_success_story_resources,
+        });
       } else if (msg.type == MT::Status) {
         BOOST_LOG(debug) << "Playnite: status '" << msg.status_name
                          << "' id='" << msg.status_game_id
@@ -1164,6 +1354,19 @@ namespace platf::playnite {
       return inst->is_server_active();
     }
     return false;
+  }
+
+  std::vector<running_game_t> get_running_games() {
+    std::vector<running_game_t> out;
+    if (!is_active()) {
+      return out;
+    }
+    for (const auto &game : get_active_game_statuses()) {
+      if (!game.id.empty() && game.started_at != 0) {
+        out.push_back({game.id, game.started_at});
+      }
+    }
+    return out;
   }
 
   void ensure_client_for_api() {

@@ -15,6 +15,7 @@
 
 // local includes
 #include "src/platform/common.h"
+#include "src/platform/windows/playnite_protocol.h"
 
 namespace platf::playnite {
 
@@ -171,6 +172,9 @@ namespace platf::playnite {
     std::string id;
     std::string exe;
     std::string install_dir;
+    /// Unix seconds when the host first heard the game started. A repeated gameStarted for a
+    /// game already running (the plugin resends them on every reconnect) keeps the first time.
+    std::int64_t started_at {0};
   };
 
   /**
@@ -185,6 +189,47 @@ namespace platf::playnite {
    *          Playnite session as active gameplay.
    */
   std::vector<active_game_status_t> get_active_game_statuses();
+
+  /**
+   * @brief Where the connector keeps what the play statistics are read from.
+   *
+   * Reported by the connector's `paths` message and persisted, so the statistics endpoints work
+   * after a restart before Playnite reconnects. Empty fields are unknown: an older connector, or
+   * SuccessStory not installed.
+   */
+  struct stats_paths_t {
+    std::string session_log;  ///< The connector's sessions.jsonl.
+    std::string success_story_data;  ///< SuccessStory's data folder (its files are in `SuccessStory\`).
+    std::string success_story_resources;  ///< The Resources folder next to SuccessStory's assembly.
+  };
+
+  /**
+   * @brief The paths the connector last reported (or the persisted ones).
+   */
+  stats_paths_t get_stats_paths();
+
+  /**
+   * @brief The last complete Playnite library, for the play statistics.
+   *
+   * Unlike the live snapshot, which is dropped whenever the on-demand IPC client stops, this
+   * keeps the last library that arrived whole, and is persisted with the paths. Only the fields
+   * the statistics use are kept: id, name, playtime, play count, last played, installed, hidden.
+   */
+  std::vector<Game> get_library_games();
+
+  /// @brief A game Playnite is running, and since when (Unix seconds).
+  struct running_game_t {
+    std::string id;
+    std::int64_t started_at {0};
+  };
+
+  /**
+   * @brief Games Playnite reports as running, while the IPC link is up.
+   *
+   * Without the link a stop may go unheard, so nothing is reported rather than a game that may
+   * have ended hours ago.
+   */
+  std::vector<running_game_t> get_running_games();
 
   // no-op: persistence helper moved to confighttp as refresh_client_apps_cache
 
