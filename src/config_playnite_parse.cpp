@@ -126,6 +126,8 @@ namespace config {
     consume_bool(vars, "playnite_sync_metadata", result.sync_metadata);
     consume_bool(vars, "playnite_focus_exit_on_first", result.focus_exit_on_first);
     consume_bool(vars, "playnite_fullscreen_entry_enabled", result.fullscreen_entry_enabled);
+    consume_bool(vars, "playnite_successstory", result.successstory);
+    consume_bool(vars, "playnite_gameactivity", result.gameactivity);
 
     consume_int(vars, "playnite_recent_games", result.recent_games, false);
     consume_int(vars, "playnite_recent_max_age_days", result.recent_max_age_days, true);

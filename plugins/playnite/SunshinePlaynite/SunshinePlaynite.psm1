@@ -1629,6 +1629,8 @@ function Get-PlayniteGames {
     try { if ($null -ne $g.CriticScore) { $criticScore = [int]$g.CriticScore } } catch {}
     $playtimeMin = 0
     try { if ($g.Playtime) { $playtimeMin = [int]([double]$g.Playtime / 60.0) } } catch {}
+    $playCount = 0
+    try { if ($g.PlayCount) { $playCount = [long]$g.PlayCount } } catch {}
     $lastPlayed = ''
     try { if ($g.LastActivity) { $lastPlayed = ([DateTime]$g.LastActivity).ToString('o') } } catch {}
     $boxArt = Get-BoxArtPath -Game $g
@@ -1665,6 +1667,7 @@ function Get-PlayniteGames {
       pluginName      = $pluginName
       storeId         = $storeId
       playtimeMinutes = $playtimeMin
+      playCount       = $playCount
       lastPlayed      = $lastPlayed
       boxArtPath      = $boxArt
       iconPath        = $icon
@@ -1690,8 +1693,87 @@ function Get-PlayniteGames {
   return $games
 }
 
+# --- Play statistics -------------------------------------------------------------------------
+# Playnite keeps only totals. The session history comes from GameActivity (Lacro59's extension,
+# like SuccessStory for achievements), which keeps one JSON file per game; Vibepollo reads those
+# files and SuccessStory's to answer /appstats and /appachievements, once the paths message below
+# has told it where they are. The connector writes no history of its own. None of this may ever
+# break the connector: every failure is logged and swallowed.
+
+$script:SuccessStoryPluginId = 'cebe6d32-8c46-4459-b993-5a5189d60788'
+$script:GameActivityPluginId = 'afbb1a0d-04a1-4d0c-9afa-c6e42ca855b4'
+
+function Get-ExtensionsDataRoot {
+  try {
+    if (-not $PlayniteApi) { return $null }
+    $root = $null
+    try { $root = [string]$PlayniteApi.Paths.ExtensionsDataPath } catch {}
+    if ($root) { return $root }
+  } catch {}
+  return $null
+}
+
+function Get-SuccessStoryDataPath {
+  $root = Get-ExtensionsDataRoot
+  if (-not $root) { return '' }
+  return (Join-Path $root $script:SuccessStoryPluginId)
+}
+
+# GameActivity's data folder; its per-game files are in the GameActivity subfolder. Sent whether
+# or not the extension is installed: Vibepollo looks for the files itself and says when there are
+# none, so installing GameActivity later needs no reconnect.
+function Get-GameActivityDataPath {
+  $root = Get-ExtensionsDataRoot
+  if (-not $root) { return '' }
+  return (Join-Path $root $script:GameActivityPluginId)
+}
+
+# SuccessStory keeps a few games' icons under its own Resources folder, next to its assembly.
+function Get-SuccessStoryResourcesPath {
+  try {
+    if (-not $PlayniteApi) { return '' }
+    $plugins = $null
+    try { $plugins = $PlayniteApi.Addons.Plugins } catch {}
+    if (-not $plugins) { return '' }
+    foreach ($plugin in $plugins) {
+      $id = ''
+      try { $id = $plugin.Id.ToString() } catch {}
+      if ($id -ne $script:SuccessStoryPluginId) { continue }
+      $location = ''
+      try { $location = [string]$plugin.GetType().Assembly.Location } catch {}
+      if ($location) { return (Join-Path (Split-Path -Parent $location) 'Resources') }
+    }
+  } catch {}
+  return ''
+}
+
+# Where Vibepollo finds GameActivity's and SuccessStory's data. Older Vibepollo builds parse an
+# unknown message type as Unknown and ignore it.
+function Send-StatsPaths {
+  try {
+    if (-not (Get-ExtensionsDataRoot)) {
+      Write-Log 'Paths: no extensions data path; not sent' -Level 'WARN'
+      return
+    }
+    $gameActivityData = Get-GameActivityDataPath
+    $successStoryData = Get-SuccessStoryDataPath
+    $successStoryResources = Get-SuccessStoryResourcesPath
+    $json = [ordered]@{
+      type                  = 'paths'
+      gameActivityData      = $gameActivityData
+      successStoryData      = $successStoryData
+      successStoryResources = $successStoryResources
+    } | ConvertTo-Json -Compress
+    Send-JsonMessage -Json $json -AllowConnectIfMissing
+    Write-Log ("Paths: gameActivityData='{0}' successStoryData='{1}' successStoryResources='{2}'" -f $gameActivityData, $successStoryData, $successStoryResources)
+  } catch {
+    Write-Log ("Paths: sending failed: {0}" -f $_.Exception.Message) -Level 'WARN'
+  }
+}
+
 function Send-InitialSnapshot {
   Write-Log "Building initial snapshot"
+  Send-StatsPaths
   # Bracket the snapshot so Sunshine can defer reconciliation until the library is fully delivered
   $jsonStart = @{ type = 'snapshotStart' } | ConvertTo-Json -Compress
   Send-JsonMessage -Json $jsonStart -AllowConnectIfMissing

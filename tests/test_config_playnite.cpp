@@ -90,3 +90,16 @@ TEST(PlayniteConfig, FocusExitOnFirst_ParsesBoolean) {
   const auto parsed = config::parse_playnite(vars);
   EXPECT_TRUE(parsed.focus_exit_on_first);
 }
+
+TEST(PlayniteConfig, CompatibleExtensions_DefaultOnAndCanBeDisabled) {
+  std::unordered_map<std::string, std::string> vars;
+  auto parsed = config::parse_playnite(vars);
+  EXPECT_TRUE(parsed.successstory);
+  EXPECT_TRUE(parsed.gameactivity);
+
+  vars = {{"playnite_successstory", "false"}, {"playnite_gameactivity", "Off"}};
+  parsed = config::parse_playnite(vars);
+  EXPECT_FALSE(parsed.successstory);
+  EXPECT_FALSE(parsed.gameactivity);
+  EXPECT_TRUE(vars.empty());
+}

@@ -404,6 +404,17 @@ sunshine_register_component(NAME test_component_config_playnite TEST_SOURCE test
 sunshine_register_component(NAME test_component_game_metadata TEST_SOURCE unit/test_game_metadata.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/game_metadata.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_play_stats TEST_SOURCE unit/test_play_stats.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/play_stats.cpp"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_gameactivity TEST_SOURCE unit/test_gameactivity.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/gameactivity.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/play_stats.cpp"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_successstory TEST_SOURCE unit/test_successstory.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/successstory.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/play_stats.cpp"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json)
 sunshine_register_component(NAME test_component_igdb_policy TEST_SOURCE unit/test_igdb_policy.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/igdb_policy.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/game_metadata.cpp"

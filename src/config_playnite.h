@@ -82,6 +82,13 @@ namespace config {
     // When enabled, Sunshine maintains a "Playnite (Fullscreen)" entry in apps.json
     // that launches Playnite in fullscreen/desktop mode via the helper.
     bool fullscreen_entry_enabled = false;
+
+    // Compatible Playnite extensions whose data Vibepollo reads for clients. When one is off,
+    // Vibepollo behaves exactly as if that extension were not installed.
+    // SuccessStory: achievements (/appachievements..., the achievements of /appstats).
+    bool successstory = true;
+    // GameActivity: play history (the sessions behind /appstats).
+    bool gameactivity = true;
   };
 
   extern playnite_t playnite;

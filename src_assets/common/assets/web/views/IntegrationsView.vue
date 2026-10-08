@@ -8,6 +8,9 @@ import { useI18n } from 'vue-i18n';
 
 import MetadataSettings from '@/components/settings/MetadataSettings.vue';
 import PlaynitePolicySettings from '@/components/settings/PlaynitePolicySettings.vue';
+import PlayniteExtensions, {
+  type PlayniteExtensionStatus,
+} from '@/components/settings/PlayniteExtensions.vue';
 import { ApiError, apiGet, apiPatch, apiPost } from '@/api/client';
 import {
   AppButton,
@@ -31,6 +34,7 @@ interface PlayniteStatus {
   installed_version?: string;
   packaged_version?: string;
   update_available?: boolean;
+  extensions?: Record<string, PlayniteExtensionStatus>;
 }
 
 interface SteamStatus {
@@ -1368,6 +1372,10 @@ function libraryRequest(
             <StatusBadge :label="summary.status" :tone="summary.tone" compact />
           </div>
           <PlaynitePolicySettings v-if="summary.id === 'playnite' && isWindows" />
+          <PlayniteExtensions
+            v-if="summary.id === 'playnite' && isWindows && playnite?.enabled !== false"
+            :extensions="playnite?.extensions"
+          />
           <ul v-if="summary.details.length" class="integration-details">
             <li v-for="detail in summary.details" :key="detail">{{ detail }}</li>
           </ul>

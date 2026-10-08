@@ -8,6 +8,7 @@
 // standard includes
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -18,6 +19,7 @@
 #include <functional>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -44,6 +46,7 @@
 // local includes
 #include "app_display_policy.h"
 #include "config.h"
+#include "config_playnite.h"
 #include "display_device.h"
 #include "display_helper_integration.h"
 #include "file_handler.h"
@@ -55,6 +58,8 @@
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
+#include "gameactivity.h"
+#include "play_stats.h"
 #include "remote_session.h"
 #include "remote_display_topology.h"
 #include "platform/common.h"
@@ -62,11 +67,13 @@
 #include "state_storage.h"
 #include "paired_state_policy.h"
 #include "state_storage_policy.h"
+#include "successstory.h"
 #include "update.h"
 #include "single_flight.h"
 #include "state_storage_policy.h"
 #ifdef _WIN32
   #include "platform/windows/display.h"
+  #include "platform/windows/playnite_integration.h"
   #include "platform/windows/display_helper_request_policy.h"
   #include "platform/windows/display_helper_request_helpers.h"
   #include "platform/windows/misc.h"
@@ -6111,6 +6118,385 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  namespace {
+    void write_not_found(resp_https_t &response) {
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+      response->close_connection_after_response = true;
+    }
+
+    /**
+     * @brief The /appmetadata permission check, shared by the play statistics endpoints: they
+     * describe the same catalogue, so they are open to the same clients.
+     */
+    bool authorize_library_read(resp_https_t &response, const verified_client_t &verified_client, std::string_view action) {
+      if (has_client_perm(verified_client, PERM::_all_actions)) {
+        return true;
+      }
+      log_permission_denied(action, "List applications"sv, verified_client);
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+      return false;
+    }
+
+#ifdef _WIN32
+    void write_json(resp_https_t &response, const nlohmann::json &body) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(SimpleWeb::StatusCode::success_ok, body.dump(), headers);
+      response->close_connection_after_response = true;
+    }
+
+    std::optional<std::int64_t> last_activity_of(const std::string &iso8601, const play_stats::to_local_t &to_local) {
+      if (iso8601.empty()) {
+        return std::nullopt;
+      }
+      return play_stats::parse_iso8601(iso8601, to_local);
+    }
+
+    /**
+     * @brief The Playnite games this client's /applist shows, keyed by Playnite id.
+     *
+     * Games outside it are counted in totals but never named, so a Remote Monitor client learns
+     * no more about the library from statistics than from the catalogue itself.
+     */
+    play_stats::catalogue_t playnite_catalogue(req_https_t request, const verified_client_t &verified_client, const std::vector<proc::ctx_t> &configured_apps) {
+      const auto visible = applist_visible_uuids(request, verified_client, configured_apps);
+      play_stats::catalogue_t catalogue;
+      for (const auto &app : configured_apps) {
+        if (app.playnite_id.empty() || !visible.contains(app.uuid)) {
+          continue;
+        }
+        catalogue.try_emplace(play_stats::normalize_id(app.playnite_id), play_stats::catalogue_entry_t {app.uuid, app.name});
+      }
+      return catalogue;
+    }
+
+    /// @brief The visible, Playnite-backed app with this UUID, or null.
+    const proc::ctx_t *playnite_app(req_https_t request, const verified_client_t &verified_client, const std::vector<proc::ctx_t> &configured_apps, const std::string &uuid) {
+      if (uuid.empty()) {
+        return nullptr;
+      }
+      const auto visible = applist_visible_uuids(request, verified_client, configured_apps);
+      for (const auto &app : configured_apps) {
+        if (app.uuid == uuid) {
+          return !app.playnite_id.empty() && visible.contains(app.uuid) ? &app : nullptr;
+        }
+      }
+      return nullptr;
+    }
+
+    /// @brief SuccessStory's files, kept across requests so their cache is; replaced when the
+    /// connector reports other folders. Null when turned off (playnite_successstory), exactly as
+    /// if SuccessStory were not installed: the achievements endpoints answer 404.
+    std::shared_ptr<successstory::store_t> successstory_store(const platf::playnite::stats_paths_t &paths) {
+      static std::mutex store_mutex;
+      static std::shared_ptr<successstory::store_t> store;
+      if (!config::playnite.successstory || paths.success_story_data.empty()) {
+        return nullptr;
+      }
+      const auto data_dir = successstory::utf8_path(paths.success_story_data);
+      const auto resources_dir = successstory::utf8_path(paths.success_story_resources);
+      std::scoped_lock lock {store_mutex};
+      if (!store || store->data_dir() != data_dir || store->resources_dir() != resources_dir) {
+        store = std::make_shared<successstory::store_t>(data_dir, resources_dir);
+      }
+      return store;
+    }
+
+    /// @brief GameActivity's files, kept across requests so their cache is; replaced when the
+    /// connector reports another folder. Null when turned off (playnite_gameactivity), exactly as
+    /// if GameActivity were not installed.
+    std::shared_ptr<gameactivity::store_t> game_activity_store(const platf::playnite::stats_paths_t &paths) {
+      static std::mutex store_mutex;
+      static std::shared_ptr<gameactivity::store_t> store;
+      if (!config::playnite.gameactivity) {
+        return nullptr;
+      }
+      const auto data_dir = gameactivity::resolve_data_dir(paths.game_activity_data, paths.success_story_data);
+      if (data_dir.empty()) {
+        return nullptr;
+      }
+      std::scoped_lock lock {store_mutex};
+      if (!store || store->data_dir() != data_dir) {
+        store = std::make_shared<gameactivity::store_t>(data_dir);
+      }
+      return store;
+    }
+
+    /// @brief GameActivity's sessions, the last whole library and what is running now.
+    play_stats::input_t play_stats_input(const platf::playnite::stats_paths_t &paths) {
+      play_stats::input_t input;
+      input.now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+      input.activity = false;
+      if (const auto store = game_activity_store(paths)) {
+        auto snapshot = store->snapshot();
+        input.activity = snapshot.found;
+        input.sessions = std::move(snapshot.sessions);
+      }
+      for (const auto &g : platf::playnite::get_library_games()) {
+        input.games.push_back({
+          .id = play_stats::normalize_id(g.id),
+          .name = g.name,
+          .playtime_seconds = static_cast<std::int64_t>(g.playtime_minutes) * 60,
+          .play_count = static_cast<std::int64_t>(g.play_count),
+          .last_activity = last_activity_of(g.last_played, input.to_local),
+          .installed = g.installed,
+          .hidden = g.hidden,
+        });
+      }
+      for (const auto &r : platf::playnite::get_running_games()) {
+        input.running.push_back({play_stats::normalize_id(r.id), r.started_at});
+      }
+      return input;
+    }
+
+    std::int64_t non_negative_arg(const std::string &text, std::int64_t fallback, std::int64_t max) {
+      if (text.empty() || text.size() > 18 || !std::all_of(text.begin(), text.end(), [](unsigned char c) {
+            return std::isdigit(c);
+          })) {
+        return fallback;
+      }
+      return std::min<std::int64_t>(std::stoll(text), max);
+    }
+#endif
+  }  // namespace
+
+  /**
+   * @brief How much is played, from GameActivity's sessions and Playnite's library totals.
+   *
+   * `?range=week|month|year&offset=0` answers the overview, `?appuuid=<uuid>` one game. Listed
+   * games are only those in the caller's /applist; totals count the whole library. `activity`
+   * says whether GameActivity's data was found: without it the history is empty and only
+   * Playnite's totals are filled in. 404 without Playnite data (a host that never heard from the
+   * connector, or not Windows).
+   */
+  void appstats(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto fg = util::fail_guard([&]() {
+      response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
+      response->close_connection_after_response = true;
+    });
+
+    auto named_cert_p = get_verified_cert(request);
+    if (!authorize_library_read(response, named_cert_p, "Get AppStats"sv)) {
+      fg.disable();
+      return;
+    }
+
+#ifdef _WIN32
+    // Wakes the on-demand link so the running games and the library are current next time.
+    platf::playnite::ensure_client_for_api();
+    const auto paths = platf::playnite::get_stats_paths();
+    auto input = play_stats_input(paths);
+    if (input.games.empty() && paths.game_activity_data.empty() && paths.success_story_data.empty()) {
+      // Nothing heard from the connector yet, not even a library: nothing to describe.
+      fg.disable();
+      write_not_found(response);
+      return;
+    }
+
+    auto args = request->parse_query_string();
+    const auto appuuid = get_arg(args, "appuuid", "");
+    const auto configured_apps = proc::proc.get_apps();
+
+    nlohmann::json body;
+    if (!appuuid.empty()) {
+      const auto *app = playnite_app(request, named_cert_p, configured_apps, appuuid);
+      if (!app) {
+        fg.disable();
+        write_not_found(response);
+        return;
+      }
+      const auto id = play_stats::normalize_id(app->playnite_id);
+      const bool known = std::any_of(input.games.begin(), input.games.end(), [&](const auto &g) {
+        return g.id == id;
+      });
+      if (!known) {
+        // No whole library yet (Playnite has not been heard from since the upgrade): fall back on
+        // the totals the last sync wrote into the app.
+        input.games.push_back({
+          .id = id,
+          .name = app->name,
+          .playtime_seconds = static_cast<std::int64_t>(app->metadata.playtime_minutes) * 60,
+          .play_count = 0,
+          .last_activity = last_activity_of(app->metadata.last_played, input.to_local),
+          .installed = true,
+          .hidden = false,
+        });
+      }
+      auto game = play_stats::game(input, id, app->uuid);
+      if (!game) {
+        fg.disable();
+        write_not_found(response);
+        return;
+      }
+      body = std::move(*game);
+    } else {
+      const auto range = get_arg(args, "range", "week");
+      const auto offset = play_stats::parse_offset(get_arg(args, "offset", "0"));
+      const auto catalogue = playnite_catalogue(request, named_cert_p, configured_apps);
+      const auto store = successstory_store(paths);
+      body = play_stats::overview(input, range, offset, catalogue, [&](std::int64_t from_utc, std::int64_t to_utc) -> nlohmann::json {
+        if (!store || !store->available()) {
+          return nullptr;
+        }
+        const auto unlocks = store->unlocked(from_utc, to_utc);
+        return {
+          {"unlocked", static_cast<std::int64_t>(unlocks.size())},
+          {"recent", successstory::unlocks_json(unlocks, catalogue, 8)},
+        };
+      });
+    }
+
+    fg.disable();
+    write_json(response, body);
+#else
+    fg.disable();
+    write_not_found(response);
+#endif
+  }
+
+  /**
+   * @brief One game's achievements, from SuccessStory's file: `?appuuid=<uuid>`.
+   *
+   * 404 when SuccessStory has nothing on the game, the game is not in the caller's /applist, or
+   * the host has no SuccessStory data.
+   */
+  void appachievements(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto fg = util::fail_guard([&]() {
+      response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
+      response->close_connection_after_response = true;
+    });
+
+    auto named_cert_p = get_verified_cert(request);
+    if (!authorize_library_read(response, named_cert_p, "Get AppAchievements"sv)) {
+      fg.disable();
+      return;
+    }
+
+#ifdef _WIN32
+    const auto store = successstory_store(platf::playnite::get_stats_paths());
+    auto args = request->parse_query_string();
+    const auto configured_apps = proc::proc.get_apps();
+    const auto *app = store ? playnite_app(request, named_cert_p, configured_apps, get_arg(args, "appuuid", "")) : nullptr;
+    const auto game = app ? store->game(app->playnite_id) : nullptr;
+    std::optional<nlohmann::json> body;
+    if (game) {
+      body = successstory::game_json(*game, app->uuid);
+    }
+    fg.disable();
+    if (!body) {
+      write_not_found(response);
+      return;
+    }
+    write_json(response, *body);
+#else
+    fg.disable();
+    write_not_found(response);
+#endif
+  }
+
+  /**
+   * @brief The latest unlocked achievements across the caller's games, newest first:
+   * `?since=<unix seconds>&limit=40`. Only unlocks with a known date, at or after `since`.
+   */
+  void appachievements_recent(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto fg = util::fail_guard([&]() {
+      response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
+      response->close_connection_after_response = true;
+    });
+
+    auto named_cert_p = get_verified_cert(request);
+    if (!authorize_library_read(response, named_cert_p, "Get RecentAchievements"sv)) {
+      fg.disable();
+      return;
+    }
+
+#ifdef _WIN32
+    const auto store = successstory_store(platf::playnite::get_stats_paths());
+    if (!store) {
+      fg.disable();
+      write_not_found(response);
+      return;
+    }
+    auto args = request->parse_query_string();
+    const auto since = non_negative_arg(get_arg(args, "since", "0"), 0, std::numeric_limits<std::int64_t>::max());
+    const auto limit = std::max<std::int64_t>(1, non_negative_arg(get_arg(args, "limit", "40"), 40, 200));
+    const auto catalogue = playnite_catalogue(request, named_cert_p, proc::proc.get_apps());
+    const auto unlocks = store->unlocked(since, std::numeric_limits<std::int64_t>::max());
+    nlohmann::json body = {{"achievements", successstory::unlocks_json(unlocks, catalogue, static_cast<std::size_t>(limit))}};
+    fg.disable();
+    write_json(response, body);
+#else
+    fg.disable();
+    write_not_found(response);
+#endif
+  }
+
+  /**
+   * @brief An achievement icon SuccessStory keeps on disk:
+   * `?appuuid=<uuid>&index=<n>[&locked=1]`. Web icons are linked directly and 404 here.
+   */
+  void appachievementicon(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto fg = util::fail_guard([&]() {
+      response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
+      response->close_connection_after_response = true;
+    });
+
+    auto named_cert_p = get_verified_cert(request);
+    if (!authorize_library_read(response, named_cert_p, "Get AchievementIcon"sv)) {
+      fg.disable();
+      return;
+    }
+
+#ifdef _WIN32
+    // Big enough for any icon, small enough that a mistake can't stream a disk image.
+    constexpr std::uintmax_t max_icon_bytes = 8 * 1024 * 1024;
+    const auto store = successstory_store(platf::playnite::get_stats_paths());
+    auto args = request->parse_query_string();
+    const auto configured_apps = proc::proc.get_apps();
+    const auto *app = store ? playnite_app(request, named_cert_p, configured_apps, get_arg(args, "appuuid", "")) : nullptr;
+    const auto index = non_negative_arg(get_arg(args, "index", ""), -1, 1000000);
+    const bool locked = get_arg(args, "locked", "0") == "1";
+    std::optional<std::filesystem::path> path;
+    if (app && index >= 0) {
+      path = store->icon_path(app->playnite_id, static_cast<std::size_t>(index), locked);
+    }
+    std::string bytes;
+    if (path) {
+      std::error_code ec;
+      const auto size = std::filesystem::file_size(*path, ec);
+      if (!ec && size <= max_icon_bytes) {
+        std::ifstream in(*path, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        if (in.bad()) {
+          bytes.clear();
+        }
+      }
+    }
+    fg.disable();
+    if (bytes.empty()) {
+      write_not_found(response);
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", successstory::content_type_for(*path));
+    headers.emplace("Cache-Control", "private, max-age=86400");
+    response->write(SimpleWeb::StatusCode::success_ok, bytes, headers);
+    response->close_connection_after_response = true;
+#else
+    fg.disable();
+    write_not_found(response);
+#endif
+  }
+
 #ifdef _WIN32
   namespace {
     /// The newest telemetry stream per client. A client that opens a second one
@@ -6605,6 +6991,9 @@ namespace nvhttp {
     // work, and on a single FIFO worker that made the host undiscoverable until restart.
     thread_pool_util::ThreadPool discovery_route_pool;
     discovery_route_pool.start(1);
+    // Play statistics and achievements read the session log and SuccessStory's files.
+    thread_pool_util::ThreadPool library_route_pool;
+    library_route_pool.start(1);
 
     // Verify certificates after establishing connection
     https_server.verify = [](req_https_t req, SSL *ssl) {
@@ -6733,6 +7122,9 @@ namespace nvhttp {
     auto run_discovery_nvhttp = [&discovery_route_pool, run_on_blocking_pool](auto task) {
       run_on_blocking_pool(discovery_route_pool, std::move(task));
     };
+    auto run_library_nvhttp = [&library_route_pool, run_on_blocking_pool](auto task) {
+      run_on_blocking_pool(library_route_pool, std::move(task));
+    };
 
     https_server.default_resource["GET"] = not_found<SunshineHTTPS>;
     https_server.default_resource["POST"] = not_found<SunshineHTTPS>;
@@ -6752,6 +7144,28 @@ namespace nvhttp {
     };
     https_server.resource["^/appasset$"]["GET"] = appasset;
     https_server.resource["^/appmetadata$"]["GET"] = appmetadata;
+    // The play statistics read files that can take a moment the first time (every SuccessStory
+    // file on the host), so they get their own worker rather than holding up the server's.
+    https_server.resource["^/appstats$"]["GET"] = [run_library_nvhttp](auto resp, auto req) {
+      run_library_nvhttp([resp = std::move(resp), req = std::move(req)]() mutable {
+        appstats(std::move(resp), std::move(req));
+      });
+    };
+    https_server.resource["^/appachievements$"]["GET"] = [run_library_nvhttp](auto resp, auto req) {
+      run_library_nvhttp([resp = std::move(resp), req = std::move(req)]() mutable {
+        appachievements(std::move(resp), std::move(req));
+      });
+    };
+    https_server.resource["^/appachievements/recent$"]["GET"] = [run_library_nvhttp](auto resp, auto req) {
+      run_library_nvhttp([resp = std::move(resp), req = std::move(req)]() mutable {
+        appachievements_recent(std::move(resp), std::move(req));
+      });
+    };
+    https_server.resource["^/appachievementicon$"]["GET"] = [run_library_nvhttp](auto resp, auto req) {
+      run_library_nvhttp([resp = std::move(resp), req = std::move(req)]() mutable {
+        appachievementicon(std::move(resp), std::move(req));
+      });
+    };
     https_server.resource["^/appbackground$"]["GET"] = appbackground;
 #ifdef _WIN32
     https_server.resource["^/telemetry$"]["GET"] = telemetry;
@@ -6885,6 +7299,8 @@ namespace nvhttp {
     blocking_route_pool.join();
     discovery_route_pool.stop();
     discovery_route_pool.join();
+    library_route_pool.stop();
+    library_route_pool.join();
     rtsp_stream::terminate_sessions(false);
     remote_session::notify_monitor_shutdown();
     forget_all_remote_clients();
