@@ -23,7 +23,7 @@ namespace video::input_boost {
    */
   struct settings_t {
     clock::duration boost_interval {};  ///< Duplicate-frame interval while boosted.
-    clock::duration window {};  ///< How long the boost lasts after the last qualifying input.
+    clock::duration window {};  ///< How long after the qualifying input the boost may last.
     clock::duration static_after {};  ///< Time without a captured frame after which the screen counts as static.
   };
 
@@ -47,10 +47,15 @@ namespace video::input_boost {
   /**
    * @brief Tracks whether the encode loop should currently run at the boosted cadence.
    * @details Input only arms the boost while the screen is static, i.e. no frame has
-   *          been captured for settings_t::static_after. Input arriving while frames
-   *          are flowing neither arms nor extends it, so continuous input during
-   *          gameplay cannot keep duplicates interleaved with live frames; the boost
-   *          runs out at most settings_t::window after the screen came back to life.
+   *          been captured for settings_t::static_after. An armed boost does nothing
+   *          until the first live frame captured after that input (the response)
+   *          arrives; only then do duplicates follow at the boosted cadence, so no
+   *          copy of the stale pre-input image is ever sent early and input that
+   *          changes nothing on screen sends nothing extra. A second live frame
+   *          within settings_t::static_after of the previous one means the screen is
+   *          live again and ends the boost, so duplicates are never interleaved with
+   *          a running animation or with gameplay. The boost also ends
+   *          settings_t::window after the input that armed it.
    */
   class state_t {
   public:
@@ -60,35 +65,34 @@ namespace video::input_boost {
 
     /**
      * @brief Record a live (non-placeholder) captured frame.
+     * @param at The frame's capture time. Record pending input first, so that it is
+     *           judged against the screen as it was before this frame.
      */
     void on_frame(clock::time_point at);
 
     /**
      * @brief Record qualifying client input.
-     * @return true if the input armed or extended the boost.
+     * @return true if the input armed the boost.
      */
     bool on_input(clock::time_point at);
 
-    [[nodiscard]] bool active(clock::time_point now) const;
-
     /**
-     * @brief The deadline for an image wait that began at wait_started.
-     * @details While boosted, the wait is cut short to one boost interval after it
-     *          began (which is also after the previous encode), so input arriving
-     *          during a long idle wait stops it without ever encoding faster than
-     *          the boosted cadence.
+     * @brief Whether duplicates should currently follow at the boosted cadence.
+     * @details While true, the encode loop waits at most settings_t::boost_interval
+     *          for the next captured image. The wait starts after the previous
+     *          encode, so duplicates are never closer together than that interval.
      */
-    [[nodiscard]] clock::time_point wait_deadline(
-      clock::time_point wait_started,
-      clock::time_point idle_deadline,
-      clock::time_point now
-    ) const;
+    [[nodiscard]] bool active(clock::time_point now) const;
 
     [[nodiscard]] const settings_t &settings() const;
 
   private:
+    void end();
+
     settings_t settings_;
     std::optional<clock::time_point> last_frame_;
+    std::optional<clock::time_point> armed_at_;
     std::optional<clock::time_point> boost_until_;
+    bool following_ = false;
   };
 }  // namespace video::input_boost

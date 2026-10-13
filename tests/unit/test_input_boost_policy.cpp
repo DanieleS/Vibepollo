@@ -60,45 +60,108 @@ TEST(InputBoost, ArmsOnlyOnAStaticScreen) {
   auto state = default_state();
   // Before the first live frame the bootstrap logic owns the cadence.
   EXPECT_FALSE(state.on_input(t0));
-  EXPECT_FALSE(state.active(t0));
 
   state.on_frame(t0);
   // Frames are flowing: input during gameplay does nothing.
   EXPECT_FALSE(state.on_input(t0 + 20ms));
-  EXPECT_FALSE(state.active(t0 + 20ms));
+  state.on_frame(t0 + 30ms);
+  EXPECT_FALSE(state.active(t0 + 40ms));
 
   // The screen has been static for the idle interval.
   EXPECT_TRUE(state.on_input(t0 + 80ms));
-  EXPECT_TRUE(state.active(t0 + 80ms));
-  EXPECT_TRUE(state.active(t0 + 229ms));
-  EXPECT_FALSE(state.active(t0 + 230ms));
 }
 
-TEST(InputBoost, LiveFramesStopFurtherExtensions) {
-  auto state = default_state();
-  state.on_frame(t0);
-  ASSERT_TRUE(state.on_input(t0 + 100ms));  // boosted until t0 + 250ms
-
-  // The response starts flowing; held input keeps arriving with every frame.
-  for (auto at = t0 + 120ms; at < t0 + 400ms; at += 16ms) {
-    state.on_frame(at);
-    EXPECT_FALSE(state.on_input(at + 1ms));
-  }
-  EXPECT_TRUE(state.active(t0 + 249ms));
-  EXPECT_FALSE(state.active(t0 + 250ms));
-}
-
-TEST(InputBoost, InputOnAStillStaticScreenExtendsTheWindow) {
+TEST(InputBoost, WaitsForTheResponseBeforeSendingDuplicates) {
   auto state = default_state();
   state.on_frame(t0);
   ASSERT_TRUE(state.on_input(t0 + 100ms));
-  // The first press changed nothing on screen; a second one keeps the boost alive.
+
+  // Armed, but a copy of the stale pre-input image would show nothing new: the
+  // idle wait in progress is left alone.
+  EXPECT_FALSE(state.active(t0 + 100ms));
+  EXPECT_FALSE(state.active(t0 + 130ms));
+
+  // The response frame arrives; duplicates now follow it at the boosted cadence.
+  state.on_frame(t0 + 135ms);
+  EXPECT_TRUE(state.active(t0 + 135ms));
+  EXPECT_TRUE(state.active(t0 + 249ms));
+  // The window counts from the input, not from the response.
+  EXPECT_FALSE(state.active(t0 + 250ms));
+}
+
+TEST(InputBoost, InputThatChangesNothingSendsNothingExtra) {
+  auto state = default_state();
+  state.on_frame(t0);
+  // A held stick on a screen that ignores it: every packet re-arms, nothing responds.
+  for (auto at = t0 + 100ms; at < t0 + 2s; at += 30ms) {
+    EXPECT_TRUE(state.on_input(at));
+    EXPECT_FALSE(state.active(at + 1ms));
+  }
+}
+
+TEST(InputBoost, FramesCapturedBeforeTheInputAreNotItsResponse) {
+  auto state = default_state();
+  state.on_frame(t0);
+  ASSERT_TRUE(state.on_input(t0 + 100ms));
+
+  // Captured just before the input reached the OS, popped just after it.
+  state.on_frame(t0 + 98ms);
+  EXPECT_FALSE(state.active(t0 + 101ms));
+
+  // The actual response, soon after that stale frame, still gets its followers.
+  state.on_frame(t0 + 120ms);
+  EXPECT_TRUE(state.active(t0 + 121ms));
+}
+
+TEST(InputBoost, EndsOnceTheScreenIsLiveAgain) {
+  auto state = default_state();
+  state.on_frame(t0);
+  ASSERT_TRUE(state.on_input(t0 + 100ms));
+
+  // The input starts a 60 fps animation: one follower at most fits before its
+  // second frame, which ends the boost instead of doubling the animation's frames.
+  state.on_frame(t0 + 110ms);
+  EXPECT_TRUE(state.active(t0 + 111ms));
+  state.on_frame(t0 + 127ms);
+  EXPECT_FALSE(state.active(t0 + 128ms));
+
+  // Held input keeps arriving with every frame; it cannot restart the boost.
+  for (auto at = t0 + 143ms; at < t0 + 400ms; at += 16ms) {
+    EXPECT_FALSE(state.on_input(at - 1ms));
+    state.on_frame(at);
+    EXPECT_FALSE(state.active(at + 1ms));
+  }
+}
+
+TEST(InputBoost, SparseResponsesEachGetFollowers) {
+  auto state = default_state();
+  state.on_frame(t0);
+  ASSERT_TRUE(state.on_input(t0 + 100ms));
+  state.on_frame(t0 + 120ms);
+  ASSERT_TRUE(state.active(t0 + 121ms));
+
+  // A second, slower change of the same response still counts as static content.
+  state.on_frame(t0 + 180ms);
+  EXPECT_TRUE(state.active(t0 + 181ms));
+}
+
+TEST(InputBoost, NewInputWaitsForItsOwnResponse) {
+  auto state = default_state();
+  state.on_frame(t0);
+  ASSERT_TRUE(state.on_input(t0 + 100ms));
+  state.on_frame(t0 + 120ms);
+  ASSERT_TRUE(state.active(t0 + 121ms));
+
+  // The next press on the again-static screen pauses the followers until its response.
   EXPECT_TRUE(state.on_input(t0 + 200ms));
+  EXPECT_FALSE(state.active(t0 + 201ms));
+  state.on_frame(t0 + 215ms);
   EXPECT_TRUE(state.active(t0 + 349ms));
   EXPECT_FALSE(state.active(t0 + 350ms));
-  // An older event never shortens the window.
-  EXPECT_TRUE(state.on_input(t0 + 120ms));
-  EXPECT_TRUE(state.active(t0 + 349ms));
+
+  // An older event never re-arms.
+  EXPECT_FALSE(state.on_input(t0 + 150ms));
+  EXPECT_TRUE(state.active(t0 + 300ms));
 }
 
 TEST(InputBoost, InputOlderThanTheLastFrameIsIgnored) {
@@ -107,35 +170,10 @@ TEST(InputBoost, InputOlderThanTheLastFrameIsIgnored) {
   EXPECT_FALSE(state.on_input(t0));
 }
 
-TEST(InputBoost, CutsAnIdleWaitShortWithoutExceedingTheBoostedCadence) {
-  auto state = default_state();
-  state.on_frame(t0);
-
-  const auto wait_started = t0 + 60ms;
-  const auto idle_deadline = wait_started + idle_20;
-  EXPECT_EQ(state.wait_deadline(wait_started, idle_deadline, wait_started + 5ms), idle_deadline);
-
-  // Input lands 20 ms into the idle wait: the wait ends now, one boosted
-  // interval after the previous encode has long passed.
-  ASSERT_TRUE(state.on_input(wait_started + 20ms));
-  EXPECT_EQ(state.wait_deadline(wait_started, idle_deadline, wait_started + 20ms), wait_started + stream_120);
-
-  // Input landing right after the previous encode still waits a full boosted interval.
-  const auto next_wait = wait_started + 21ms;
-  EXPECT_EQ(state.wait_deadline(next_wait, next_wait + idle_20, next_wait + 1ms), next_wait + stream_120);
-
-  // A shorter remaining budget (for example an AMF tail flush) is kept.
-  EXPECT_EQ(state.wait_deadline(next_wait, next_wait + 2ms, next_wait), next_wait + 2ms);
-
-  // Once the boost lapses the idle cadence returns.
-  const auto late = t0 + 500ms;
-  EXPECT_EQ(state.wait_deadline(late, late + idle_20, late), late + idle_20);
-}
-
-TEST(InputBoost, DisabledStateNeverChangesTheWait) {
+TEST(InputBoost, DisabledStateNeverBoosts) {
   state_t state {settings_t {}};
   state.on_frame(t0);
   EXPECT_FALSE(state.on_input(t0 + 1s));
-  EXPECT_FALSE(state.active(t0 + 1s));
-  EXPECT_EQ(state.wait_deadline(t0 + 1s, t0 + 1s + idle_20, t0 + 1s), t0 + 1s + idle_20);
+  state.on_frame(t0 + 1s + 10ms);
+  EXPECT_FALSE(state.active(t0 + 1s + 11ms));
 }

@@ -47,8 +47,27 @@ namespace video::input_boost {
   }
 
   void state_t::on_frame(const clock::time_point at) {
-    if (!last_frame_ || at > *last_frame_) {
-      last_frame_ = at;
+    if (last_frame_ && at <= *last_frame_) {
+      return;
+    }
+    const auto previous = last_frame_;
+    last_frame_ = at;
+
+    if (!boost_until_) {
+      return;
+    }
+    if (at >= *boost_until_) {
+      end();
+      return;
+    }
+    if (!following_) {
+      // Frames captured before the input reached the OS cannot be its response.
+      following_ = at >= *armed_at_;
+      return;
+    }
+    if (previous && at - *previous < settings_.static_after) {
+      // The screen is live again: duplicates would only be interleaved with it.
+      end();
     }
   }
 
@@ -60,27 +79,25 @@ namespace video::input_boost {
     if (at < *last_frame_ || at - *last_frame_ < settings_.static_after) {
       return false;
     }
-
-    const auto until = at + settings_.window;
-    if (!boost_until_ || until > *boost_until_) {
-      boost_until_ = until;
+    if (armed_at_ && at <= *armed_at_) {
+      return false;
     }
+
+    // Wait for this input's own response before sending duplicates again.
+    armed_at_ = at;
+    boost_until_ = at + settings_.window;
+    following_ = false;
     return true;
   }
 
   bool state_t::active(const clock::time_point now) const {
-    return enabled() && boost_until_ && now < *boost_until_;
+    return enabled() && following_ && boost_until_ && now < *boost_until_;
   }
 
-  clock::time_point state_t::wait_deadline(
-    const clock::time_point wait_started,
-    const clock::time_point idle_deadline,
-    const clock::time_point now
-  ) const {
-    if (!active(now)) {
-      return idle_deadline;
-    }
-    return std::min(idle_deadline, wait_started + settings_.boost_interval);
+  void state_t::end() {
+    armed_at_.reset();
+    boost_until_.reset();
+    following_ = false;
   }
 
   const settings_t &state_t::settings() const {
