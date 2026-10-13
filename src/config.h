@@ -344,6 +344,8 @@ namespace config {
 
     bool enable_input_only_mode;
     bool forward_rumble;
+
+    bool focus_hints;  ///< Tell clients that ask when a text field takes focus. Windows only.
   };
 
   struct frame_limiter_t {

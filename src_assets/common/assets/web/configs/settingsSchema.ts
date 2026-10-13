@@ -891,6 +891,7 @@ export const settingsCategories: SettingsCategory[] = [
           boolean('always_send_scancodes', { platform: 'windows' }),
           boolean('high_resolution_scrolling'),
           boolean('native_pen_touch', { platform: 'windows' }),
+          boolean('focus_hints', { platform: 'windows' }),
         ],
       },
       {
@@ -1229,6 +1230,7 @@ export const settingsDefaults: Record<string, unknown> = {
   always_send_scancodes: true,
   high_resolution_scrolling: true,
   native_pen_touch: true,
+  focus_hints: false,
   key_repeat_delay: 500,
   key_repeat_frequency: 24.9,
   install_steam_audio_drivers: true,

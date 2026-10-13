@@ -43,6 +43,7 @@ extern "C" {
 #include "deferred_stream_start_policy.h"
 #include "display_device.h"
 #include "display_helper_integration.h"
+#include "focus_hints.h"
 #include "globals.h"
 #include "host_stats.h"
 #include "haptics_gain.h"
@@ -454,6 +455,13 @@ namespace stream {
     SS_HDR_METADATA metadata;
   };
 
+  // Vibepollo protocol extension, see focus_hints.h
+  struct control_focus_hint_t {
+    control_header_v2 header;
+
+    std::array<std::uint8_t, focus_hints::payload_size> payload;
+  };
+
   typedef struct control_encrypted_t {
     std::uint16_t encryptedHeaderType;  // Always LE 0x0001
     std::uint16_t length;  // sizeof(seq) + 16 byte tag + secondary header and data
@@ -668,7 +676,17 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       std::array<haptics_gain_t, platf::MAX_GAMEPADS> haptics_gains;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+
+      // Latest text field focus from the detector thread, sent by the control thread. Only
+      // the newest state matters, so an event rather than a queue.
+      safe::mail_raw_t::event_t<focus_hints::kind_t> focus_hint_events;
+      // Sequence number of the last focus hint sent; only touched by the control thread
+      std::uint32_t focus_hint_sequence;
     } control;
+
+    // This session's subscription to the focus detector, zero when it has none. Written by
+    // start() before the session runs and read by join() after it, so it needs no lock.
+    focus_hints::subscription_t focus_monitor_subscription = 0;
 
     std::uint32_t launch_session_id;
     std::mutex metadata_mutex;
@@ -1407,6 +1425,32 @@ namespace stream {
     return 0;
   }
 
+  int send_focus_hint(session_t *session, focus_hints::kind_t kind) {
+    if (!session->control.peer) {
+      // Focus is a state: the next change is sent once the peer is here
+      return -1;
+    }
+
+    control_focus_hint_t plaintext {};
+    plaintext.header.type = focus_hints::packet_type;
+    plaintext.header.payloadLength = sizeof(plaintext.payload);
+    plaintext.payload = focus_hints::encode_payload(kind, ++session->control.focus_hint_sequence);
+
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+      encrypted_payload;
+
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
+      BOOST_LOG(warning) << "Couldn't send focus hint to ["sv << addr << ':' << port << ']';
+
+      return -1;
+    }
+
+    BOOST_LOG(debug) << "Sent focus hint: "sv << focus_hints::to_string(kind);
+    return 0;
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1859,6 +1903,13 @@ namespace stream {
               auto hdr_info = hdr_queue->pop();
 
               send_hdr_mode(session, std::move(hdr_info));
+            }
+
+            auto &focus_hint_events = session->control.focus_hint_events;
+            if (session->control.peer && focus_hint_events->peek()) {
+              if (auto kind = focus_hint_events->pop()) {
+                send_focus_hint(session, *kind);
+              }
             }
           }
 
@@ -3551,6 +3602,15 @@ namespace stream {
       // Release input before any potentially hung capture joins.
       input::reset(session.input);
 
+      // Leave the focus detector first, so nothing posts into a session that is going away.
+      // The last session to leave joins its thread, which waits out at most one UI Automation
+      // call (500 ms timeout).
+      if (session.focus_monitor_subscription) {
+        BOOST_LOG(debug) << "Waiting for focus monitor to end..."sv;
+        focus_hints::stop_monitor(session.focus_monitor_subscription);
+        session.focus_monitor_subscription = 0;
+      }
+
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
       // GPU scheduling enabled. If this happens, we will terminate ourselves and the service can restart.
       // The alternative is that Sunshine can never start another session until it's manually restarted.
@@ -3760,6 +3820,15 @@ namespace stream {
       }
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
+
+      if (session.config.focusHints) {
+        // The detector runs on its own thread and only posts here; the control thread sends.
+        // A UI Automation call that blocks can delay a hint but never stall the stream.
+        auto focus_hint_events = session.control.focus_hint_events;
+        session.focus_monitor_subscription = focus_hints::start_monitor([focus_hint_events](focus_hints::kind_t kind) {
+          focus_hint_events->raise(kind);
+        });
+      }
 
       if (!session.audio_disabled) {
         session.audioThread = std::thread {audioThread, &session};
@@ -4059,6 +4128,8 @@ namespace stream {
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
+      session->control.focus_hint_events = mail->event<focus_hints::kind_t>(mail::focus_hint);
+      session->control.focus_hint_sequence = 0;
       session->control.legacy_input_enc_iv = launch_session.iv;
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,

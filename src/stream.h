@@ -65,6 +65,10 @@ namespace stream {
 
     uint32_t encryptionFlagsEnabled;
 
+    /// The client asked for text field focus hints and `focus_hints` is enabled. Fixed when
+    /// the client answers DESCRIBE, so it holds for the whole session.
+    bool focusHints = false;
+
     std::optional<int> gcmap;
     bool gcpersist = false;
     bool gen1_framegen_fix;

@@ -55,6 +55,7 @@ namespace mail {
   MAIL(invalidate_ref_frames);
   MAIL(gamepad_feedback);
   MAIL(hdr);
+  MAIL(focus_hint);  // Text field focus changes, posted from the focus detector thread
   MAIL(dynamic_bitrate);  // Runtime encoder bitrate change (kbps), posted from the HTTP /bitrate handler
   MAIL(input_activity);  // Time of the latest deliberate client input, read by the encoder's input boost
 #undef MAIL
