@@ -104,8 +104,10 @@ namespace focus_hints {
    * @details This is the only reliable way to know a field takes digits: UI Automation has
    *          no property for it, and a plain edit and an `ES_NUMBER` edit look identical
    *          through it.
+   * @param rich_edit The control is a RichEdit, where the `ES_NUMBER` bit means
+   *                  `ES_DISABLENOSCROLL` instead, so it never makes the field numeric.
    */
-  kind_t classify_edit_style(std::uint32_t style);
+  kind_t classify_edit_style(std::uint32_t style, bool rich_edit = false);
 
   /**
    * @brief UI Automation control type ids, mirrored for the same reason as `edit_style`.
@@ -135,12 +137,27 @@ namespace focus_hints {
   kind_t classify_automation(const automation_facts_t &facts);
 
   /**
+   * @brief Which element a focus event was about, as the event names it.
+   * @details Opaque: only ever compared, to tell a move to another field from the same field
+   *          being focused again. On Windows it is the hook's window, object and child ids.
+   */
+  struct focus_target_t {
+    std::uint64_t window {};
+    std::int32_t object {};
+    std::int32_t child {};
+
+    bool operator==(const focus_target_t &) const = default;
+  };
+
+  /**
    * @brief Turns a stream of focus events into the few hints worth sending.
    * @details Focus storms are normal: tabbing through a dialog, or a window activating
    *          and handing focus to its default control, fires several events within a few
    *          milliseconds. Classification waits for focus to settle, hints are spaced by
-   *          a minimum interval, and a classification equal to the last one sent is never
-   *          sent again. The control stream also carries input, so it stays quiet.
+   *          a minimum interval, and a classification equal to the last one sent is only
+   *          sent again when focus moved to another text field, so a keyboard the user
+   *          closed in one field comes back in the next. The control stream also carries
+   *          input, so it stays quiet otherwise.
    *
    *          Single-threaded: owned by the detector thread.
    */
@@ -153,8 +170,8 @@ namespace focus_hints {
 
     explicit debouncer_t(clock::duration settle = default_settle, clock::duration min_interval = default_min_interval);
 
-    /// Focus moved: classify once it has been still for the settle time.
-    void focus_changed(clock::time_point now);
+    /// Focus moved to `target`: classify once it has been still for the settle time.
+    void focus_changed(clock::time_point now, const focus_target_t &target = {});
 
     /// Whether the focused element should be classified now.
     [[nodiscard]] bool classify_due(clock::time_point now) const;
@@ -164,9 +181,18 @@ namespace focus_hints {
 
     /**
      * @brief Record the result of a classification.
-     * @return `true` when it differs from the last hint, which means it has to be sent.
+     * @return `true` when it has to be sent: it differs from the last hint, or it is a text
+     *         field other than the one the last classification was about.
      */
     bool classified(kind_t kind, clock::time_point now);
+
+    /**
+     * @brief The focused element couldn't be classified, typically a UI Automation timeout.
+     * @details Not the same as `none`: the user may still be in the field, and dropping the
+     *          keyboard under them would be wrong. The last hint stands, and the element is
+     *          tried once more after the settle time.
+     */
+    void classification_failed(clock::time_point now);
 
     [[nodiscard]] kind_t reported() const {
       return reported_;
@@ -178,24 +204,33 @@ namespace focus_hints {
     std::optional<clock::time_point> settle_at_;
     std::optional<clock::time_point> last_sent_;
     kind_t reported_ = kind_t::none;
+    focus_target_t pending_target_;
+    focus_target_t classified_target_;
+    bool retried_ = false;
   };
 
-  /// Invoked on the detector thread when the classification changes. Must not block.
+  /// Invoked on the detector thread, or in `start_monitor()`, with each hint. Must not block.
   using callback_t = std::function<void(kind_t)>;
 
-  /**
-   * @brief Start the platform detector, which reports the current focus and then every change.
-   * @details One detector serves the host: while it runs for one session, another session
-   *          that negotiated hints gets none. Only Windows has a detector.
-   * @return `true` when this caller started it and has to call `stop_monitor()`.
-   */
-  bool start_monitor(callback_t on_change);
+  /// Identifies one caller of `start_monitor()`. Zero means none.
+  using subscription_t = std::uint64_t;
 
   /**
-   * @brief Stop the detector and join its thread.
-   * @details Safe to call when nothing is running. Once it returns the callback is never
-   *          invoked again.
+   * @brief Subscribe to the platform detector, starting it for the first subscriber.
+   * @details One detector serves every session that negotiated hints. A subscriber that joins
+   *          while a text field already has focus is told so right away, so a reconnecting
+   *          client gets its keyboard back without the user clicking away and back. Only
+   *          Windows has a detector.
+   * @return The subscription to pass to `stop_monitor()`, or zero when there is no detector.
    */
-  void stop_monitor();
+  subscription_t start_monitor(callback_t on_change);
+
+  /**
+   * @brief Unsubscribe, stopping the detector and joining its thread after the last one.
+   * @details Safe to call with zero. Once it returns this subscriber's callback is never
+   *          invoked again. Joining waits out at most one UI Automation call, which is bounded
+   *          by a timeout.
+   */
+  void stop_monitor(subscription_t subscription);
 
 }  // namespace focus_hints

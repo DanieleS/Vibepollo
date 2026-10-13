@@ -37,7 +37,7 @@ namespace focus_hints {
     return "unknown";
   }
 
-  kind_t classify_edit_style(const std::uint32_t style) {
+  kind_t classify_edit_style(const std::uint32_t style, const bool rich_edit) {
     if (style & edit_style::read_only) {
       // Focusable but not typeable, so a keyboard would be wrong
       return kind_t::none;
@@ -45,7 +45,7 @@ namespace focus_hints {
     if (style & edit_style::password) {
       return kind_t::password;
     }
-    if (style & edit_style::number) {
+    if (!rich_edit && (style & edit_style::number)) {
       return kind_t::numeric;
     }
     return kind_t::text;
@@ -85,8 +85,10 @@ namespace focus_hints {
       min_interval_ {min_interval} {
   }
 
-  void debouncer_t::focus_changed(const clock::time_point now) {
+  void debouncer_t::focus_changed(const clock::time_point now, const focus_target_t &target) {
     settle_at_ = now + settle_;
+    pending_target_ = target;
+    retried_ = false;
   }
 
   bool debouncer_t::classify_due(const clock::time_point now) const {
@@ -108,7 +110,14 @@ namespace focus_hints {
 
   bool debouncer_t::classified(const kind_t kind, const clock::time_point now) {
     settle_at_.reset();
-    if (kind == reported_) {
+    retried_ = false;
+
+    // Moving straight from one text field to another is news to a client whose user closed
+    // the keyboard in the first one, so that is resent. The same element focused again, as
+    // in a focus storm, is not.
+    const bool moved = pending_target_ != classified_target_;
+    classified_target_ = pending_target_;
+    if (kind == reported_ && (kind == kind_t::none || !moved)) {
       return false;
     }
 
@@ -117,13 +126,22 @@ namespace focus_hints {
     return true;
   }
 
-#ifndef _WIN32
-  // Classifying the focused element needs an accessibility API; only Windows has a detector.
-  bool start_monitor(callback_t) {
-    return false;
+  void debouncer_t::classification_failed(const clock::time_point now) {
+    if (retried_) {
+      settle_at_.reset();
+      return;
+    }
+    retried_ = true;
+    settle_at_ = now + settle_;
   }
 
-  void stop_monitor() {
+#ifndef _WIN32
+  // Classifying the focused element needs an accessibility API; only Windows has a detector.
+  subscription_t start_monitor(callback_t) {
+    return 0;
+  }
+
+  void stop_monitor(subscription_t) {
   }
 #endif
 

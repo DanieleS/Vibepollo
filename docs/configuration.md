@@ -782,6 +782,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
             fields on them.}
             @note{When disabled, or when no client asks, no accessibility hook is installed and no thread
             is started.}
+            @note{While a client that asked is streaming, browsers and Electron applications (Chrome,
+            Discord, Steam's interface) notice the accessibility client and build their full accessibility
+            tree, which costs them some CPU and memory and may last until they are restarted.}
         </td>
     </tr>
     <tr>

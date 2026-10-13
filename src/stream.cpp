@@ -684,9 +684,9 @@ namespace stream {
       std::uint32_t focus_hint_sequence;
     } control;
 
-    // This session started the focus detector and has to stop it. Written by start() before
-    // the session runs and read by join() after it, so it needs no lock.
-    bool focus_monitor_owner = false;
+    // This session's subscription to the focus detector, zero when it has none. Written by
+    // start() before the session runs and read by join() after it, so it needs no lock.
+    focus_hints::subscription_t focus_monitor_subscription = 0;
 
     std::uint32_t launch_session_id;
     std::mutex metadata_mutex;
@@ -3602,12 +3602,13 @@ namespace stream {
       // Release input before any potentially hung capture joins.
       input::reset(session.input);
 
-      // Stop the focus detector first, so nothing posts into a session that is going away.
-      // Joining it waits out at most one bounded UI Automation call.
-      if (session.focus_monitor_owner) {
+      // Leave the focus detector first, so nothing posts into a session that is going away.
+      // The last session to leave joins its thread, which waits out at most one UI Automation
+      // call (500 ms timeout).
+      if (session.focus_monitor_subscription) {
         BOOST_LOG(debug) << "Waiting for focus monitor to end..."sv;
-        focus_hints::stop_monitor();
-        session.focus_monitor_owner = false;
+        focus_hints::stop_monitor(session.focus_monitor_subscription);
+        session.focus_monitor_subscription = 0;
       }
 
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
@@ -3824,7 +3825,7 @@ namespace stream {
         // The detector runs on its own thread and only posts here; the control thread sends.
         // A UI Automation call that blocks can delay a hint but never stall the stream.
         auto focus_hint_events = session.control.focus_hint_events;
-        session.focus_monitor_owner = focus_hints::start_monitor([focus_hint_events](focus_hints::kind_t kind) {
+        session.focus_monitor_subscription = focus_hints::start_monitor([focus_hint_events](focus_hints::kind_t kind) {
           focus_hint_events->raise(kind);
         });
       }

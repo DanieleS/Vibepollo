@@ -75,6 +75,14 @@ TEST(FocusHintsClassification, EditStyles) {
   EXPECT_EQ(focus_hints::classify_edit_style(read_only | password), kind_t::none);
 }
 
+TEST(FocusHintsClassification, RichEditIsNeverNumeric) {
+  using namespace focus_hints::edit_style;
+  // RichEdit's ES_DISABLENOSCROLL shares ES_NUMBER's bit
+  EXPECT_EQ(focus_hints::classify_edit_style(number, true), kind_t::text);
+  EXPECT_EQ(focus_hints::classify_edit_style(number | password, true), kind_t::password);
+  EXPECT_EQ(focus_hints::classify_edit_style(number | read_only, true), kind_t::none);
+}
+
 TEST(FocusHintsClassification, AutomationEdits) {
   using namespace focus_hints::control_type;
   EXPECT_EQ(focus_hints::classify_automation(facts(edit)), kind_t::text);
@@ -135,12 +143,60 @@ TEST(FocusHintsDebouncer, SendsOnlyChanges) {
   EXPECT_TRUE(debouncer.classified(kind_t::text, t0 + 1s + 120ms));
   EXPECT_EQ(debouncer.reported(), kind_t::text);
 
-  // Tabbing to another text field is not news
+  // The same field focused again is not news
   debouncer.focus_changed(t0 + 2s);
   EXPECT_FALSE(debouncer.classified(kind_t::text, t0 + 2s + 120ms));
 
   debouncer.focus_changed(t0 + 3s);
   EXPECT_TRUE(debouncer.classified(kind_t::none, t0 + 3s + 120ms));
+}
+
+TEST(FocusHintsDebouncer, ResendsWhenFocusMovesToAnotherTextField) {
+  focus_hints::debouncer_t debouncer {120ms, 100ms};
+  const auto t0 = clock::time_point {} + 1h;
+  const focus_hints::focus_target_t field_a {0x10, -4, -100};
+  const focus_hints::focus_target_t field_b {0x10, -4, -101};
+  const focus_hints::focus_target_t button {0x10, -4, -102};
+
+  debouncer.focus_changed(t0, field_a);
+  ASSERT_TRUE(debouncer.classified(kind_t::text, t0 + 120ms));
+
+  // A storm that lands on the same field again stays quiet
+  debouncer.focus_changed(t0 + 1s, field_a);
+  EXPECT_FALSE(debouncer.classified(kind_t::text, t0 + 1s + 120ms));
+
+  // Straight to another field: a keyboard the user closed in the first one comes back
+  debouncer.focus_changed(t0 + 2s, field_b);
+  EXPECT_TRUE(debouncer.classified(kind_t::text, t0 + 2s + 120ms));
+
+  // Moving between things that take no text is never news
+  debouncer.focus_changed(t0 + 3s, button);
+  ASSERT_TRUE(debouncer.classified(kind_t::none, t0 + 3s + 120ms));
+  debouncer.focus_changed(t0 + 4s, field_a);
+  EXPECT_FALSE(debouncer.classified(kind_t::none, t0 + 4s + 120ms));
+}
+
+TEST(FocusHintsDebouncer, AFailedClassificationKeepsTheLastHintAndRetriesOnce) {
+  focus_hints::debouncer_t debouncer {120ms, 100ms};
+  const auto t0 = clock::time_point {} + 1h;
+
+  debouncer.focus_changed(t0);
+  ASSERT_TRUE(debouncer.classified(kind_t::text, t0 + 120ms));
+
+  debouncer.focus_changed(t0 + 1s);
+  debouncer.classification_failed(t0 + 1s + 120ms);
+  EXPECT_EQ(debouncer.reported(), kind_t::text);
+  EXPECT_FALSE(debouncer.classify_due(t0 + 1s + 200ms));
+  EXPECT_TRUE(debouncer.classify_due(t0 + 1s + 240ms));
+
+  // A second failure gives up until focus moves again
+  debouncer.classification_failed(t0 + 1s + 240ms);
+  EXPECT_FALSE(debouncer.time_until_due(t0 + 2s).has_value());
+  EXPECT_EQ(debouncer.reported(), kind_t::text);
+
+  debouncer.focus_changed(t0 + 3s);
+  debouncer.classification_failed(t0 + 3s + 120ms);
+  EXPECT_TRUE(debouncer.time_until_due(t0 + 3s + 120ms).has_value());
 }
 
 TEST(FocusHintsDebouncer, SpacesHintsByTheMinimumInterval) {
