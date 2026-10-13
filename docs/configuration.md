@@ -3747,13 +3747,15 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
             Higher numbers improve compression (quality at given bitrate) at the cost of increased encoding latency.
             Recommended to change only when limited by network or decoder, otherwise similar effect can be accomplished
             by increasing bitrate.
+            The default P4 fits 1080p and 1440p at 120 fps by the estimates of the
+            [frame budget guard](#nvenc_frame_budget_guard), which lowers it automatically for heavier sessions.
             @note{This option only applies when using NVENC [encoder](#encoder).}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            1
+            4
             @endcode</td>
     </tr>
     <tr>
@@ -3765,7 +3767,7 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     <tr>
         <td rowspan="7">Choices</td>
         <td>1</td>
-        <td>P1 (fastest, default)</td>
+        <td>P1 (fastest)</td>
     </tr>
     <tr>
         <td>2</td>
@@ -3777,7 +3779,7 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     </tr>
     <tr>
         <td>4</td>
-        <td>P4 (balanced quality)</td>
+        <td>P4 (balanced quality, default)</td>
     </tr>
     <tr>
         <td>5</td>
@@ -3790,6 +3792,38 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     <tr>
         <td>7</td>
         <td>P7 (slowest)</td>
+    </tr>
+</table>
+
+### nvenc_frame_budget_guard
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Lower the [performance preset](#nvenc_preset) for a session when its estimated encode time would not fit
+            in 65% of the frame interval, so encoding keeps up with the stream. For example, 4K at 120 fps lowers
+            the default P4 to P1 on a GPU with a single NVENC engine, and 4K at 90 fps lowers it to P2. HEVC and AV1
+            sessions that may use split-frame encoding count every NVENC engine of the GPU.
+            The estimates are calibrated on recent high-end GPUs with a conservative margin. When the preset is
+            lowered, a warning is logged and the encoder line of the log carries the configured preset, e.g.
+            @code{}frame-budget:P4@endcode.
+            Disable this to always use the configured preset.
+            @note{This option only applies when using NVENC [encoder](#encoder). The Linux
+            @code{}nvenc_legacy@endcode (FFmpeg) encoder ignores it.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            nvenc_frame_budget_guard = disabled
+            @endcode</td>
     </tr>
 </table>
 
@@ -3839,8 +3873,8 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Assign higher QP values to flat regions of the video.
-            Recommended to enable when streaming at lower bitrates.
+            Assign higher QP values to flat regions of the video, which improves perceived quality at the bitrates
+            used for streaming over Wi-Fi. Enabled by default, as NVIDIA recommends for game streaming.
             @note{This option only applies when using NVENC [encoder](#encoder).}
             @warning{Enabling this option may reduce performance.}
         </td>
@@ -3848,7 +3882,7 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            enabled
             @endcode</td>
     </tr>
     <tr>

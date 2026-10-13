@@ -10,10 +10,11 @@ export const extendedDefaults: Record<string, unknown> = {
   amd_high_motion_quality_boost: 'auto',
   playnite_install_dir: '',
 
-  nvenc_preset: 1,
+  nvenc_preset: 4,
+  nvenc_frame_budget_guard: 'enabled',
   nvenc_intra_refresh: 'disabled',
   nvenc_twopass: 'quarter_res',
-  nvenc_spatial_aq: 'disabled',
+  nvenc_spatial_aq: 'enabled',
   nvenc_split_encode: 'auto',
   nvenc_vbv_increase: 0,
   nvenc_realtime_hags: 'enabled',

@@ -4,6 +4,7 @@
  */
 // this include
 #include "nvenc_base.h"
+#include "frame_budget.h"
 #include "nvenc_api.h"
 
 // standard includes
@@ -185,6 +186,7 @@ namespace nvenc {
     NV_ENC_INITIALIZE_PARAMS init_params {};
     NV_ENC_PRESET_CONFIG preset_config {};
     bool have_preset_config = false;
+    frame_budget_verdict budget_verdict;
 
     auto destroy_api_attempt = [&]() {
       if (encoder) {
@@ -381,11 +383,32 @@ namespace nvenc {
         return false;
       }
 
-      init_params.presetGUID = quality_preset_guid_from_number(config.quality_preset);
+      const bool weighted_prediction = config.weighted_prediction && *supports_weighted_prediction;
+
+      // Frame budget guard: slower presets compress better but take longer per frame. Lower the
+      // configured preset when its estimated encode time doesn't fit the session's frame interval.
+      // Extra NVENC engines only help when split-frame encoding may engage (HEVC/AV1, see below).
+      const bool split_frame_may_engage =
+        (client_config.videoFormat == 1 || client_config.videoFormat == 2) &&
+        api::supports_implicit_split_frame(selected_api_version) &&
+        !(client_config.videoFormat == 1 && weighted_prediction) &&
+        config.split_encode_mode != nvenc::split_encode_mode::disabled;
+      const int budget_engines = split_frame_may_engage ? get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES).value_or(1) : 1;
+      const double session_fps = client_config.framerateX100 > 0 ? client_config.framerateX100 / 100.0 : client_config.framerate;
+      budget_verdict = evaluate_frame_budget(
+        config.quality_preset,
+        static_cast<int>(encoder_params.width),
+        static_cast<int>(encoder_params.height),
+        session_fps,
+        budget_engines,
+        config.frame_budget_guard
+      );
+
+      init_params.presetGUID = quality_preset_guid_from_number(budget_verdict.effective_preset);
       init_params.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
       init_params.enablePTD = 1;
       init_params.enableEncodeAsync = async_event_handle ? 1 : 0;
-      init_params.enableWeightedPrediction = config.weighted_prediction && *supports_weighted_prediction;
+      init_params.enableWeightedPrediction = weighted_prediction;
 
       init_params.encodeWidth = encoder_params.width;
       init_params.darWidth = encoder_params.width;
@@ -460,6 +483,23 @@ namespace nvenc {
     if (!encoder || !selected_api_version) {
       BOOST_LOG(error) << "NvEnc: no compatible driver API found for " << codec_name_from_video_format(client_config.videoFormat);
       return false;
+    }
+
+    if (budget_verdict.clamped) {
+      BOOST_LOG(warning) << std::format(
+        "NvEnc: frame budget guard lowered preset P{} to P{} for {}x{}@{:.2f} (budget {:.2f} ms, P{} estimated at {:.2f} ms{}{}); "
+        "set nvenc_frame_budget_guard = disabled to keep the configured preset",
+        budget_verdict.configured_preset,
+        budget_verdict.effective_preset,
+        encoder_params.width,
+        encoder_params.height,
+        budget_verdict.fps,
+        budget_verdict.budget_ms,
+        budget_verdict.configured_preset,
+        budget_verdict.configured_estimated_ms,
+        budget_verdict.num_engines > 1 ? ", multi-NVENC" : "",
+        budget_verdict.budget_exceeded_at_floor ? ", even P1 exceeds the budget" : ""
+      );
     }
 
     auto get_encoder_cap = [&](NV_ENC_CAPS cap) {
@@ -869,6 +909,9 @@ namespace nvenc {
       }
       if (config.insert_filler_data) {
         extra += " filler-data";
+      }
+      if (budget_verdict.clamped) {
+        extra += std::format(" frame-budget:P{}", budget_verdict.configured_preset);
       }
       if (encoder_engine_count > 0) {
         extra += std::format(" engines={}", encoder_engine_count);

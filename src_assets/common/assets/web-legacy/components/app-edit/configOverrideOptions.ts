@@ -30,6 +30,7 @@ const BOOLEAN_OVERRIDE_KEYS = new Set<string>([
   'motion_as_ds4',
   'mouse',
   'native_pen_touch',
+  'nvenc_frame_budget_guard',
   'nvenc_h264_cavlc',
   'nvenc_latency_over_power',
   'nvenc_opengl_vulkan_on_dxgi',

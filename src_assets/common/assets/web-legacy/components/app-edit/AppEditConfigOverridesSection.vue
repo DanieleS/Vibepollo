@@ -986,6 +986,7 @@ const ALLOWED_OVERRIDE_KEYS = new Set<string>([
 
   // Encoder tuning
   'nvenc_preset',
+  'nvenc_frame_budget_guard',
   'nvenc_twopass',
   'nvenc_spatial_aq',
   'nvenc_split_encode',

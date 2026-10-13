@@ -47,8 +47,13 @@ namespace nvenc {
    * @brief NVENC encoder configuration.
    */
   struct nvenc_config {
-    // Quality preset from 1 to 7, higher is slower
-    int quality_preset = 1;
+    // Quality preset from 1 to 7, higher is slower.
+    // P4 matches the former GeForce Experience GameStream preset; the frame budget guard lowers it
+    // for sessions whose framerate it can't keep up with (e.g. 4K120 on a single NVENC engine)
+    int quality_preset = 4;
+
+    // Lower the quality preset when its estimated encode time doesn't fit a fixed share of the frame interval
+    bool frame_budget_guard = true;
 
     // Use optional preliminary pass for better motion vectors, bitrate distribution and stricter VBV(HRD), uses CUDA cores
     nvenc_two_pass two_pass = nvenc_two_pass::quarter_resolution;
@@ -59,8 +64,9 @@ namespace nvenc {
     // Improves fades compression, uses CUDA cores
     bool weighted_prediction = false;
 
-    // Allocate more bitrate to flat regions since they're visually more perceptible, uses CUDA cores
-    bool adaptive_quantization = false;
+    // Allocate more bitrate to flat regions since they're visually more perceptible, uses CUDA cores.
+    // Recommended for game streaming by NVIDIA, supported by every Maxwell (2014) and newer NVENC
+    bool adaptive_quantization = true;
 
     // Allocate more bitrate to frames with more motion, reduces block-artefact pulsing in moving scenes
     bool temporal_aq = false;
