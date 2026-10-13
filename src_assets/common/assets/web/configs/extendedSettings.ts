@@ -9,7 +9,6 @@ export const extendedDefaults: Record<string, unknown> = {
   amd_lowlatency_mode: 'auto',
   amd_high_motion_quality_boost: 'auto',
   playnite_install_dir: '',
-  playnite_extensions_dir: '',
 
   nvenc_preset: 1,
   nvenc_intra_refresh: 'disabled',
@@ -79,9 +78,9 @@ export const extendedDefaults: Record<string, unknown> = {
   playnite_sync_metadata: true,
   playnite_successstory: true,
   playnite_gameactivity: true,
-  playnite_focus_attempts: 3,
-  playnite_focus_timeout_secs: 15,
-  playnite_focus_exit_on_first: false,
+  app_focus_attempts: 3,
+  app_focus_timeout_secs: 15,
+  app_focus_exit_on_first: false,
   playnite_fullscreen_entry_enabled: false,
 };
 

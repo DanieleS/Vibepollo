@@ -1714,11 +1714,13 @@ fi
 %{_prefix}/libexec/vibeshine/vibeshine-vkms-quiesce
 %{_prefix}/libexec/vibeshine/vibeshine-vkms-peercred
 %{_prefix}/libexec/vibeshine/vibepollo-session-controller
+%attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-display-observer
 %attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-session-exec
 %attr(0700,root,root) %caps(cap_kill,cap_setgid,cap_setuid+p) %{_prefix}/libexec/vibeshine/vibepollo-session-broker
 %{_prefix}/libexec/vibeshine/vibepollo-provider-scan
 %attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-global-limiter.py
 %attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-steam-launch
+%attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-app-focus
 %{_prefix}/libexec/vibeshine/vibepollo-profile-import
 %attr(0755,root,root) %{_prefix}/libexec/vibeshine/vibepollo-app-supervisor
 %{_prefix}/libexec/vibeshine/vibepollo-machine-host

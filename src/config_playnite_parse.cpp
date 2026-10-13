@@ -116,6 +116,7 @@ namespace config {
 
   playnite_t parse_playnite(std::unordered_map<std::string, std::string> &vars) {
     playnite_t result;
+    result.install_dir = erase_take(vars, "playnite_install_dir");
 
     consume_bool(vars, "playnite_enabled", result.enabled);
     consume_bool(vars, "playnite_auto_sync", result.auto_sync);
@@ -124,7 +125,6 @@ namespace config {
     consume_bool(vars, "playnite_autosync_remove_uninstalled", result.autosync_remove_uninstalled);
     consume_bool(vars, "playnite_exclude_hidden_games", result.exclude_hidden_games);
     consume_bool(vars, "playnite_sync_metadata", result.sync_metadata);
-    consume_bool(vars, "playnite_focus_exit_on_first", result.focus_exit_on_first);
     consume_bool(vars, "playnite_fullscreen_entry_enabled", result.fullscreen_entry_enabled);
     consume_bool(vars, "playnite_successstory", result.successstory);
     consume_bool(vars, "playnite_gameactivity", result.gameactivity);
@@ -132,8 +132,6 @@ namespace config {
     consume_int(vars, "playnite_recent_games", result.recent_games, false);
     consume_int(vars, "playnite_recent_max_age_days", result.recent_max_age_days, true);
     consume_int(vars, "playnite_autosync_delete_after_days", result.autosync_delete_after_days, true);
-    consume_int(vars, "playnite_focus_attempts", result.focus_attempts, true);
-    consume_int(vars, "playnite_focus_timeout_secs", result.focus_timeout_secs, true);
 
     parse_id_name_array(vars, "playnite_sync_categories", result.sync_categories_meta, result.sync_categories, false);
     parse_id_name_array(vars, "playnite_exclude_categories", result.exclude_categories_meta, result.exclude_categories, false);
