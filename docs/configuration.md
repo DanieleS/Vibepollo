@@ -2110,6 +2110,101 @@ this option to replace the running app immediately. The default is `true`.
     </tr>
 </table>
 
+### input_activity_boost
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            When the screen has been static long enough for the minimum_fps_target duplicates to kick in, and
+            a deliberate input (a key, mouse button, scroll, touch or pen contact, controller button, or a
+            trigger/stick crossing its deadzone) changes it, the frame showing that change is followed by
+            duplicates at the stream's framerate instead of the idle cadence. Clients whose decoder or frame
+            pacer holds the newest frame until another one arrives then show the response about one stream
+            frame later instead of one idle interval later.
+            <br>
+            <br>
+            Nothing is sent before the response frame, and input that changes nothing on screen sends nothing
+            extra. The boost ends input_activity_boost_window_ms after the input, or as soon as the screen is
+            moving again (two captured frames closer together than the static-screen threshold), so duplicates
+            are not mixed into animations or gameplay. Pointer motion, analog movement while held, motion
+            sensors and input received while frames are flowing never start it.
+            @note{This is not negotiated with the client: when enabled, every client receives the denser
+            duplicates after input. Those are ordinary minimum-FPS duplicate frames, spaced at least one
+            requested frame interval after the previous encode, but they show up as a short jump in the
+            client's received FPS, in the host's encoded-frame counts and in bitrate, and an encode in progress
+            can delay a frame captured during it. Prefer enabling it per client for clients that benefit.}
+            @note{Has no effect with native AMF (a duplicate that finds no free input surface is dropped and
+            reads as loss on the client), on the synchronous shared-capture path used by encoders without
+            parallel encoding, or with PyroWave.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            input_activity_boost = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### input_activity_boost_fps
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The duplicate-frame cadence used while input_activity_boost is active.
+            It is never faster than the stream's framerate, and has no effect if it is not faster than
+            minimum_fps_target.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            0
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="2">Choices</td>
+        <td>0</td>
+        <td>Use the stream's framerate.</td>
+    </tr>
+    <tr>
+        <td>1-1000</td>
+        <td>Specify your own value.</td>
+    </tr>
+</table>
+
+### input_activity_boost_window_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            How long, in milliseconds, after the input that started it input_activity_boost
+            may stay active. It ends earlier once the screen is moving again. 0 disables the boost.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            150
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            input_activity_boost_window_ms = 250
+            @endcode</td>
+    </tr>
+</table>
+
 ## Network
 
 ### upnp

@@ -42,6 +42,7 @@ extern "C" {
 #include "amf/amf_lifecycle.h"
 #include "globals.h"
 #include "input.h"
+#include "input_boost_policy.h"
 #include "logging.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
@@ -5158,11 +5159,37 @@ namespace video {
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2000) << "fps ("sv << max_frametime * 2 << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
 
+    // Once the screen answers deliberate input on a static screen, follow that response
+    // frame with minimum-FPS duplicates at the stream's cadence for a short window instead
+    // of the idle cadence above. Clients whose decoder or pacer holds the newest frame
+    // until another one arrives then show the response one stream frame later rather than
+    // one idle interval later. The boost only shortens the wait for the next captured
+    // image; capture pacing and the timestamps of captured frames are untouched. Native
+    // AMF drops a duplicate that finds no free input surface, leaving a frameIndex hole
+    // the client reads as loss, so it never gets the denser duplicates.
+    input_boost::state_t input_boost_state {input_boost::make_settings(
+      config::video.input_activity_boost && !native_amf_session,
+      config::video.input_activity_boost_fps,
+      config::video.input_activity_boost_window_ms,
+      std::chrono::duration_cast<input_boost::clock::duration>(encode_frame_threshold),
+      std::chrono::duration_cast<input_boost::clock::duration>(max_frametime)
+    )};
+    if (input_boost_state.enabled()) {
+      BOOST_LOG(info) << "Input activity boost: duplicate frames every "sv
+                      << std::chrono::duration<double, std::milli>(input_boost_state.settings().boost_interval).count()
+                      << "ms after the response to input on a static screen, up to "sv
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(input_boost_state.settings().window).count()
+                      << "ms after the input"sv;
+    } else if (config::video.input_activity_boost && native_amf_session) {
+      BOOST_LOG(info) << "Input activity boost is not used with native AMF"sv;
+    }
+
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
     auto bitrate_events = mail->event<int>(mail::dynamic_bitrate);
+    auto input_activity_events = mail->event<input_boost::clock::time_point>(mail::input_activity);
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -5272,10 +5299,24 @@ namespace video {
       uint64_t converted = 0;
       uint64_t encoded = 0;
       uint64_t dropped_submissions = 0;
+      uint64_t input_boosts = 0;
       std::chrono::steady_clock::time_point last_log = std::chrono::steady_clock::now();
     } loop_stats;
 
+    auto consume_input_activity = [&]() {
+      if (!input_boost_state.enabled()) {
+        return;
+      }
+      if (auto input_at = input_activity_events->pop(0ms)) {
+        if (input_boost_state.on_input(*input_at)) {
+          ++loop_stats.input_boosts;
+        }
+      }
+    };
+
     while (true) {
+      consume_input_activity();
+
       if (auto now = std::chrono::steady_clock::now(); now - loop_stats.last_log >= 10s) {
         BOOST_LOG(debug) << "Encode loop [" << channel_data << "] " << config.width << 'x' << config.height
                          << ": popped_real=" << loop_stats.popped_real
@@ -5285,6 +5326,7 @@ namespace video {
                          << " converted=" << loop_stats.converted
                          << " encoded=" << loop_stats.encoded
                          << " dropped_submissions=" << loop_stats.dropped_submissions
+                         << " input_boosts=" << loop_stats.input_boosts
                          << " frame_nr=" << frame_nr;
         loop_stats = {};
         loop_stats.last_log = now;
@@ -5355,6 +5397,9 @@ namespace video {
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
         auto image_wait_budget = max_frametime;
+        if (input_boost_state.active(input_boost::clock::now())) {
+          image_wait_budget = input_boost_state.settings().boost_interval;
+        }
         if (bootstrap_state.should_encode_placeholder()) {
           // Prime a lookahead encoder immediately; waiting for minimum FPS between
           // bootstrap placeholders needlessly delays the first packet.
@@ -5457,6 +5502,9 @@ namespace video {
           bootstrap_state.current_input_placeholder = placeholder_input;
 
           if (!placeholder_input) {
+            // Judge pending input against the screen as it was before this frame.
+            consume_input_activity();
+            input_boost_state.on_frame(capture_timestamp.value_or(input_boost::clock::now()));
             bootstrap_state.real_frame_seen = true;
             if (!encode_frame_timestamp) {
               encode_frame_timestamp = *frame_timestamp;
