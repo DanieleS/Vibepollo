@@ -870,6 +870,8 @@
     "mouse_desc": "Allows guests to control the host system with the mouse",
     "native_pen_touch": "Native Pen/Touch Support",
     "native_pen_touch_desc": "When enabled, Vibepollo will pass through native pen/touch events from Moonlight clients. This can be useful to disable for older applications without native pen/touch support.",
+    "focus_hints": "Text Field Focus Hints",
+    "focus_hints_desc": "Tell clients that ask for it when a text field takes focus, so they can raise their on-screen keyboard by themselves. Clients that don't ask (Moonlight, Artemis) are unaffected. Works in applications that expose their controls to Windows accessibility, such as browsers, launchers and most desktop apps; a game that draws its own interface exposes nothing.",
     "notify_pre_releases": "PreRelease Notifications",
     "notify_pre_releases_desc": "Enabled by default. Turn off for stable update notifications only. Updates are never installed automatically.",
     "update_check_interval": "Update Check Interval (seconds)",

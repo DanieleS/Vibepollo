@@ -761,6 +761,43 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### focus_hints
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Tell the client when a text field takes or loses focus on the host, so it can raise its
+            on-screen keyboard without being asked. The host classifies the focused element as text,
+            numeric or password and sends the result on the control stream.
+            <br><br>
+            Only clients that ask for it receive anything, and only once they ask is focus watched at all.
+            Moonlight, Artemis and other clients that don't know the extension see exactly the traffic
+            they see with this disabled.
+            @warning{This only works for applications that expose their controls to Windows accessibility.
+            Most desktop applications, browsers and launchers do. <strong>A game that draws its own
+            interface exposes nothing</strong>, so inside one this does nothing.}
+            @note{Numeric fields are only recognised in classic Windows edit controls; elsewhere they are
+            reported as ordinary text. Web pages are never treated as text fields themselves, only the
+            fields on them.}
+            @note{When disabled, or when no client asks, no accessibility hook is installed and no thread
+            is started.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            focus_hints = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### keybindings
 
 <table>
