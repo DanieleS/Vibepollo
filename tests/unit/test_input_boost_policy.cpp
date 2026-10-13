@@ -6,6 +6,9 @@
 
 #include <src/input_boost_policy.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace {
   using namespace std::chrono_literals;
   using video::input_boost::clock;
@@ -176,4 +179,105 @@ TEST(InputBoost, DisabledStateNeverBoosts) {
   EXPECT_FALSE(state.on_input(t0 + 1s));
   state.on_frame(t0 + 1s + 10ms);
   EXPECT_FALSE(state.active(t0 + 1s + 11ms));
+}
+
+namespace {
+  struct encode_t {
+    clock::time_point at;
+    bool duplicate;
+  };
+
+  // Mirrors encode_run's use of the state: pending input is recorded at the top of
+  // each iteration and before each live frame, the image wait starts after the
+  // previous encode and lasts boost_interval while active (idle_20 otherwise), and a
+  // wait that ends without an image encodes a duplicate.
+  std::vector<encode_t> simulate(
+    state_t &state,
+    const std::vector<clock::time_point> &frames,
+    const clock::time_point input_at,
+    const clock::time_point end
+  ) {
+    constexpr auto encode_time = std::chrono::duration_cast<clock::duration>(2ms);
+    std::vector<encode_t> encodes;
+    bool input_pending = true;
+    const auto consume = [&](const clock::time_point now) {
+      if (input_pending && input_at <= now) {
+        input_pending = false;
+        state.on_input(input_at);
+      }
+    };
+
+    auto next_frame = frames.begin();
+    auto now = *next_frame++;
+    state.on_frame(now);
+    encodes.push_back({now, false});
+    now += encode_time;
+    while (now < end) {
+      consume(now);
+      const auto deadline = now + (state.active(now) ? state.settings().boost_interval : idle_20);
+      if (next_frame != frames.end() && *next_frame <= deadline) {
+        now = std::max(now, *next_frame++);
+        consume(now);
+        state.on_frame(now);
+        encodes.push_back({now, false});
+      } else {
+        now = deadline;
+        encodes.push_back({now, true});
+      }
+      now += encode_time;
+    }
+    return encodes;
+  }
+}  // namespace
+
+TEST(InputBoostEncodeLoop, FollowsTheResponseAtTheStreamCadenceThenFallsBackToIdle) {
+  auto state = default_state();
+  const auto input_at = t0 + 100ms;
+  const auto response_at = t0 + 130ms;
+  const auto encodes = simulate(state, {t0, response_at}, input_at, t0 + 600ms);
+
+  int boosted = 0;
+  for (std::size_t i = 1; i < encodes.size(); ++i) {
+    const auto &encode = encodes[i];
+    const auto gap = encode.at - encodes[i - 1].at;
+    if (!encode.duplicate) {
+      continue;
+    }
+    // Never faster than the negotiated stream rate.
+    EXPECT_GE(gap, stream_120);
+    if (gap < idle_20) {
+      // Boosted waits only start between the response and the end of the window.
+      EXPECT_GE(encodes[i - 1].at, response_at);
+      EXPECT_LT(encodes[i - 1].at, input_at + 150ms);
+      ++boosted;
+    }
+  }
+  // About (input + window - response) / (boost interval + encode time) followers.
+  EXPECT_GE(boosted, 10);
+  EXPECT_LE(boosted, 12);
+}
+
+TEST(InputBoostEncodeLoop, AnimationStartedByTheInputGetsAtMostOneFollower) {
+  auto state = default_state();
+  std::vector<clock::time_point> frames {t0};
+  for (auto at = t0 + 130ms; at < t0 + 600ms; at += 16ms) {
+    frames.push_back(at);
+  }
+  const auto encodes = simulate(state, frames, t0 + 100ms, t0 + 600ms);
+
+  int interleaved = 0;
+  for (std::size_t i = 1; i < encodes.size(); ++i) {
+    if (encodes[i].duplicate && encodes[i].at - encodes[i - 1].at < idle_20) {
+      ++interleaved;
+    }
+  }
+  EXPECT_LE(interleaved, 1);
+}
+
+TEST(InputBoostEncodeLoop, InputWithoutAResponseKeepsTheIdleCadence) {
+  auto state = default_state();
+  const auto encodes = simulate(state, {t0}, t0 + 100ms, t0 + 600ms);
+  for (std::size_t i = 1; i < encodes.size(); ++i) {
+    EXPECT_GE(encodes[i].at - encodes[i - 1].at, idle_20);
+  }
 }
