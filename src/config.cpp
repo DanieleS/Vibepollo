@@ -1805,6 +1805,7 @@ namespace config {
     string_f(vars, "sw_tune", video.sw.sw_tune);
 
     int_between_f(vars, "nvenc_preset", video.nv.quality_preset, {1, 7});
+    bool_f(vars, "nvenc_frame_budget_guard", video.nv.frame_budget_guard);
     int_between_f(vars, "nvenc_vbv_increase", video.nv.vbv_percentage_increase, {0, 400});
     bool_f(vars, "nvenc_spatial_aq", video.nv.adaptive_quantization);
     bool_f(vars, "nvenc_temporal_aq", video.nv.temporal_aq);
@@ -2800,6 +2801,7 @@ namespace config {
 
         // Encoder tuning
         "nvenc_preset",
+        "nvenc_frame_budget_guard",
         "nvenc_twopass",
         "nvenc_spatial_aq",
         "nvenc_temporal_aq",
