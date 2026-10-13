@@ -2110,6 +2110,89 @@ this option to replace the running app immediately. The default is `true`.
     </tr>
 </table>
 
+### input_activity_boost
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            When the screen has been static long enough for the minimum_fps_target
+            duplicates to kick in, a deliberate input (a key, mouse button, scroll, touch or pen contact,
+            controller button, or a trigger/stick crossing its deadzone) briefly raises the duplicate cadence
+            to the stream's framerate, and an idle wait already in progress is cut short. Clients whose
+            decoder or frame pacer holds the newest frame until another one arrives then show the response
+            to the input about one stream frame later instead of one idle interval later.
+            @note{Only the cadence of duplicate frames changes, never above the framerate the client
+            requested. Pointer motion, motion sensors and input received while the game is already
+            producing frames never start or extend the boost.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            input_activity_boost = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### input_activity_boost_fps
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The duplicate-frame cadence used while input_activity_boost is active.
+            It is never faster than the stream's framerate, and has no effect if it is not faster than
+            minimum_fps_target.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            0
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="2">Choices</td>
+        <td>0</td>
+        <td>Use the stream's framerate.</td>
+    </tr>
+    <tr>
+        <td>1-1000</td>
+        <td>Specify your own value.</td>
+    </tr>
+</table>
+
+### input_activity_boost_window_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            How long, in milliseconds, input_activity_boost stays active after
+            the last input that started or extended it. 0 disables the boost.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            150
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            input_activity_boost_window_ms = 250
+            @endcode</td>
+    </tr>
+</table>
+
 ## Network
 
 ### upnp

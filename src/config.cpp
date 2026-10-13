@@ -971,6 +971,9 @@ namespace config {
 
     0,  // max_bitrate
     20,  // minimum_fps_target (0 = framerate)
+    true,  // input_activity_boost
+    0,  // input_activity_boost_fps (0 = stream framerate)
+    150,  // input_activity_boost_window_ms
     true,  // wgc_pacing_smoothing
     "1920x1080x60",  // fallback_mode
     false,  // ignore_encoder_probe_failure
@@ -2046,6 +2049,9 @@ namespace config {
 
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});
+    bool_f(vars, "input_activity_boost", video.input_activity_boost);
+    int_between_f(vars, "input_activity_boost_fps", video.input_activity_boost_fps, {0, 1000});
+    int_between_f(vars, "input_activity_boost_window_ms", video.input_activity_boost_window_ms, {0, 5000});
 
     string_f(vars, "fallback_mode", video.fallback_mode);
     bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
@@ -2773,6 +2779,9 @@ namespace config {
         "dd_wa_dummy_plug_hdr10",
         "max_bitrate",
         "minimum_fps_target",
+        "input_activity_boost",
+        "input_activity_boost_fps",
+        "input_activity_boost_window_ms",
 
         // Codec / capture negotiation
         "fec_percentage",

@@ -42,6 +42,7 @@ extern "C" {
 #include "amf/amf_lifecycle.h"
 #include "globals.h"
 #include "input.h"
+#include "input_boost_policy.h"
 #include "logging.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
@@ -5158,11 +5159,33 @@ namespace video {
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2000) << "fps ("sv << max_frametime * 2 << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
 
+    // Right after deliberate input on a static screen, send the minimum-FPS duplicates at
+    // the stream's cadence for a short window instead of the idle cadence above. Clients
+    // whose decoder or pacer holds the newest frame until another one arrives then show
+    // the response one stream frame later rather than one idle interval later. The boost
+    // only shortens the wait for the next captured image; capture pacing and the
+    // timestamps of captured frames are untouched.
+    input_boost::state_t input_boost_state {input_boost::make_settings(
+      config::video.input_activity_boost,
+      config::video.input_activity_boost_fps,
+      config::video.input_activity_boost_window_ms,
+      std::chrono::duration_cast<input_boost::clock::duration>(encode_frame_threshold),
+      std::chrono::duration_cast<input_boost::clock::duration>(max_frametime)
+    )};
+    if (input_boost_state.enabled()) {
+      BOOST_LOG(info) << "Input activity boost: duplicate frames every "sv
+                      << std::chrono::duration<double, std::milli>(input_boost_state.settings().boost_interval).count()
+                      << "ms for "sv
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(input_boost_state.settings().window).count()
+                      << "ms after input on a static screen"sv;
+    }
+
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
     auto bitrate_events = mail->event<int>(mail::dynamic_bitrate);
+    auto input_activity_events = mail->event<input_boost::clock::time_point>(mail::input_activity);
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -5272,10 +5295,52 @@ namespace video {
       uint64_t converted = 0;
       uint64_t encoded = 0;
       uint64_t dropped_submissions = 0;
+      uint64_t input_boosts = 0;
       std::chrono::steady_clock::time_point last_log = std::chrono::steady_clock::now();
     } loop_stats;
 
+    auto consume_input_activity = [&]() {
+      if (!input_boost_state.enabled()) {
+        return;
+      }
+      if (auto input_at = input_activity_events->pop(0ms)) {
+        if (input_boost_state.on_input(*input_at)) {
+          ++loop_stats.input_boosts;
+        }
+      }
+    };
+
+    // While the boost can still be armed, slice long idle waits so that input arriving
+    // mid-wait stops them (state_t::wait_deadline) instead of waiting out the full
+    // minimum-FPS interval before the cadence changes.
+    constexpr auto input_poll_slice = std::chrono::duration_cast<input_boost::clock::duration>(5ms);
+    auto pop_captured_image = [&](const auto wait_budget, const input_boost::clock::time_point wait_started) -> decltype(images->pop()) {
+      const auto now = input_boost::clock::now();
+      const auto budget = std::chrono::duration_cast<input_boost::clock::duration>(wait_budget);
+      if (!input_boost_state.enabled() || input_boost_state.active(now) || budget <= input_poll_slice) {
+        return images->pop(wait_budget);
+      }
+
+      const auto idle_deadline = now + budget;
+      while (true) {
+        const auto slice_started = input_boost::clock::now();
+        const auto deadline = input_boost_state.wait_deadline(wait_started, idle_deadline, slice_started);
+        if (slice_started >= deadline) {
+          return util::false_v<decltype(images->pop())>;
+        }
+        if (auto img = images->pop(std::min(deadline - slice_started, input_poll_slice))) {
+          return img;
+        }
+        if (!images->running()) {
+          return util::false_v<decltype(images->pop())>;
+        }
+        consume_input_activity();
+      }
+    };
+
     while (true) {
+      consume_input_activity();
+
       if (auto now = std::chrono::steady_clock::now(); now - loop_stats.last_log >= 10s) {
         BOOST_LOG(debug) << "Encode loop [" << channel_data << "] " << config.width << 'x' << config.height
                          << ": popped_real=" << loop_stats.popped_real
@@ -5285,6 +5350,7 @@ namespace video {
                          << " converted=" << loop_stats.converted
                          << " encoded=" << loop_stats.encoded
                          << " dropped_submissions=" << loop_stats.dropped_submissions
+                         << " input_boosts=" << loop_stats.input_boosts
                          << " frame_nr=" << frame_nr;
         loop_stats = {};
         loop_stats.last_log = now;
@@ -5355,6 +5421,9 @@ namespace video {
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
         auto image_wait_budget = max_frametime;
+        if (input_boost_state.active(input_boost::clock::now())) {
+          image_wait_budget = input_boost_state.settings().boost_interval;
+        }
         if (bootstrap_state.should_encode_placeholder()) {
           // Prime a lookahead encoder immediately; waiting for minimum FPS between
           // bootstrap placeholders needlessly delays the first packet.
@@ -5412,7 +5481,7 @@ namespace video {
           image_wait_budget = std::min(image_wait_budget, remaining_tail_budget);
         }
 
-        auto img = images->pop(image_wait_budget);
+        auto img = pop_captured_image(image_wait_budget, image_wait_started);
         // Completion can race the pre-wait drain, including when capture and
         // output become ready together. Send the older packet before acquiring
         // the next image's GPU mutex or reserving/converting its input surface.
@@ -5457,6 +5526,9 @@ namespace video {
           bootstrap_state.current_input_placeholder = placeholder_input;
 
           if (!placeholder_input) {
+            // Judge pending input against the screen as it was before this frame.
+            consume_input_activity();
+            input_boost_state.on_frame(input_boost::clock::now());
             bootstrap_state.real_frame_seen = true;
             if (!encode_frame_timestamp) {
               encode_frame_timestamp = *frame_timestamp;
