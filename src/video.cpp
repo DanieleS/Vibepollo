@@ -1262,11 +1262,11 @@ namespace video {
       }
     }
 
-    bool set_bitrate(int bitrate_kbps) override {
+    bool set_bitrate(int bitrate_kbps, bool reset_on_raise) override {
       if (!device || !device->nvenc) {
         return false;
       }
-      return device->nvenc->set_bitrate(bitrate_kbps);
+      return device->nvenc->set_bitrate(bitrate_kbps, reset_on_raise);
     }
 
     void set_hdr_metadata(const SS_HDR_METADATA &metadata) override {
@@ -1330,7 +1330,8 @@ namespace video {
       }
     }
 
-    bool set_bitrate(int bitrate_kbps) override {
+    bool set_bitrate(int bitrate_kbps, bool /* reset_on_raise */) override {
+      // AMF applies runtime rate changes without an IDR either way.
       return device && device->amf && device->amf->set_bitrate(bitrate_kbps);
     }
 
@@ -1503,6 +1504,17 @@ namespace video {
     std::chrono::steady_clock::time_point stable_since {};
   };
 
+  // Drain a bitrate event without blocking, keeping only the latest value.
+  std::optional<int> latest_bitrate_event(const safe::mail_raw_t::event_t<int> &events) {
+    std::optional<int> latest;
+    while (events->peek()) {
+      if (auto value = events->pop(0ms)) {
+        latest = *value;
+      }
+    }
+    return latest;
+  }
+
   struct sync_session_ctx_t {
     safe::signal_t *join_event;
     safe::mail_raw_t::event_t<bool> shutdown_event;
@@ -1511,6 +1523,8 @@ namespace video {
     safe::mail_raw_t::event_t<hdr_info_t> hdr_events;
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_events;
     safe::mail_raw_t::event_t<int> bitrate_events;
+    safe::mail_raw_t::event_t<int> fec_bitrate_events;
+    safe::mail_raw_t::event_t<int> fec_bitrate_applied_events;
 
     config_t config;
     int frame_nr;
@@ -5163,6 +5177,9 @@ namespace video {
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
     auto bitrate_events = mail->event<int>(mail::dynamic_bitrate);
+    auto fec_bitrate_events = mail->event<int>(mail::fec_bitrate);
+    auto fec_bitrate_applied_events = mail->event<int>(mail::fec_bitrate_applied);
+    bool fec_bitrate_live = true;
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -5303,20 +5320,29 @@ namespace video {
         break;
       }
 
+      // Dynamic FEC shifts bitrate between the encoder and parity. Apply it only in place and
+      // without a keyframe; an encoder that cannot keeps its bitrate, and FEC stays within the
+      // room it already has. A runtime bitrate request below still wins when both are pending.
+      if (auto fec_bitrate = latest_bitrate_event(fec_bitrate_events); fec_bitrate && fec_bitrate_live) {
+        if (session->set_bitrate(*fec_bitrate, false)) {
+          config.bitrate = *fec_bitrate;
+          fec_bitrate_applied_events->raise(*fec_bitrate);
+        } else {
+          fec_bitrate_live = false;
+          BOOST_LOG(info) << "Encoder cannot change bitrate in place; dynamic FEC keeps its initial budget"sv;
+        }
+      }
+
       // Apply any runtime bitrate change, coalescing rapid ABR updates to the latest value so a
       // burst of requests causes at most one reconfigure/rebuild. NVENC reconfigures the live
       // encoder seamlessly; encoders that cannot (avcodec-based) report failure and we rebuild this
       // session by breaking out, so capture_async re-enters with config (held by reference) anew.
-      std::optional<int> latest_bitrate;
-      while (bitrate_events->peek()) {
-        if (auto new_bitrate = bitrate_events->pop(0ms)) {
-          latest_bitrate = *new_bitrate;
-        }
-      }
+      std::optional<int> latest_bitrate = latest_bitrate_event(bitrate_events);
       if (latest_bitrate) {
         config.bitrate = *latest_bitrate;
         config.client_requested_bitrate = *latest_bitrate;
-        if (session->set_bitrate(*latest_bitrate)) {
+        fec_bitrate_applied_events->raise(*latest_bitrate);
+        if (session->set_bitrate(*latest_bitrate, true)) {
           BOOST_LOG(info) << "Applied runtime bitrate "sv << *latest_bitrate << " kbps (live)"sv;
         } else if (frame_nr > 1) {
           BOOST_LOG(info) << "Rebuilding encoder to apply runtime bitrate "sv << *latest_bitrate << " kbps"sv;
@@ -5924,18 +5950,23 @@ namespace video {
             pos->session->request_idr_frame();
             ctx->idr_events->pop();
           }
+          // Dynamic FEC: in place and without a keyframe only, as in encode_run().
+          if (auto fec_bitrate = latest_bitrate_event(ctx->fec_bitrate_events)) {
+            if (pos->session->set_bitrate(*fec_bitrate, false)) {
+              ctx->config.bitrate = *fec_bitrate;
+              ctx->fec_bitrate_applied_events->raise(*fec_bitrate);
+            } else {
+              BOOST_LOG(debug) << "Encoder cannot change bitrate in place; dynamic FEC keeps its budget"sv;
+            }
+          }
           if (ctx->bitrate_events->peek()) {
             // Coalesce rapid ABR updates to the latest requested value.
-            std::optional<int> latest_bitrate;
-            while (ctx->bitrate_events->peek()) {
-              if (auto new_bitrate = ctx->bitrate_events->pop(0ms)) {
-                latest_bitrate = *new_bitrate;
-              }
-            }
+            std::optional<int> latest_bitrate = latest_bitrate_event(ctx->bitrate_events);
             if (latest_bitrate) {
               ctx->config.bitrate = *latest_bitrate;
               ctx->config.client_requested_bitrate = *latest_bitrate;
-              if (pos->session->set_bitrate(*latest_bitrate)) {
+              ctx->fec_bitrate_applied_events->raise(*latest_bitrate);
+              if (pos->session->set_bitrate(*latest_bitrate, true)) {
                 BOOST_LOG(info) << "Applied runtime bitrate "sv << *latest_bitrate << " kbps (live, sync)"sv;
               } else {
                 // avcodec encoder: rebuild synced sessions from their (now-updated) ctx config.
@@ -6602,6 +6633,8 @@ namespace video {
         mail->event<hdr_info_t>(mail::hdr),
         mail->event<input::touch_port_t>(mail::touch_port),
         mail->event<int>(mail::dynamic_bitrate),
+        mail->event<int>(mail::fec_bitrate),
+        mail->event<int>(mail::fec_bitrate_applied),
         config,
         1,
         channel_data,

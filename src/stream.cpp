@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <future>
 #include <limits>
@@ -66,6 +67,7 @@ extern "C" {
 #include "update.h"
 #include "utility.h"
 #include "uuid.h"
+#include "video_fec.h"
 #include "video_send.h"
 #include "webrtc_stream.h"
 #ifdef _WIN32
@@ -628,6 +630,8 @@ namespace stream {
       safe::mail_raw_t::event_t<bool> idr_events;
       safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
       safe::mail_raw_t::event_t<int> bitrate_events;
+      safe::mail_raw_t::event_t<int> fec_bitrate_events;
+      safe::mail_raw_t::event_t<int> fec_bitrate_applied_events;
 
       std::unique_ptr<platf::deinit_t> qos;
     } video;
@@ -804,11 +808,13 @@ namespace stream {
       if (!client_uuid.empty() && session->device_uuid != client_uuid) {
         continue;
       }
+      // With dynamic FEC the request is the whole video budget: parity comes out of it.
+      const auto encoder_kbps = session->config.fec_budget ? session->config.fec_budget->set_video_kbps(bitrate_kbps) : bitrate_kbps;
       // Keep the session metadata (runtime sessions API, history, stats) in sync with the
       // value the encoder thread will adopt from the event below.
-      session->config.monitor.bitrate = bitrate_kbps;
+      session->config.monitor.bitrate = encoder_kbps;
       session->config.monitor.client_requested_bitrate = bitrate_kbps;
-      session->video.bitrate_events->raise(bitrate_kbps);
+      session->video.bitrate_events->raise(encoder_kbps);
       ++updated;
     }
     return updated;
@@ -1407,6 +1413,10 @@ namespace stream {
     return 0;
   }
 
+  static std::int64_t steady_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1472,6 +1482,21 @@ namespace stream {
         << "time in milli since last report [" << t.count() << ']' << std::endl
         << "last good frame [" << lastGoodFrame << ']' << std::endl
         << "---end stats---";
+    });
+
+    // Dynamic FEC loss summary (video_fec.h). Only a session that negotiated it has a controller.
+    server->map(video_fec::summary_packet_type, [](session_t *session, const std::string_view &payload) {
+      const auto &control = session->config.fec_control;
+      const auto sequence = util::packet::read_be<std::uint32_t>(payload, 0);
+      const auto data = util::packet::read_be<std::uint32_t>(payload, 4);
+      const auto missing = util::packet::read_be<std::uint32_t>(payload, 8);
+      if (!control || payload.size() != video_fec::summary_size || !sequence || !data || !missing) {
+        BOOST_LOG(debug) << "Ignoring unexpected FEC summary ("sv << payload.size() << " bytes)"sv;
+        return;
+      }
+      if (!control->report(*sequence, *data, *missing, steady_now_ms())) {
+        BOOST_LOG(verbose) << "Ignoring stale or invalid FEC summary "sv << *sequence;
+      }
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
@@ -2001,6 +2026,40 @@ namespace stream {
     }
   }
 
+  /**
+   * @brief This frame's FEC percentage for a session that negotiated dynamic FEC.
+   *
+   * The controller asks for a percentage; the budget turns each second's peak request into an
+   * encoder bitrate change, and the frame never carries more parity than the encoder left room for.
+   */
+  static int dynamic_fec_percentage(session_t &session, std::size_t data_shards, std::size_t min_parity_shards) {
+    auto &control = *session.config.fec_control;
+    auto &budget = *session.config.fec_budget;
+    const auto now = steady_now_ms();
+
+    std::optional<int> applied;
+    while (session.video.fec_bitrate_applied_events->peek()) {
+      if (auto value = session.video.fec_bitrate_applied_events->pop(0ms)) {
+        applied = *value;
+      }
+    }
+    if (applied) {
+      budget.applied(*applied);
+      session.config.monitor.bitrate = *applied;
+      BOOST_LOG(debug) << "Dynamic FEC: encoder at "sv << *applied << " kbps, room for "sv << budget.allowance() << "% FEC"sv;
+    }
+
+    const auto requested = control.percentage(data_shards, min_parity_shards, now);
+    if (const auto change = budget.observe(requested, now)) {
+      const auto loss = control.estimate(now);
+      BOOST_LOG(info) << "Dynamic FEC: "sv << change->percentage << "% for "sv
+                      << (loss ? std::format("{:.2f}% loss", *loss * 100) : "no loss feedback"s)
+                      << "; encoder to "sv << change->encoder_kbps << " of "sv << budget.video_kbps() << " kbps"sv;
+      session.video.fec_bitrate_events->raise(change->encoder_kbps);
+    }
+    return static_cast<int>(std::min(requested, budget.allowance()));
+  }
+
   void videoBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     auto packets = mail::man->queue<video::packet_t>(mail::video_packets);
@@ -2178,6 +2237,10 @@ namespace stream {
       auto payload_new = concat_and_insert(sizeof(video_packet_raw_t), payload_blocksize, std::string_view {(char *) &frame_header, sizeof(frame_header)}, payload);
 
       payload = std::string_view {(char *) payload_new.data(), payload_new.size()};
+
+      if (!pyrowave_session && session->config.fec_control) {
+        fecPercentage = dynamic_fec_percentage(*session, (payload.size() + blocksize - 1) / blocksize, std::size_t(std::max(session->config.minRequiredFecPackets, 0)));
+      }
 
       // There are 2 bits for FEC block count for a maximum of 4 FEC blocks
       constexpr auto MAX_FEC_BLOCKS = pyrowave::protocol::MAX_FEC_BLOCKS;
@@ -4068,6 +4131,8 @@ namespace stream {
       session->video.idr_events = mail->event<bool>(mail::idr);
       session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
       session->video.bitrate_events = mail->event<int>(mail::dynamic_bitrate);
+      session->video.fec_bitrate_events = mail->event<int>(mail::fec_bitrate);
+      session->video.fec_bitrate_applied_events = mail->event<int>(mail::fec_bitrate_applied);
       session->video.lowseq = 0;
       session->video.ping_payload = launch_session.av_ping_payload;
       if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {

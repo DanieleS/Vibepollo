@@ -56,6 +56,8 @@ namespace mail {
   MAIL(gamepad_feedback);
   MAIL(hdr);
   MAIL(dynamic_bitrate);  // Runtime encoder bitrate change (kbps), posted from the HTTP /bitrate handler
+  MAIL(fec_bitrate);  // Encoder bitrate (kbps) that leaves room for dynamic FEC; applied in place only
+  MAIL(fec_bitrate_applied);  // Encoder bitrate (kbps) now in effect, reported back to the video send path
 #undef MAIL
 
 }  // namespace mail

@@ -30,6 +30,11 @@ namespace rtsp_stream {
   struct launch_session_t;
 }
 
+namespace video_fec {
+  class controller_t;
+  class budget_t;
+}  // namespace video_fec
+
 namespace stream {
   constexpr auto VIDEO_STREAM_PORT = 9;
   constexpr auto CONTROL_PORT = 10;
@@ -58,6 +63,10 @@ namespace stream {
 
     int packetsize;
     int minRequiredFecPackets;
+    // Dynamic FEC, set only when the client negotiated it (see video_fec.h). Without them the
+    // session sends the host's fixed fec_percentage.
+    std::shared_ptr<video_fec::controller_t> fec_control;
+    std::shared_ptr<video_fec::budget_t> fec_budget;
     int mlFeatureFlags;
     int controlProtocolType;
     int audioQosType;

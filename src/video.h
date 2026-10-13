@@ -292,10 +292,12 @@ namespace video {
     /**
      * @brief Apply a new encoder bitrate to the live encoder without rebuilding it.
      * @param bitrate_kbps New bitrate in kbps.
+     * @param reset_on_raise Let an encoder that would restart rate control (and send an IDR)
+     *        to apply a higher bitrate at once do so. Dynamic FEC passes false.
      * @return `true` if the encoder reconfigured itself in place; `false` if the caller must
      *         rebuild the encode session to apply the change.
      */
-    virtual bool set_bitrate(int bitrate_kbps) {
+    virtual bool set_bitrate(int bitrate_kbps, bool reset_on_raise) {
       return false;
     }
 

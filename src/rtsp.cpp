@@ -52,6 +52,7 @@ extern "C" {
 #include "sync.h"
 #include "thread_pool.h"
 #include "video.h"
+#include "video_fec.h"
 
 namespace asio = boost::asio;
 
@@ -1970,6 +1971,10 @@ namespace rtsp_stream {
     ss << "a=x-ss-general.encryptionSupported:" << encryption_flags_supported << std::endl;
     ss << "a=x-ss-general.encryptionRequested:" << encryption_flags_requested << std::endl;
 
+    // Dynamic FEC (video_fec.h). Clients that don't know it ignore the attribute, and nothing
+    // changes for a session unless the client answers in its ANNOUNCE.
+    ss << "a=x-ss-video[0].fecControlVersion:1"sv << std::endl;
+
     if (video::last_encoder_probe_supported_ref_frames_invalidation) {
       ss << "a=x-nv-video[0].refPicInvalidation:1"sv << std::endl;
     }
@@ -2159,6 +2164,7 @@ namespace rtsp_stream {
     config.frame_generation_enabled = false;
 
     std::int64_t configuredBitrateKbps;
+    std::optional<int> client_fec_preference;
     config.audio.flags[audio::config_t::HOST_AUDIO] = session->host_audio;
     try {
       config.audio.channels = (int) util::from_view(args.at("x-nv-audio.surround.numChannels"sv));
@@ -2197,6 +2203,17 @@ namespace rtsp_stream {
       // Legacy clients use nvFeatureFlags to indicate support for audio encryption
       if (util::from_view(args.at("x-nv-general.featureFlags"sv)) & 0x20) {
         config.encryptionFlagsEnabled |= SS_ENC_AUDIO;
+      }
+
+      // Dynamic FEC needs the client's loss summaries, which travel on the encrypted control stream.
+      if (const auto summary = args.find("x-ml-video.fecSummaryVersion"sv);
+          summary != args.end() && summary->second == "1"sv && config.controlProtocolType == 13) {
+        if (const auto requested = args.find("x-ml-video.fecPercentage"sv); requested != args.end()) {
+          client_fec_preference = video_fec::parse_preference(requested->second);
+          if (!client_fec_preference) {
+            BOOST_LOG(warning) << "Ignoring invalid client FEC preference ["sv << requested->second << "]; using fixed FEC"sv;
+          }
+        }
       }
 
       config.monitor.height = (int) util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
@@ -2421,11 +2438,16 @@ namespace rtsp_stream {
       // UI can show it alongside the post-adjustment encoder bitrate.
       config.monitor.client_requested_bitrate = static_cast<int>(configuredBitrateKbps);
 
+      // A client that negotiated dynamic FEC and chose a mode gets a per-session controller.
+      // "Host default" keeps the fixed fec_percentage path below, exactly as for other clients.
+      const bool dynamic_fec = !pyrowave_session && client_fec_preference && *client_fec_preference != video_fec::host_preference;
+
       // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
       // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
       // PyroWave only adds parity to its few critical packets (see stream.cpp), so it
       // reserves its baseline parity and packet overhead in the per-frame budget.
-      if (config::stream.fec_percentage <= 80 && !pyrowave_session) {
+      // Dynamic FEC takes its parity out of the video budget further down instead.
+      if (config::stream.fec_percentage <= 80 && !pyrowave_session && !dynamic_fec) {
         configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
       }
 
@@ -2445,6 +2467,18 @@ namespace rtsp_stream {
         BOOST_LOG(warning) << "PyroWave bandwidth budget cannot accommodate audio and control overhead";
         respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return false;
+      }
+
+      if (dynamic_fec) {
+        // What remains after audio and overhead is the video budget: the encoder gets
+        // budget * 100 / (100 + F) and parity the rest, re-split as F changes.
+        const auto fixed = *client_fec_preference >= 0 ? std::optional<unsigned> {unsigned(*client_fec_preference)} : std::nullopt;
+        const auto fallback = unsigned(std::max(config::stream.fec_percentage, 0));
+        config.fec_control = std::make_shared<video_fec::controller_t>(fallback, fixed);
+        config.fec_budget = std::make_shared<video_fec::budget_t>((int) std::max<std::int64_t>(configuredBitrateKbps, 1), fixed.value_or(fallback));
+        BOOST_LOG(info) << "Client negotiated dynamic FEC: "sv << (fixed ? std::to_string(*fixed) + "% fixed"s : "automatic"s)
+                        << ", video budget "sv << config.fec_budget->video_kbps() << " Kbps"sv;
+        configuredBitrateKbps = config.fec_budget->encoder_kbps();
       }
 
       BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
