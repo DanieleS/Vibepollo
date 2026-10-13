@@ -165,13 +165,14 @@ TEST(InputActivity, FiltersAnalogJitter) {
   EXPECT_FALSE(evaluate(tracker, bytes_of(controller(0, 0, 0, 300))));
   // Drift inside the deadzone.
   EXPECT_FALSE(evaluate(tracker, bytes_of(controller(0, 0, 3, -900))));
-  // Crossing the deadzone counts, small moves while held do not, big ones do.
+  // Crossing the deadzone counts; moving while held, however far, does not.
   EXPECT_TRUE(evaluate(tracker, bytes_of(controller(0, 0, 3, 12000))));
   EXPECT_FALSE(evaluate(tracker, bytes_of(controller(0, 0, 3, 12500))));
-  EXPECT_TRUE(evaluate(tracker, bytes_of(controller(0, 0, 3, 20000))));
-  // Trigger pulled past its threshold.
+  EXPECT_FALSE(evaluate(tracker, bytes_of(controller(0, 0, 3, 32000))));
+  EXPECT_FALSE(evaluate(tracker, bytes_of(controller(0, 0, 3, 20000))));
+  // Trigger pulled past its threshold, then squeezed further.
   EXPECT_TRUE(evaluate(tracker, bytes_of(controller(0, 0, 200, 20000))));
-  EXPECT_FALSE(evaluate(tracker, bytes_of(controller(0, 0, 202, 20000))));
+  EXPECT_FALSE(evaluate(tracker, bytes_of(controller(0, 0, 255, 20000))));
   // Releasing back into the deadzone counts.
   EXPECT_TRUE(evaluate(tracker, bytes_of(controller(0, 0, 0, 0))));
 

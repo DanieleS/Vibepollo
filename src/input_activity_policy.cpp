@@ -15,12 +15,11 @@ extern "C" {
 
 namespace input::activity {
   namespace {
-    // Ignore analog jitter and drift unless the input crosses a small deadzone or
-    // moves meaningfully while held (edge + deadzone + hysteresis).
+    // Analog sticks and triggers only count when they cross their deadzone, in
+    // either direction. Moving while held is a continuous stream, like pointer
+    // motion, and must not keep re-arming the boost.
     constexpr int STICK_DEADZONE = 2048;
-    constexpr int STICK_DELTA = 1024;
     constexpr int TRIGGER_THRESHOLD = 8;
-    constexpr int TRIGGER_DELTA = 4;
 
     // Packets are already validated by the time they are classified, but the
     // classifier is defensive on its own: every field read is bounds-checked and
@@ -49,22 +48,12 @@ namespace input::activity {
       return std::abs(value) >= STICK_DEADZONE;
     }
 
-    bool trigger_has_meaningful_change(const int previous, const int current) {
-      const bool previous_active = previous >= TRIGGER_THRESHOLD;
-      const bool current_active = current >= TRIGGER_THRESHOLD;
-      if (previous_active != current_active) {
-        return true;
-      }
-      return (previous_active || current_active) && std::abs(current - previous) >= TRIGGER_DELTA;
+    bool trigger_crossed_threshold(const int previous, const int current) {
+      return (previous >= TRIGGER_THRESHOLD) != (current >= TRIGGER_THRESHOLD);
     }
 
-    bool stick_has_meaningful_change(const int previous, const int current) {
-      const bool previous_active = stick_outside_deadzone(previous);
-      const bool current_active = stick_outside_deadzone(current);
-      if (previous_active != current_active) {
-        return true;
-      }
-      return (previous_active || current_active) && std::abs(current - previous) >= STICK_DELTA;
+    bool stick_crossed_deadzone(const int previous, const int current) {
+      return stick_outside_deadzone(previous) != stick_outside_deadzone(current);
     }
 
     // A contact starting or ending is a deliberate action; hover and move are motion.
@@ -110,12 +99,12 @@ namespace input::activity {
                stick_outside_deadzone(right_stick_y);
     } else {
       active = button_flags != state.button_flags ||
-               trigger_has_meaningful_change(state.left_trigger, left_trigger) ||
-               trigger_has_meaningful_change(state.right_trigger, right_trigger) ||
-               stick_has_meaningful_change(state.left_stick_x, left_stick_x) ||
-               stick_has_meaningful_change(state.left_stick_y, left_stick_y) ||
-               stick_has_meaningful_change(state.right_stick_x, right_stick_x) ||
-               stick_has_meaningful_change(state.right_stick_y, right_stick_y);
+               trigger_crossed_threshold(state.left_trigger, left_trigger) ||
+               trigger_crossed_threshold(state.right_trigger, right_trigger) ||
+               stick_crossed_deadzone(state.left_stick_x, left_stick_x) ||
+               stick_crossed_deadzone(state.left_stick_y, left_stick_y) ||
+               stick_crossed_deadzone(state.right_stick_x, right_stick_x) ||
+               stick_crossed_deadzone(state.right_stick_y, right_stick_y);
     }
 
     state = {

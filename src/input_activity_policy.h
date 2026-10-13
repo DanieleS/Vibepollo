@@ -23,8 +23,8 @@ namespace input::activity {
    * @brief Decides whether an input packet is a deliberate user action.
    * @details Only discrete actions count: key presses, typed text, mouse buttons,
    *          non-zero scrolling, touch/pen contacts, controller touchpad contacts,
-   *          controller buttons, and triggers/sticks crossing a deadzone or moving
-   *          meaningfully while held. Pointer and touch motion, controller motion
+   *          controller buttons, and triggers/sticks crossing their deadzone.
+   *          Pointer and touch motion, analog movement while held, controller motion
    *          sensors, battery and arrival reports never count: they are either
    *          continuous streams or already produce capture updates on their own,
    *          and letting them keep the boost alive is what made the reference
