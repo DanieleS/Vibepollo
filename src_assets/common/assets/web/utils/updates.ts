@@ -205,9 +205,10 @@ export async function fetchUpdateReleases(
 ): Promise<UpdateRelease[]> {
   const releases: UpdateRelease[] = [];
   let complete = false;
+  // This fork publishes its own builds; offering upstream's installer would replace it.
   for (let page = 1; page <= 10; page++) {
     const response = await fetch(
-      `https://api.github.com/repos/Nonary/Vibepollo/releases?per_page=100&page=${page}`,
+      `https://api.github.com/repos/DanieleS/Vibepollo/releases?per_page=100&page=${page}`,
       { headers: { Accept: 'application/vnd.github+json' }, credentials: 'omit', signal },
     );
     if (!response.ok) throw new Error('releases-unavailable');
