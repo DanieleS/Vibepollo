@@ -254,7 +254,7 @@ namespace config {
 
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
     double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = half of client's requested framerate.
-    bool input_activity_boost;  ///< After deliberate input on a static screen, briefly send minimum-FPS duplicates at the boosted cadence.
+    bool input_activity_boost;  ///< Opt-in. After the response to deliberate input on a static screen, briefly send minimum-FPS duplicates at the boosted cadence.
     int input_activity_boost_fps;  ///< Boosted duplicate cadence. Range 0-1000, 0 = the stream's framerate; never faster than the stream.
     int input_activity_boost_window_ms;  ///< How long the boost lasts after the last qualifying input. Range 0-5000, 0 disables the boost.
     bool wgc_pacing_smoothing;  ///< Smooth WGC delivered frame cadence under low-latency (Reflex) source caps by snapping the pacing-group re-anchor back onto the prior grid instead of the jittery arrival phase. Disable for byte-for-byte legacy pacing.

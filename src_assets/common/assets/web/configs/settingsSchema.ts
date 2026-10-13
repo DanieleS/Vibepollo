@@ -1256,7 +1256,7 @@ export const settingsDefaults: Record<string, unknown> = {
   pyrowave: true,
   max_bitrate: 0,
   minimum_fps_target: 20,
-  input_activity_boost: true,
+  input_activity_boost: false,
   input_activity_boost_fps: 0,
   input_activity_boost_window_ms: 150,
   qp: 28,

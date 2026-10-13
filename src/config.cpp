@@ -971,7 +971,7 @@ namespace config {
 
     0,  // max_bitrate
     20,  // minimum_fps_target (0 = framerate)
-    true,  // input_activity_boost
+    false,  // input_activity_boost
     0,  // input_activity_boost_fps (0 = stream framerate)
     150,  // input_activity_boost_window_ms
     true,  // wgc_pacing_smoothing
