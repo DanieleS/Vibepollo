@@ -50,6 +50,7 @@ extern "C" {
 #include "sync.h"
 #include "video.h"
 #include "video_encoder_probe_policy.h"
+#include "video_fec.h"
 #include "video_policy.h"
 #include "webrtc_stream.h"
 
@@ -1515,6 +1516,29 @@ namespace video {
     return latest;
   }
 
+  /**
+   * @brief Resize the encoder for the latest dynamic FEC allowance, if one is pending.
+   *
+   * The bitrate is read from the session's video budget now, so a change requested before a
+   * runtime bitrate request cannot undo it. Only in place and without a keyframe: an encoder
+   * that cannot keeps its bitrate and FEC stays within the room it already has. The send path
+   * asks again a second later.
+   * @return false if the encoder refused the change.
+   */
+  bool apply_fec_allowance(encode_session_t &session, config_t &config, const safe::mail_raw_t::event_t<int> &allowance_events, const safe::mail_raw_t::event_t<int> &applied_events) {
+    const auto allowance = latest_bitrate_event(allowance_events);
+    if (!allowance || !config.fec_budget) {
+      return true;
+    }
+    const auto kbps = config.fec_budget->encoder_kbps_at(static_cast<unsigned>(std::max(*allowance, 0)));
+    if (!session.set_bitrate(kbps, false)) {
+      return false;
+    }
+    config.bitrate = kbps;
+    applied_events->raise(kbps);
+    return true;
+  }
+
   struct sync_session_ctx_t {
     safe::signal_t *join_event;
     safe::mail_raw_t::event_t<bool> shutdown_event;
@@ -1523,7 +1547,7 @@ namespace video {
     safe::mail_raw_t::event_t<hdr_info_t> hdr_events;
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_events;
     safe::mail_raw_t::event_t<int> bitrate_events;
-    safe::mail_raw_t::event_t<int> fec_bitrate_events;
+    safe::mail_raw_t::event_t<int> fec_allowance_events;
     safe::mail_raw_t::event_t<int> fec_bitrate_applied_events;
 
     config_t config;
@@ -5177,9 +5201,9 @@ namespace video {
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
     auto bitrate_events = mail->event<int>(mail::dynamic_bitrate);
-    auto fec_bitrate_events = mail->event<int>(mail::fec_bitrate);
+    auto fec_allowance_events = mail->event<int>(mail::fec_allowance);
     auto fec_bitrate_applied_events = mail->event<int>(mail::fec_bitrate_applied);
-    bool fec_bitrate_live = true;
+    bool fec_refusal_logged = false;
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -5320,17 +5344,11 @@ namespace video {
         break;
       }
 
-      // Dynamic FEC shifts bitrate between the encoder and parity. Apply it only in place and
-      // without a keyframe; an encoder that cannot keeps its bitrate, and FEC stays within the
-      // room it already has. A runtime bitrate request below still wins when both are pending.
-      if (auto fec_bitrate = latest_bitrate_event(fec_bitrate_events); fec_bitrate && fec_bitrate_live) {
-        if (session->set_bitrate(*fec_bitrate, false)) {
-          config.bitrate = *fec_bitrate;
-          fec_bitrate_applied_events->raise(*fec_bitrate);
-        } else {
-          fec_bitrate_live = false;
-          BOOST_LOG(info) << "Encoder cannot change bitrate in place; dynamic FEC keeps its initial budget"sv;
-        }
+      // Dynamic FEC shifts bitrate between the encoder and parity. A runtime bitrate request
+      // below still wins when both are pending.
+      if (!apply_fec_allowance(*session, config, fec_allowance_events, fec_bitrate_applied_events) && !fec_refusal_logged) {
+        fec_refusal_logged = true;
+        BOOST_LOG(info) << "Encoder refused an in-place bitrate change; dynamic FEC stays within its current budget"sv;
       }
 
       // Apply any runtime bitrate change, coalescing rapid ABR updates to the latest value so a
@@ -5950,14 +5968,9 @@ namespace video {
             pos->session->request_idr_frame();
             ctx->idr_events->pop();
           }
-          // Dynamic FEC: in place and without a keyframe only, as in encode_run().
-          if (auto fec_bitrate = latest_bitrate_event(ctx->fec_bitrate_events)) {
-            if (pos->session->set_bitrate(*fec_bitrate, false)) {
-              ctx->config.bitrate = *fec_bitrate;
-              ctx->fec_bitrate_applied_events->raise(*fec_bitrate);
-            } else {
-              BOOST_LOG(debug) << "Encoder cannot change bitrate in place; dynamic FEC keeps its budget"sv;
-            }
+          // Dynamic FEC, as in encode_run().
+          if (!apply_fec_allowance(*pos->session, ctx->config, ctx->fec_allowance_events, ctx->fec_bitrate_applied_events)) {
+            BOOST_LOG(debug) << "Encoder refused an in-place bitrate change; dynamic FEC stays within its current budget"sv;
           }
           if (ctx->bitrate_events->peek()) {
             // Coalesce rapid ABR updates to the latest requested value.
@@ -6633,7 +6646,7 @@ namespace video {
         mail->event<hdr_info_t>(mail::hdr),
         mail->event<input::touch_port_t>(mail::touch_port),
         mail->event<int>(mail::dynamic_bitrate),
-        mail->event<int>(mail::fec_bitrate),
+        mail->event<int>(mail::fec_allowance),
         mail->event<int>(mail::fec_bitrate_applied),
         config,
         1,

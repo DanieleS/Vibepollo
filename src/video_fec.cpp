@@ -173,7 +173,10 @@ namespace video_fec {
     if (last_report_ms_ >= 0 && (now_ms < last_report_ms_ || delta == 0 || delta >= sequence_half_range)) {
       return false;
     }
-    if (last_report_ms_ >= 0 && (delta != 1 || now_ms - last_report_ms_ > feedback_timeout_ms)) {
+    if (last_report_ms_ < 0) {
+      // The first summary starts the observation period: one clean second is not enough to drop parity.
+      resume_since_ms_ = now_ms;
+    } else if (delta != 1 || now_ms - last_report_ms_ > feedback_timeout_ms) {
       // A skipped summary or a silent stretch is unknown, not clean: start a new observation period.
       resume_since_ms_ = now_ms;
       loss_window_ = {};
@@ -197,9 +200,9 @@ namespace video_fec {
         return fallback_;
       }
       const auto estimate = loss_window_.estimate(now_ms);
-      // After a gap, a clean report must cover a full window before protection is released.
-      // A connection's first reports are not a gap.
-      if (!estimate || (*estimate == 0 && resume_since_ms_ >= 0 && now_ms - resume_since_ms_ < loss_window_t::duration_ms)) {
+      // At the start of the session and after a gap, clean reports must cover a full window
+      // before protection is released. Reported loss raises protection at once.
+      if (!estimate || (*estimate == 0 && now_ms - resume_since_ms_ < loss_window_t::duration_ms)) {
         return fallback_;
       }
       loss = *estimate;
@@ -224,6 +227,11 @@ namespace video_fec {
   int budget_t::encoder_kbps() const {
     std::lock_guard lock {mutex_};
     return encoder_kbps_for(video_kbps_, allowance_);
+  }
+
+  int budget_t::encoder_kbps_at(unsigned percentage) const {
+    std::lock_guard lock {mutex_};
+    return encoder_kbps_for(video_kbps_, std::min(percentage, max_wire_percentage));
   }
 
   unsigned budget_t::allowance() const {
@@ -258,10 +266,11 @@ namespace video_fec {
       return std::nullopt;
     }
     const auto kbps = encoder_kbps_for(video_kbps_, target);
-    if (requested_kbps_ == kbps) {
-      return std::nullopt;  // Still waiting on, or refused, this exact change.
+    if (requested_kbps_ == kbps && now_ms - requested_ms_ < window_ms) {
+      return std::nullopt;  // Still waiting on this exact change; ask again if the encoder refused it.
     }
     requested_kbps_ = kbps;
+    requested_ms_ = now_ms;
     return change_t {target, kbps};
   }
 

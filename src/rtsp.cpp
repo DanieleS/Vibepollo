@@ -2476,6 +2476,7 @@ namespace rtsp_stream {
         const auto fallback = unsigned(std::max(config::stream.fec_percentage, 0));
         config.fec_control = std::make_shared<video_fec::controller_t>(fallback, fixed);
         config.fec_budget = std::make_shared<video_fec::budget_t>((int) std::max<std::int64_t>(configuredBitrateKbps, 1), fixed.value_or(fallback));
+        config.monitor.fec_budget = config.fec_budget;
         BOOST_LOG(info) << "Client negotiated dynamic FEC: "sv << (fixed ? std::to_string(*fixed) + "% fixed"s : "automatic"s)
                         << ", video budget "sv << config.fec_budget->video_kbps() << " Kbps"sv;
         configuredBitrateKbps = config.fec_budget->encoder_kbps();

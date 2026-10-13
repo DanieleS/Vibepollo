@@ -141,17 +141,38 @@ TEST(VideoFecTest, AutomaticModeFollowsFreshFeedback) {
   EXPECT_TRUE(controller.automatic());
   EXPECT_EQ(controller.percentage(100, 2, 0), 20u);  // No feedback yet.
 
-  // The connection's first clean report releases protection at once.
-  ASSERT_TRUE(controller.report(1, 1000, 0, 1000));
-  EXPECT_EQ(controller.percentage(100, 2, 1000), 0u);
-
-  ASSERT_TRUE(controller.report(2, 1000, 20, 2000));
-  const auto lossy = controller.percentage(100, 2, 2000);
+  ASSERT_TRUE(controller.report(1, 1000, 20, 1000));
+  const auto lossy = controller.percentage(100, 2, 1000);
   EXPECT_EQ(lossy, select_percentage(0.02, 100, 2, automatic_maximum));
   EXPECT_GT(lossy, 0u);
 
   // Stale feedback falls back to the host's percentage.
-  EXPECT_EQ(controller.percentage(100, 2, 2000 + controller_t::feedback_timeout_ms + 1), 20u);
+  EXPECT_EQ(controller.percentage(100, 2, 1000 + controller_t::feedback_timeout_ms + 1), 20u);
+}
+
+TEST(VideoFecTest, CleanFeedbackAtSessionStartNeedsAFullWindow) {
+  controller_t controller {20, std::nullopt};
+
+  // One clean second is not enough to drop parity at the start of a session.
+  ASSERT_TRUE(controller.report(1, 1000, 0, 1000));
+  EXPECT_EQ(controller.percentage(100, 2, 1000), 20u);
+
+  std::uint32_t sequence = 1;
+  std::int64_t now = 1000;
+  while (now + 1000 < 1000 + loss_window_t::duration_ms) {
+    now += 1000;
+    ASSERT_TRUE(controller.report(++sequence, 1000, 0, now));
+    EXPECT_EQ(controller.percentage(100, 2, now), 20u) << now;
+  }
+  now += 1000;
+  ASSERT_TRUE(controller.report(++sequence, 1000, 0, now));
+  EXPECT_EQ(controller.percentage(100, 2, now), 0u);
+}
+
+TEST(VideoFecTest, LossAtSessionStartRaisesProtectionAtOnce) {
+  controller_t controller {20, std::nullopt};
+  ASSERT_TRUE(controller.report(1, 1000, 30, 1000));
+  EXPECT_EQ(controller.percentage(100, 2, 1000), select_percentage(0.03, 100, 2, automatic_maximum));
 }
 
 TEST(VideoFecTest, RejectsInvalidAndOutOfOrderSummaries) {
@@ -214,10 +235,27 @@ TEST(VideoFecTest, BudgetRequestsOncePerWindow) {
 
   // Lowering protection does not wait for the encoder, but the allowance does.
   EXPECT_EQ(budget.allowance(), 20u);
-  EXPECT_FALSE(budget.observe(5, 1500));
-  EXPECT_FALSE(budget.observe(5, 2000));  // Same change still pending.
+  EXPECT_FALSE(budget.observe(5, 1500));  // Same change, still within the window.
   budget.applied(request->encoder_kbps);
   EXPECT_EQ(budget.allowance(), 5u);
+  EXPECT_FALSE(budget.observe(5, 2000));
+}
+
+TEST(VideoFecTest, BudgetRetriesARefusedChangeOncePerWindow) {
+  budget_t budget {24000, 0};
+  budget.observe(30, 0);
+  const auto first = budget.observe(30, 1000);
+  ASSERT_TRUE(first);
+
+  // The encoder never confirmed it: protection must not stay frozen at 0%.
+  EXPECT_FALSE(budget.observe(30, 1999));
+  const auto retry = budget.observe(30, 2000);
+  ASSERT_TRUE(retry);
+  EXPECT_EQ(retry->encoder_kbps, first->encoder_kbps);
+  EXPECT_EQ(budget.allowance(), 0u);
+
+  budget.applied(retry->encoder_kbps);
+  EXPECT_EQ(budget.allowance(), 30u);
 }
 
 TEST(VideoFecTest, BudgetRaisesProtectionOnlyAfterTheEncoderMakesRoom) {
@@ -251,4 +289,21 @@ TEST(VideoFecTest, BudgetFollowsRuntimeBitrateChanges) {
   EXPECT_EQ(budget.video_kbps(), 12000);
   budget.applied(encoder);
   EXPECT_EQ(budget.allowance(), 20u);
+}
+
+TEST(VideoFecTest, EncoderTargetIsSizedFromTheBudgetWhenApplied) {
+  // A change requested under the old budget lands after a runtime bitrate request:
+  // the encoder sizes it from the new budget, never the old one.
+  budget_t budget {24000, 20};
+  budget.observe(0, 0);
+  const auto change = budget.observe(0, 1000);
+  ASSERT_TRUE(change);
+  EXPECT_EQ(change->encoder_kbps, 24000);
+
+  budget.applied(budget.set_video_kbps(12000));
+  const auto applied = budget.encoder_kbps_at(change->percentage);
+  EXPECT_EQ(applied, 12000);
+  budget.applied(applied);
+  EXPECT_EQ(budget.allowance(), 0u);
+  EXPECT_EQ(budget.encoder_kbps(), 12000);
 }

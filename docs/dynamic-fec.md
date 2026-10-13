@@ -41,13 +41,15 @@ encrypted control stream, unreliably:
 | Field | Meaning |
 |---|---|
 | `sequence` | Increments once per summary period, including periods that sent nothing |
-| `dataPackets` | Data shards in the FEC blocks the client finished or gave up on during the period |
+| `dataPackets` | Data shards in the FEC blocks the client finished, gave up on or lost whole during the period |
 | `missingDataPackets` | Of those, shards missing before FEC recovery |
 
-Each block counts once, including blocks that arrived complete. A frame the client
-never saw does not count. The host rejects a summary that is empty, inconsistent,
-duplicated or older than the last one. A gap in `sequence`, or more than 3 s
-without a summary, clears the host's loss history.
+Each block counts once, including blocks that arrived complete. Blocks and frames
+that never arrived at all count too: the client sees the jump in RTP sequence
+numbers and counts every skipped packet as a missing data shard (parity included,
+which slightly overstates loss). The host rejects a summary that is empty,
+inconsistent, duplicated or older than the last one. A gap in `sequence`, or more
+than 3 s without a summary, clears the host's loss history.
 
 `0x5510` is not used by Moonlight, Sunshine, Apollo, Artemis or Vibepollo
 (Sunshine's extensions currently end at `0x5504`).
@@ -61,9 +63,10 @@ without a summary, clears the host's loss history.
   path will lay them out, including the client's minimum parity) all survive
   independent losses at that rate with a combined failure chance of at most 0.1%. If
   50% is not enough, the frame gets the highest percentage that still fits the FEC
-  blocks. Zero loss means 0%. The host falls back to `fec_percentage` when there is no
-  feedback, when feedback is older than 3 s, and after a gap until a clean
-  10-second window has passed.
+  blocks. The host uses `fec_percentage` when there is no feedback and when feedback
+  is older than 3 s. Reported loss raises protection at once, but dropping to 0%
+  needs 10 clean seconds of summaries, both at the start of a session and after a gap;
+  until then the host keeps `fec_percentage`.
 
 The model assumes independent losses. Bursty Wi-Fi loss can be worse than it predicts.
 
@@ -77,20 +80,27 @@ the client's configured bitrate (capped by `max_bitrate`), minus the audio allow
 
 At most once a second, the host turns the peak percentage requested during that
 second into a new encoder bitrate. Changes of one percentage point are ignored,
-but moving to or from 0% always goes through. The change is applied only if the
+but moving to or from 0% always goes through. The encoder thread computes the
+bitrate from the current budget when it applies the change. The change is applied only if the
 encoder can reconfigure in place without a keyframe (NVENC with its rate-control
 reset turned off for this purpose, or AMF). An encoder that would have to be
-rebuilt keeps its starting bitrate. A frame never carries more parity than the
+rebuilt keeps its starting bitrate. A change the encoder refuses is requested
+again a second later. A frame never carries more parity than the
 encoder's current bitrate leaves room for. To raise protection, the host first
-lowers the encoder bitrate and adds parity only after that takes effect. To lower
-protection, it removes parity at once and raises the encoder bitrate afterwards.
+lowers the encoder bitrate and adds parity to frames sent after the encoder confirms
+the change. Frames already encoded at the old bitrate can still be in flight and get
+the new parity, so the second after a rise can briefly exceed the budget by that
+difference. NVENC also moves to a new bitrate gradually rather than at once. To lower
+protection, the host removes parity at once and raises the encoder bitrate afterwards.
 
 A runtime `/bitrate` request on a dynamic session sets the video budget, so parity
-comes out of it. Otherwise it sets the encoder bitrate, as before.
+comes out of it. Like on other sessions, the value is used as given: audio and
+overhead are not taken out of it, unlike the bitrate a client asks for at session
+start. On other sessions it sets the encoder bitrate, as before.
 
 ## Logs
 
 - `Client negotiated dynamic FEC: automatic, video budget N Kbps` at session start.
 - `Dynamic FEC: F% for L% loss; encoder to E of B kbps` when the split changes.
-- `Encoder cannot change bitrate in place; dynamic FEC keeps its initial budget` if
-  the encoder cannot follow.
+- `Encoder refused an in-place bitrate change; dynamic FEC stays within its current budget`,
+  once per encoder session, if the encoder cannot follow.

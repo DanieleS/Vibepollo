@@ -15,6 +15,7 @@
 // standard includes
 #include <array>
 #include <atomic>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -24,6 +25,10 @@ extern "C" {
 }
 
 struct AVPacket;
+
+namespace video_fec {
+  class budget_t;
+}  // namespace video_fec
 
 namespace video {
   enum class capture_source_e : std::uint8_t {
@@ -95,6 +100,9 @@ namespace video {
     std::uint64_t pyrowave_peer_link_bps = 0;
     // Highest loss-free frame pace the client calibrated (0 = not calibrated).
     std::uint64_t pyrowave_peer_pace_bps = 0;
+    // Dynamic FEC only: the session's video budget, which the encoder reads when it applies a
+    // new FEC allowance. Null for every session that did not negotiate dynamic FEC.
+    std::shared_ptr<video_fec::budget_t> fec_budget;
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);

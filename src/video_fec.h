@@ -133,7 +133,8 @@ namespace video_fec {
    * The encoder runs at video * 100 / (100 + F), so data plus parity fit the budget. The
    * percentage the encoder is sized for is the allowance; frames never carry more FEC than it.
    * Each one-second window's peak request becomes a new encoder target. Raising protection waits
-   * until the encoder has lowered its bitrate; lowering it takes effect at once.
+   * until the encoder has lowered its bitrate; lowering it takes effect at once. A change the
+   * encoder has not confirmed is requested again after a window.
    */
   class budget_t {
   public:
@@ -150,6 +151,9 @@ namespace video_fec {
 
     /// Encoder bitrate for the current allowance.
     int encoder_kbps() const;
+
+    /// Encoder bitrate for @p percentage within the current video budget, read when the encoder applies it.
+    int encoder_kbps_at(unsigned percentage) const;
 
     unsigned allowance() const;
 
@@ -177,5 +181,6 @@ namespace video_fec {
     unsigned window_peak_ = 0;
     std::int64_t window_start_ms_ = -1;
     std::optional<int> requested_kbps_;
+    std::int64_t requested_ms_ = -1;
   };
 }  // namespace video_fec

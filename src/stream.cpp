@@ -12,14 +12,15 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <fstream>
 #include <future>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -630,7 +631,7 @@ namespace stream {
       safe::mail_raw_t::event_t<bool> idr_events;
       safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
       safe::mail_raw_t::event_t<int> bitrate_events;
-      safe::mail_raw_t::event_t<int> fec_bitrate_events;
+      safe::mail_raw_t::event_t<int> fec_allowance_events;
       safe::mail_raw_t::event_t<int> fec_bitrate_applied_events;
 
       std::unique_ptr<platf::deinit_t> qos;
@@ -1490,8 +1491,13 @@ namespace stream {
       const auto sequence = util::packet::read_be<std::uint32_t>(payload, 0);
       const auto data = util::packet::read_be<std::uint32_t>(payload, 4);
       const auto missing = util::packet::read_be<std::uint32_t>(payload, 8);
-      if (!control || payload.size() != video_fec::summary_size || !sequence || !data || !missing) {
-        BOOST_LOG(debug) << "Ignoring unexpected FEC summary ("sv << payload.size() << " bytes)"sv;
+      if (!control) {
+        // A client that saw the advertisement but chose the host default still sends summaries.
+        BOOST_LOG(verbose) << "Ignoring FEC summary from a session without dynamic FEC"sv;
+        return;
+      }
+      if (payload.size() != video_fec::summary_size || !sequence || !data || !missing) {
+        BOOST_LOG(debug) << "Ignoring malformed FEC summary ("sv << payload.size() << " bytes)"sv;
         return;
       }
       if (!control->report(*sequence, *data, *missing, steady_now_ms())) {
@@ -2051,11 +2057,16 @@ namespace stream {
 
     const auto requested = control.percentage(data_shards, min_parity_shards, now);
     if (const auto change = budget.observe(requested, now)) {
-      const auto loss = control.estimate(now);
-      BOOST_LOG(info) << "Dynamic FEC: "sv << change->percentage << "% for "sv
-                      << (loss ? std::format("{:.2f}% loss", *loss * 100) : "no loss feedback"s)
+      std::ostringstream loss_text;
+      if (const auto loss = control.estimate(now)) {
+        loss_text << std::fixed << std::setprecision(2) << *loss * 100 << "% loss"sv;
+      } else {
+        loss_text << "no loss feedback"sv;
+      }
+      BOOST_LOG(info) << "Dynamic FEC: "sv << change->percentage << "% for "sv << loss_text.str()
                       << "; encoder to "sv << change->encoder_kbps << " of "sv << budget.video_kbps() << " kbps"sv;
-      session.video.fec_bitrate_events->raise(change->encoder_kbps);
+      // The encoder sizes itself from the budget when it applies this, not from the kbps above.
+      session.video.fec_allowance_events->raise(static_cast<int>(change->percentage));
     }
     return static_cast<int>(std::min(requested, budget.allowance()));
   }
@@ -2362,12 +2373,16 @@ namespace stream {
           // output rate makes the sender permanently slower than the encoder, so the packet
           // queue (and stream latency) grows without bound. Clamp to ~110% of the stream
           // bitrate, re-evaluated per frame since the ABR endpoint can raise it mid-session.
-          size_t session_floor_bps = (size_t) session->config.monitor.bitrate * 1000ull * 110 / 100;
+          // With dynamic FEC the encoder bitrate leaves out parity, so use the whole video budget.
+          const int stream_kbps = session->config.fec_budget ?
+                                    std::max(session->config.fec_budget->video_kbps(), session->config.monitor.bitrate) :
+                                    session->config.monitor.bitrate;
+          size_t session_floor_bps = (size_t) stream_kbps * 1000ull * 110 / 100;
           if (pacing_bps < session_floor_bps) {
             static std::atomic_flag pacing_clamp_warned;
             if (!pacing_clamp_warned.test_and_set()) {
               BOOST_LOG(warning) << "pacing_max_bitrate_kbps ("sv << config::stream.pacing_max_bitrate_kbps
-                                 << " kbps) is below the negotiated stream bitrate ("sv << session->config.monitor.bitrate
+                                 << " kbps) is below the negotiated stream bitrate ("sv << stream_kbps
                                  << " kbps); clamping the pacer to 110% of the stream bitrate"sv;
             }
             pacing_bps = session_floor_bps;
@@ -4131,7 +4146,7 @@ namespace stream {
       session->video.idr_events = mail->event<bool>(mail::idr);
       session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
       session->video.bitrate_events = mail->event<int>(mail::dynamic_bitrate);
-      session->video.fec_bitrate_events = mail->event<int>(mail::fec_bitrate);
+      session->video.fec_allowance_events = mail->event<int>(mail::fec_allowance);
       session->video.fec_bitrate_applied_events = mail->event<int>(mail::fec_bitrate_applied);
       session->video.lowseq = 0;
       session->video.ping_payload = launch_session.av_ping_payload;
