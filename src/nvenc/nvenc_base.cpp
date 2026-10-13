@@ -387,22 +387,26 @@ namespace nvenc {
 
       // Frame budget guard: slower presets compress better but take longer per frame. Lower the
       // configured preset when its estimated encode time doesn't fit the session's frame interval.
-      // Extra NVENC engines only help when split-frame encoding may engage (HEVC/AV1, see below).
-      const bool split_frame_may_engage =
-        (client_config.videoFormat == 1 || client_config.videoFormat == 2) &&
-        api::supports_implicit_split_frame(selected_api_version) &&
-        !(client_config.videoFormat == 1 && weighted_prediction) &&
-        config.split_encode_mode != nvenc::split_encode_mode::disabled;
-      const int budget_engines = split_frame_may_engage ? get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES).value_or(1) : 1;
-      const double session_fps = client_config.framerateX100 > 0 ? client_config.framerateX100 / 100.0 : client_config.framerate;
-      budget_verdict = evaluate_frame_budget(
-        config.quality_preset,
-        static_cast<int>(encoder_params.width),
-        static_cast<int>(encoder_params.height),
-        session_fps,
-        budget_engines,
-        config.frame_budget_guard
-      );
+      // Extra NVENC engines only help where split-frame encoding engages (HEVC/AV1, see below).
+      frame_budget_session budget_session;
+      budget_session.width = static_cast<int>(encoder_params.width);
+      budget_session.height = static_cast<int>(encoder_params.height);
+      budget_session.fps = client_config.framerateX100 > 0 ? client_config.framerateX100 / 100.0 : client_config.framerate;
+      budget_session.video_format = client_config.videoFormat;
+      budget_session.yuv444 = buffer_is_yuv444();
+#if NVENCAPI_MAJOR_VERSION > 12 || (NVENCAPI_MAJOR_VERSION == 12 && NVENCAPI_MINOR_VERSION >= 1)
+      if ((client_config.videoFormat == 1 || client_config.videoFormat == 2) &&
+          api::supports_implicit_split_frame(selected_api_version) &&
+          !(client_config.videoFormat == 1 && weighted_prediction)) {
+        budget_session.split = config.split_encode_mode == nvenc::split_encode_mode::enabled  ? split_frame_budget::forced :
+                               config.split_encode_mode == nvenc::split_encode_mode::disabled ? split_frame_budget::unavailable :
+                                                                                                split_frame_budget::implicit;
+      }
+#endif
+      if (budget_session.split != split_frame_budget::unavailable) {
+        budget_session.num_engines = get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES).value_or(1);
+      }
+      budget_verdict = evaluate_frame_budget(config.quality_preset, budget_session, config.frame_budget_guard);
 
       init_params.presetGUID = quality_preset_guid_from_number(budget_verdict.effective_preset);
       init_params.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
@@ -485,10 +489,13 @@ namespace nvenc {
       return false;
     }
 
-    if (budget_verdict.clamped) {
+    // When even P1 doesn't fit, spatial AQ goes too: the session then runs as it did before P4 +
+    // spatial AQ became the default, never slower.
+    const bool budget_disables_aq = budget_verdict.budget_exceeded_at_floor && config.adaptive_quantization;
+    if (budget_verdict.clamped || budget_verdict.budget_exceeded_at_floor) {
       BOOST_LOG(warning) << std::format(
-        "NvEnc: frame budget guard lowered preset P{} to P{} for {}x{}@{:.2f} (budget {:.2f} ms, P{} estimated at {:.2f} ms{}{}); "
-        "set nvenc_frame_budget_guard = disabled to keep the configured preset",
+        "NvEnc: frame budget guard set preset P{} -> P{} for {}x{}@{:.2f} (budget {:.2f} ms, P{} estimated at {:.2f} ms{}{}{}); "
+        "set nvenc_frame_budget_guard = disabled to keep the configured settings",
         budget_verdict.configured_preset,
         budget_verdict.effective_preset,
         encoder_params.width,
@@ -497,8 +504,9 @@ namespace nvenc {
         budget_verdict.budget_ms,
         budget_verdict.configured_preset,
         budget_verdict.configured_estimated_ms,
-        budget_verdict.num_engines > 1 ? ", multi-NVENC" : "",
-        budget_verdict.budget_exceeded_at_floor ? ", even P1 exceeds the budget" : ""
+        budget_verdict.num_engines > 1 ? ", split-frame" : "",
+        budget_verdict.budget_exceeded_at_floor ? ", even P1 exceeds the budget" : "",
+        budget_disables_aq ? ", spatial AQ turned off" : ""
       );
     }
 
@@ -530,7 +538,7 @@ namespace nvenc {
                                     config.two_pass == nvenc_two_pass::full_resolution    ? NV_ENC_TWO_PASS_FULL_RESOLUTION :
                                                                                             NV_ENC_MULTI_PASS_DISABLED;
 
-    enc_config.rcParams.enableAQ = config.adaptive_quantization;
+    enc_config.rcParams.enableAQ = config.adaptive_quantization && !budget_disables_aq;
     enc_config.rcParams.enableTemporalAQ = config.temporal_aq && get_encoder_cap(NV_ENC_CAPS_SUPPORT_TEMPORAL_AQ);
     enc_config.rcParams.averageBitRate = client_config.bitrate * 1000;
 
@@ -912,6 +920,15 @@ namespace nvenc {
       }
       if (budget_verdict.clamped) {
         extra += std::format(" frame-budget:P{}", budget_verdict.configured_preset);
+      }
+      if (budget_disables_aq) {
+        extra += " frame-budget:aq-off";
+      }
+      if (budget_verdict.budget_ms > 0.0) {
+        extra += std::format(" frame-budget={:.2f}/{:.2f}ms", budget_verdict.estimated_ms, budget_verdict.budget_ms);
+        if (budget_verdict.num_engines > 1) {
+          extra += std::format(",split-engines={}", budget_verdict.num_engines);
+        }
       }
       if (encoder_engine_count > 0) {
         extra += std::format(" engines={}", encoder_engine_count);
