@@ -291,6 +291,14 @@ jobs:
       SIGNPATH_MSI_ARTIFACT_CONFIGURATION_SLUG: ${{ inputs.signpath_msi_artifact_configuration_slug }}
       SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ inputs.signpath_artifact_configuration_slug }}
       VIBEPOLLO_DEPS_DIR: ${{ github.workspace }}\.vibepollo-deps
+      # Compiler cache for the main build (fork addition): a cold build took ~23 min of the job.
+      # compiler_check=content because MSYS2 reinstalls gcc on every run, so its mtime always
+      # changes; the include_file sloppiness because checkout gives every header a fresh mtime.
+      CCACHE_DIR: ${{ github.workspace }}\.ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPRESS: 'true'
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: include_file_mtime,include_file_ctime,time_macros,pch_defines
       WEBRTC_ROOT: ${{ github.workspace }}\.vibepollo-deps\libwebrtc\out
       TRUEHDR_RUNTIME_ROOT: ${{ github.workspace }}\.vibeshine-deps\truehdr-runtime
     defaults:
@@ -342,7 +350,15 @@ jobs:
           ref: ${{ inputs.release_commit }}
           fetch-depth: ${{ inputs.daily_unsigned && '0' || '1' }}
           fetch-tags: ${{ inputs.daily_unsigned }}
-          submodules: recursive
+          # Submodules come in the next step, shallow: the build needs their files, not their history.
+          submodules: false
+
+      - name: Fetch submodules (shallow)
+        shell: pwsh
+        run: |
+          git submodule sync --recursive
+          git -c protocol.version=2 submodule update --init --recursive --depth 1 --jobs 8
+          if ($LASTEXITCODE -ne 0) { throw 'Submodule checkout failed.' }
 
       - name: Enforce unsigned daily build policy
         if: inputs.daily_unsigned
@@ -458,6 +474,7 @@ jobs:
           install: >-
             git
             mingw-w64-${{ matrix.toolchain }}-boost
+            mingw-w64-${{ matrix.toolchain }}-ccache
             mingw-w64-${{ matrix.toolchain }}-cmake
             mingw-w64-${{ matrix.toolchain }}-cppwinrt
             mingw-w64-${{ matrix.toolchain }}-curl-winssl
@@ -687,6 +704,16 @@ jobs:
             Remove-Item Env:DAILY_GAMEPAD_PFX_BASE64, Env:DAILY_GAMEPAD_PFX_PASSWORD -ErrorAction SilentlyContinue
           }
 
+      # Restored from this ref or master; a missing cache only means a cold build.
+      - name: Restore compiler cache
+        id: ccache-restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: ccache-windows-${{ matrix.toolchain }}-${{ github.sha }}
+          restore-keys: |
+            ccache-windows-${{ matrix.toolchain }}-
+
       - name: Build Windows
         shell: msys2 {0}
         env:
@@ -759,6 +786,8 @@ jobs:
             -DBUILD_VIRTUALDISPLAY_VULKAN_LAYER=OFF \
             -DBUILD_DOCS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -g -gdwarf-4" \
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -g -gdwarf-4" \
             -DSUNSHINE_ENABLE_WEBRTC=ON \
@@ -779,8 +808,19 @@ jobs:
             "${scry_prebuilt_arg[@]}" \
             "${truehdr_runtime_arg[@]}"
           echo "::add-matcher::.github/matchers/gcc.json"
+          ccache -z
           cmake --build build --target all --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
           echo "::remove-matcher owner=gcc::"
+          ccache -s
+
+      # Saved from master (shared with every PR and tag) and from PRs (reused by their reruns and
+      # fix commits). Tag caches are not saved: no other ref could restore them.
+      - name: Save compiler cache
+        if: always() && steps.ccache-restore.outcome == 'success' && github.ref_type != 'tag'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: ccache-windows-${{ matrix.toolchain }}-${{ github.sha }}
 
       - name: Test native AMF lifecycle behavior
         shell: msys2 {0}

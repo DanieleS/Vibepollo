@@ -1,0 +1,38 @@
+---
+# Fork addition. The main CI builds Windows only for pull requests and release tags, and a cache
+# saved on a PR or tag ref can't be restored by any other ref: without a build on master, every
+# PR and tag would start from a cold compiler cache. This builds master after each push only so
+# the ccache in ci-windows.yml has a copy every ref can restore.
+name: Windows build cache
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: windows-build-cache
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  warm:
+    name: Windows
+    uses: ./.github/workflows/ci-windows.yml
+    with:
+      release_commit: ${{ github.sha }}
+      release_version: ${{ format('2.0.0-dev.{0}', github.run_number) }}
+      # Tests too, since pull requests build them: their objects belong in the cache.
+      build_only: true
+      build_tests: true
+      symbol_product_name: Vibepollo
+      symbol_release_prefix: polo
+      publish_symbols: false
+      symbol_release_draft: true
+      require_truehdr_runtime: true
+    secrets:
+      truehdr_runtime_token: ${{ secrets.TRUEHDR_RUNTIME_TOKEN }}
