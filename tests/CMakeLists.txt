@@ -480,6 +480,8 @@ sunshine_register_component(NAME test_component_pyrowave_udp_probe TEST_SOURCE u
     LINK_LIBRARIES Boost::asio Boost::system ${SUNSHINE_TEST_SOCKET_LIBRARIES})
 sunshine_register_component(NAME test_component_pyrowave_policy TEST_SOURCE unit/test_pyrowave_policy.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/pyrowave_policy.cpp")
+sunshine_register_component(NAME test_component_video_fec TEST_SOURCE unit/test_video_fec.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_fec.cpp")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     sunshine_register_component(NAME test_component_linux_routed_link
         TEST_SOURCE unit/platform/linux/test_routed_link.cpp

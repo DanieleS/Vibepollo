@@ -58,6 +58,8 @@ namespace mail {
   MAIL(focus_hint);  // Text field focus changes, posted from the focus detector thread
   MAIL(dynamic_bitrate);  // Runtime encoder bitrate change (kbps), posted from the HTTP /bitrate handler
   MAIL(input_activity);  // Time of the latest deliberate client input, read by the encoder's input boost
+  MAIL(fec_allowance);  // Dynamic FEC percentage the encoder should leave room for; applied in place only
+  MAIL(fec_bitrate_applied);  // Encoder bitrate (kbps) now in effect, reported back to the video send path
 #undef MAIL
 
 }  // namespace mail

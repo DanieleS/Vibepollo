@@ -15,6 +15,7 @@
 // standard includes
 #include <array>
 #include <atomic>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -24,6 +25,10 @@ extern "C" {
 }
 
 struct AVPacket;
+
+namespace video_fec {
+  class budget_t;
+}  // namespace video_fec
 
 namespace video {
   enum class capture_source_e : std::uint8_t {
@@ -95,6 +100,9 @@ namespace video {
     std::uint64_t pyrowave_peer_link_bps = 0;
     // Highest loss-free frame pace the client calibrated (0 = not calibrated).
     std::uint64_t pyrowave_peer_pace_bps = 0;
+    // Dynamic FEC only: the session's video budget, which the encoder reads when it applies a
+    // new FEC allowance. Null for every session that did not negotiate dynamic FEC.
+    std::shared_ptr<video_fec::budget_t> fec_budget;
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
@@ -292,10 +300,12 @@ namespace video {
     /**
      * @brief Apply a new encoder bitrate to the live encoder without rebuilding it.
      * @param bitrate_kbps New bitrate in kbps.
+     * @param reset_on_raise Let an encoder that would restart rate control (and send an IDR)
+     *        to apply a higher bitrate at once do so. Dynamic FEC passes false.
      * @return `true` if the encoder reconfigured itself in place; `false` if the caller must
      *         rebuild the encode session to apply the change.
      */
-    virtual bool set_bitrate(int bitrate_kbps) {
+    virtual bool set_bitrate(int bitrate_kbps, bool reset_on_raise) {
       return false;
     }
 

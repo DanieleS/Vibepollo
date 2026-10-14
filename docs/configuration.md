@@ -2817,6 +2817,9 @@ this option to replace the running app immediately. The default is `true`.
         <td colspan="2">
             Percentage of error correcting packets per data packet in each video frame.
             PyroWave ignores this setting; its parity is controlled by `pyrowave_critical_fec_percentage`.
+            A client that negotiates [dynamic FEC](dynamic-fec.md) can ask for automatic or fixed
+            protection instead; for those sessions this value is only the fallback while loss
+            feedback is missing.
             @warning{Higher values can correct for more network packet loss,
             but at the cost of increasing bandwidth usage.}
         </td>
