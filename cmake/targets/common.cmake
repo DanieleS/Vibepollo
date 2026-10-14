@@ -32,6 +32,25 @@ if(TARGET sunshine_libvirtualdisplay_uapi)
 endif()
 target_compile_definitions(sunshine PUBLIC ${SUNSHINE_DEFINITIONS})
 
+# The per-build version definitions (cmake/prep/build_version.cmake) go to the sources that name
+# them, found by scanning, so a new user of the macros needs nothing here. A header using them
+# would leave its includers without them: that fails to compile, loudly.
+get_target_property(SUNSHINE_TARGET_SOURCES sunshine SOURCES)
+foreach(SUNSHINE_TARGET_SOURCE IN LISTS SUNSHINE_TARGET_SOURCES)
+    if(SUNSHINE_TARGET_SOURCE MATCHES "\\.(c|cc|cpp|cxx|m|mm)$")
+        get_filename_component(SUNSHINE_TARGET_SOURCE_PATH "${SUNSHINE_TARGET_SOURCE}" ABSOLUTE
+                BASE_DIR "${CMAKE_SOURCE_DIR}")
+        if(EXISTS "${SUNSHINE_TARGET_SOURCE_PATH}")
+            file(STRINGS "${SUNSHINE_TARGET_SOURCE_PATH}" SUNSHINE_TARGET_SOURCE_USES_VERSION
+                    REGEX "PROJECT_VERSION|PROJECT_RELEASE_DATE|RC_VERSION_" LIMIT_COUNT 1)
+            if(SUNSHINE_TARGET_SOURCE_USES_VERSION)
+                set_property(SOURCE "${SUNSHINE_TARGET_SOURCE_PATH}" TARGET_DIRECTORY sunshine
+                        APPEND PROPERTY COMPILE_DEFINITIONS ${SUNSHINE_VERSION_DEFINITIONS})
+            endif()
+        endif()
+    endif()
+endforeach()
+
 # Logging integration flags are provided via SUNSHINE_DEFINITIONS to avoid duplicates
 set_target_properties(sunshine PROPERTIES CXX_STANDARD 23)
 if(NOT SUNSHINE_BUILD_STEAMOS)
