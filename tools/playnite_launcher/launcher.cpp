@@ -1526,7 +1526,12 @@ namespace playnite_launcher {
       // emit a transient stop while the actual game remains alive.
       std::optional<std::chrono::steady_clock::time_point> game_missing_since;
       std::optional<std::chrono::steady_clock::time_point> game_verification_deadline;
+      // Without the plugin, nothing confirms the game is gone except its processes staying gone,
+      // so that wait is long. Once Playnite itself reported gameStopped, a short wait only guards
+      // against a launcher handing off to the real game; the stream ends when this exits, and 15 s
+      // there is 15 s of a frozen picture after quitting.
       const auto game_missing_grace = std::chrono::seconds(15);
+      const auto confirmed_stop_grace = std::chrono::seconds(2);
       const auto game_verification_limit = std::chrono::seconds(std::max(30, config.timeout_sec));
       while (!should_exit.load()) {
         ensure_cleanup_lease();
@@ -1586,9 +1591,10 @@ namespace playnite_launcher {
               should_exit.store(true);
               break;
             }
+            const bool stop_confirmed = client.is_active() && game_stop_pending.load(std::memory_order_acquire);
             if (!game_missing_since) {
               game_missing_since = now;
-            } else if (now - *game_missing_since >= game_missing_grace) {
+            } else if (now - *game_missing_since >= (stop_confirmed ? confirmed_stop_grace : game_missing_grace)) {
               BOOST_LOG(info) << "Game processes have exited; proceeding to cleanup";
               should_exit.store(true);
               break;
