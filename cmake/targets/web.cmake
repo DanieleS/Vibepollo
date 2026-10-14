@@ -35,7 +35,27 @@ list(REMOVE_DUPLICATES SUNSHINE_WEB_SOURCES)
 
 find_program(SUNSHINE_NPM_EXECUTABLE NAMES npm.cmd npm)
 
-if(SUNSHINE_NPM_EXECUTABLE)
+# Fork addition: a web UI already built from these exact sources (the Windows CI caches it, keyed
+# on the web sources, lockfiles and this file) is copied instead of rebuilt, skipping both npm ci
+# runs. Unset, the build is unchanged.
+set(SUNSHINE_PREBUILT_WEB_DIR "" CACHE PATH "Previously built web UI output to copy instead of running npm")
+
+if(SUNSHINE_PREBUILT_WEB_DIR)
+    add_custom_command(
+        OUTPUT "${SUNSHINE_WEB_STAMP}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${SUNSHINE_PREBUILT_WEB_DIR}" "${SUNSHINE_WEB_ROOT_OUTPUT_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${SUNSHINE_WEB_STAMP}"
+        BYPRODUCTS
+            "${SUNSHINE_LEGACY_WEB_OUTPUT_DIR}/index.html"
+            "${SUNSHINE_WEB_OUTPUT_DIR}/index.html"
+        DEPENDS ${SUNSHINE_WEB_SOURCES}
+        COMMENT "Using the prebuilt Vibepollo browser interface from ${SUNSHINE_PREBUILT_WEB_DIR}"
+    )
+    add_custom_target(web_ui DEPENDS
+        "${SUNSHINE_WEB_STAMP}"
+        "${SUNSHINE_LEGACY_WEB_OUTPUT_DIR}/index.html"
+        "${SUNSHINE_WEB_OUTPUT_DIR}/index.html")
+elseif(SUNSHINE_NPM_EXECUTABLE)
     add_custom_command(
         OUTPUT "${SUNSHINE_WEB_STAMP}"
         COMMAND "${CMAKE_COMMAND}" -E chdir "${SUNSHINE_LEGACY_WEB_SOURCE_DIR}"
