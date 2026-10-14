@@ -2548,6 +2548,21 @@ namespace platf::playnite {
     }
   }
 
+  bool is_legacy_plugin_installed() {
+    try {
+      std::string dir;
+      if (!get_extension_target_dir(dir)) {
+        return false;
+      }
+      const std::filesystem::path d(dir);
+      return std::filesystem::exists(d / "extension.yaml") && !std::filesystem::exists(d / "VibepolloPlaynite.dll") &&
+             (std::filesystem::exists(d / "SunshinePlaynite.dll") || std::filesystem::exists(d / "VibeshinePlaynite.dll") ||
+              std::filesystem::exists(d / "SunshinePlaynite.psm1"));
+    } catch (...) {
+      return false;
+    }
+  }
+
   bool get_installed_plugin_version(std::string &out) {
     try {
       std::string dir;
