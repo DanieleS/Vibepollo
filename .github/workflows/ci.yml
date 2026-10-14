@@ -237,7 +237,7 @@ jobs:
     with:
       use_self_hosted: ${{ github.event_name == 'workflow_dispatch' && inputs.use_self_hosted }}
       build_only: ${{ needs.release-candidate.outputs.should_release == 'true' }}
-      build_tests: false
+      build_tests: ${{ needs.release-candidate.outputs.should_release == 'true' }}
       release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
       # Not 0.0.0: build_version.cmake refuses that outright, because a package built from it
       # sorts below every real release and installs over one as a downgrade. Passing it to a
@@ -277,9 +277,9 @@ jobs:
     with:
       # Upstream skips the test graph in release artifact builds to save compile time, and says
       # ordinary builds should keep it. Everything but the release tag counts as ordinary here,
-      # so a pull request runs ctest while the tag build stays lean. Arch carries this rather
-      # than Windows because the portable suites all build here and this runner is the cheaper
-      # of the two.
+      # so a pull request runs ctest while the tag build stays lean. Arch carries the portable
+      # suites on pull requests; the Windows call above builds its tests (and runs the installer
+      # driver-safety and bootstrap-migration steps) for the release build, as upstream does.
       build_tests: ${{ needs.release-candidate.outputs.should_release != 'true' }}
       use_self_hosted: ${{ needs.release-candidate.outputs.should_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.use_self_hosted) }}
       artifact_retention_days: ${{ needs.release-candidate.outputs.should_release == 'true' && 14 || 1 }}
