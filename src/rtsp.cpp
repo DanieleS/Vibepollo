@@ -34,6 +34,7 @@ extern "C" {
 
 // local includes
 #include "config.h"
+#include "focus_hints.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -1946,8 +1947,9 @@ namespace rtsp_stream {
 
     std::stringstream ss;
 
-    // Tell the client about our supported features
-    ss << "a=x-ss-general.featureFlags:" << (uint32_t) platf::get_capabilities() << std::endl;
+    // Tell the client about our supported features. Focus hints are a host feature rather
+    // than a platform input capability, and are only advertised when enabled.
+    ss << "a=x-ss-general.featureFlags:" << focus_hints::host_feature_flags((uint32_t) platf::get_capabilities(), focus_hints::offered(config::input.focus_hints)) << std::endl;
 
     // Always request new control stream encryption if the client supports it
     uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO;
@@ -2190,6 +2192,8 @@ namespace rtsp_stream {
 
       config.minRequiredFecPackets = (int) util::from_view(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv));
       config.mlFeatureFlags = (int) util::from_view(args.at("x-ml-general.featureFlags"sv));
+      // Only a client that asked gets focus hints, so every other one sees today's traffic
+      config.focusHints = focus_hints::negotiated(focus_hints::offered(config::input.focus_hints), (uint32_t) config.mlFeatureFlags);
       config.audioQosType = (int) util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
       config.videoQosType = (int) util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
       config.encryptionFlagsEnabled = (uint32_t) util::from_view(args.at("x-ss-general.encryptionEnabled"sv));

@@ -1050,6 +1050,7 @@ namespace config {
     true,  // native pen/touch support
     false,  // enable input only mode
     true,  // forward_rumble
+    false,  // focus_hints
   };
 
   frame_limiter_t frame_limiter {
@@ -2313,6 +2314,7 @@ namespace config {
     bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);
     bool_f(vars, "legacy_ordering", sunshine.legacy_ordering);
     bool_f(vars, "forward_rumble", input.forward_rumble);
+    bool_f(vars, "focus_hints", input.focus_hints);
 
     int port = sunshine.port;
     int_between_f(vars, "port"s, port, {1024 + nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});
