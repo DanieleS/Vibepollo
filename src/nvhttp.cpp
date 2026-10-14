@@ -4811,6 +4811,8 @@ namespace nvhttp {
       auto appid = requested_app ? util::from_view(requested_app->id) : util::from_view(appid_str);
       auto current_app_uuid = proc::proc.get_running_app_uuid();
       bool is_input_only = config::input.enable_input_only_mode && (appid == proc::input_only_app_id || (appuuid_str == REMOTE_INPUT_UUID));
+      // A request is a terminate request if it names the "terminate" app by either its id or its UUID.
+      const bool is_terminate = !is_input_only && ((appid == proc::terminate_app_id && proc::terminate_app_id > 0) || appuuid_str == TERMINATE_APP_UUID);
 
       auto required_perm = PERM::launch;
 
@@ -4818,8 +4820,9 @@ namespace nvhttp {
       // BOOST_LOG(verbose) << "QS: " << request->query_string;
 
       // If we have already launched an app, we should allow clients with view permission to join the input only or current app's session.
+      // A terminate request always requires launch permission.
       if (
-        current_appid > 0 && (appuuid_str != TERMINATE_APP_UUID || appid != proc::terminate_app_id) && (is_input_only || appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid))
+        current_appid > 0 && !is_terminate && (is_input_only || appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid))
       ) {
         required_perm = PERM::_allow_view;
       }
@@ -4836,9 +4839,7 @@ namespace nvhttp {
       }
       if (!is_input_only) {
         // Special handling for the "terminate" app
-        if (
-          (appid == proc::terminate_app_id && proc::terminate_app_id > 0) || appuuid_str == TERMINATE_APP_UUID
-        ) {
+        if (is_terminate) {
           proc::proc.terminate(false, true, false, true);
 
           tree.put("root.resume", 0);

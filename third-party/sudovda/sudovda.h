@@ -273,8 +273,13 @@ static const bool GetAddedDisplayName(const VIRTUAL_DISPLAY_ADD_OUT& addedDispla
 	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr))
 		return 0;
 
+	// Match on both the adapter LUID and the target id: a target id is only unique within
+	// its adapter, so another adapter's display (the GPU's own outputs, an RDP or other
+	// indirect display) can carry the same id as the SudoVDA target.
 	auto path = std::find_if(paths.begin(), paths.end(), [&addedDisplay](DISPLAYCONFIG_PATH_INFO _path) {
-		return _path.targetInfo.id == addedDisplay.TargetId;
+		return _path.targetInfo.id == addedDisplay.TargetId
+			&& _path.targetInfo.adapterId.HighPart == addedDisplay.AdapterLuid.HighPart
+			&& _path.targetInfo.adapterId.LowPart == addedDisplay.AdapterLuid.LowPart;
 	});
 
 	if (path == paths.end()) {
