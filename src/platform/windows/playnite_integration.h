@@ -249,4 +249,13 @@ namespace platf::playnite {
    */
   bool get_installed_plugin_version(std::string &out);
 
+  /**
+   * @brief Whether the installed connector is a legacy one (the PowerShell module or an older DLL).
+   * @details It carries the same version number as the compiled connector that replaces it, so a
+   *          version comparison alone never upgrades it, and the host does not detect it as installed.
+   * @return true if the Extensions directory holds a manifest with a legacy connector and no
+   *         VibepolloPlaynite.dll.
+   */
+  bool is_legacy_plugin_installed();
+
 }  // namespace platf::playnite
