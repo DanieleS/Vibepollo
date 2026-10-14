@@ -2106,6 +2106,7 @@ namespace stream {
       BOOST_LOG(debug) << "Dynamic FEC: encoder at "sv << *applied << " kbps, room for "sv << budget.allowance() << "% FEC"sv;
     }
 
+    control.sent(now);
     const auto requested = control.percentage(data_shards, min_parity_shards, now);
     if (const auto change = budget.observe(requested, now)) {
       std::ostringstream loss_text;

@@ -90,10 +90,20 @@ namespace video_fec {
   /**
    * @brief Per-session FEC percentage: a client-chosen fixed value, or chosen from the client's
    *        loss summaries, falling back to the host's `fec_percentage` without fresh feedback.
+   *
+   * Silence from the client only means trouble while the host is sending video. The client sends
+   * no summary for a second it received nothing in, so a still desktop, where the host sends no
+   * frames at all, goes as quiet as a dead network. The controller therefore also notes when the
+   * host sends, and silence that the host's own idleness explains keeps the last estimate instead
+   * of falling back.
    */
   class controller_t {
   public:
     static constexpr std::int64_t feedback_timeout_ms = 3000;
+
+    /// A pause in sending at least this long can leave the client a whole summary period with
+    /// nothing received, and so no summary. Below the client's 1 s period, to allow for jitter.
+    static constexpr std::int64_t idle_gap_ms = 750;
 
     /**
      * @param fallback The host's fixed percentage, used while automatic mode lacks feedback.
@@ -111,6 +121,9 @@ namespace video_fec {
      */
     bool report(std::uint32_t sequence, std::uint32_t data, std::uint32_t missing, std::int64_t now_ms);
 
+    /// Note that the host is sending a frame now. Call it before percentage() for each frame.
+    void sent(std::int64_t now_ms);
+
     /// The percentage to request for a frame of @p data_shards packets.
     unsigned percentage(std::size_t data_shards, std::size_t min_parity, std::int64_t now_ms) const;
 
@@ -118,6 +131,9 @@ namespace video_fec {
     std::optional<double> estimate(std::int64_t now_ms) const;
 
   private:
+    /// Whether the host paused sending since the last summary, which explains a quiet client.
+    bool idle_since_report() const;
+
     mutable std::mutex mutex_;
     const unsigned fallback_;
     const std::optional<unsigned> fixed_;
@@ -125,6 +141,11 @@ namespace video_fec {
     std::int64_t last_report_ms_ = -1;
     std::int64_t resume_since_ms_ = -1;
     loss_window_t loss_window_;
+    /// The window's estimate as of the last summary, for when idleness has aged the window empty.
+    std::optional<double> last_estimate_;
+    std::int64_t last_sent_ms_ = -1;
+    /// When the host last started sending again after a pause of at least idle_gap_ms.
+    std::int64_t idle_resumed_ms_ = -1;
   };
 
   /**

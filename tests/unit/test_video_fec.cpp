@@ -29,6 +29,29 @@ namespace {
     const auto aligned_size = ((unaligned_size + blocksize - 1) / blocksize) * blocksize;
     return {blocks, aligned_size / blocksize, skipped};
   }
+
+  // Frames every 8 ms (120 fps) from @p from up to @p to, as the video send path notes them.
+  void send_frames(controller_t &controller, std::int64_t from, std::int64_t to) {
+    for (auto frame = from; frame < to; frame += 8) {
+      controller.sent(frame);
+    }
+  }
+
+  std::uint32_t next_sequence = 0;
+
+  // A session with a full window of clean summaries and video flowing; returns the time of the last.
+  std::int64_t clean_session(controller_t &controller) {
+    std::int64_t now = 1000;
+    next_sequence = 1;
+    send_frames(controller, 0, now);
+    EXPECT_TRUE(controller.report(next_sequence, 1000, 0, now));
+    while (now < 1000 + loss_window_t::duration_ms) {
+      send_frames(controller, now, now + 1000);
+      now += 1000;
+      EXPECT_TRUE(controller.report(++next_sequence, 1000, 0, now));
+    }
+    return now;
+  }
 }  // namespace
 
 TEST(VideoFecTest, ParsesClientPreference) {
@@ -192,26 +215,84 @@ TEST(VideoFecTest, RejectsInvalidAndOutOfOrderSummaries) {
   EXPECT_TRUE(wrapping.report(0, 1000, 0, 2000));
 }
 
-TEST(VideoFecTest, CleanFeedbackAfterAGapNeedsAFullWindow) {
+TEST(VideoFecTest, CleanFeedbackAfterASilentStretchNeedsAFullWindow) {
   controller_t controller {20, std::nullopt};
   ASSERT_TRUE(controller.report(1, 1000, 30, 1000));
   ASSERT_GT(controller.percentage(100, 2, 1000), 0u);
 
-  // Summary 2 never arrived: the old history is dropped and a clean report is not trusted yet.
-  ASSERT_TRUE(controller.report(3, 1000, 0, 3000));
-  EXPECT_EQ(controller.percentage(100, 2, 3000), 20u);
+  // Video keeps flowing but no summary arrives for longer than the timeout: the old history is
+  // dropped and a clean report is not trusted yet.
+  const auto resumed = 1000 + controller_t::feedback_timeout_ms + 1000;
+  send_frames(controller, 1000, resumed);
+  ASSERT_TRUE(controller.report(2, 1000, 0, resumed));
+  EXPECT_EQ(controller.percentage(100, 2, resumed), 20u);
 
-  std::uint32_t sequence = 3;
-  std::int64_t now = 3000;
-  while (now < 3000 + loss_window_t::duration_ms) {
+  std::uint32_t sequence = 2;
+  std::int64_t now = resumed;
+  while (now < resumed + loss_window_t::duration_ms) {
+    send_frames(controller, now, now + 1000);
     now += 1000;
     ASSERT_TRUE(controller.report(++sequence, 1000, 0, now));
   }
   EXPECT_EQ(controller.percentage(100, 2, now), 0u);
 
-  // Loss reported after a gap still raises protection immediately.
+  // Loss reported after a skipped summary still raises protection immediately.
+  send_frames(controller, now, now + 1000);
   ASSERT_TRUE(controller.report(sequence + 2, 1000, 30, now + 1000));
   EXPECT_GT(controller.percentage(100, 2, now + 1000), 0u);
+}
+
+TEST(VideoFecTest, SkippedSummaryKeepsTheLossHistory) {
+  controller_t controller {20, std::nullopt};
+  ASSERT_TRUE(controller.report(1, 1000, 11, 1000));
+  const auto protection = controller.percentage(100, 2, 1000);
+  ASSERT_GT(protection, 0u);
+  ASSERT_LT(protection, 20u);
+
+  // Summary 2 was lost on the way. The loss seen a second earlier still counts: no fallback, which
+  // would ask for more than the loss calls for and forget why.
+  send_frames(controller, 1000, 3000);
+  ASSERT_TRUE(controller.report(3, 1000, 0, 3000));
+  EXPECT_EQ(controller.percentage(100, 2, 3000), protection);
+}
+
+TEST(VideoFecTest, SkippedSummaryOnACleanLinkKeepsProtectionOff) {
+  controller_t controller {20, std::nullopt};
+  const auto now = clean_session(controller);
+  ASSERT_EQ(controller.percentage(100, 2, now), 0u);
+
+  send_frames(controller, now, now + 2000);
+  ASSERT_TRUE(controller.report(next_sequence + 2, 1000, 0, now + 2000));  // One lost on the way.
+  EXPECT_EQ(controller.percentage(100, 2, now + 2000), 0u);
+}
+
+TEST(VideoFecTest, IdleHostKeepsTheLastEstimate) {
+  for (const std::int64_t pause : {5000, 30000}) {
+    controller_t controller {20, std::nullopt};
+    auto now = clean_session(controller);
+    ASSERT_EQ(controller.percentage(100, 2, now), 0u);
+
+    // A still desktop: no frames, so the client has nothing to summarize and goes quiet.
+    now += pause;
+    for (std::int64_t frame = now; frame < now + 2500; frame += 8) {
+      controller.sent(frame);
+      EXPECT_EQ(controller.percentage(100, 2, frame), 0u) << pause << " " << frame;
+    }
+    // Its next summary skips the sequence numbers of the quiet seconds.
+    ASSERT_TRUE(controller.report(next_sequence + pause / 1000, 1000, 0, now + 1000));
+    EXPECT_EQ(controller.percentage(100, 2, now + 2500), 0u) << pause;
+  }
+}
+
+TEST(VideoFecTest, SilenceAfterIdleWhileSendingFallsBack) {
+  controller_t controller {20, std::nullopt};
+  auto now = clean_session(controller);
+
+  // Sending resumes after a pause, but no summary ever follows: past the timeout the silence is
+  // no longer explained by the pause.
+  now += 5000;
+  send_frames(controller, now, now + controller_t::feedback_timeout_ms + 100);
+  EXPECT_EQ(controller.percentage(100, 2, now + controller_t::feedback_timeout_ms + 100), 20u);
 }
 
 TEST(VideoFecTest, BudgetSizesTheEncoderForTheAllowance) {
