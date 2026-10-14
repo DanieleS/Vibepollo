@@ -43,22 +43,30 @@ with tempfile.TemporaryDirectory(prefix="playnite-upgrade-") as temporary:
         print("PASS: SDK discovery", case)
 
     # Compile the production response calculation with a minimal JSON boolean
-    # fixture; the normal semver helper above it is included unchanged.
+    # fixture. Version ordering comes from the real version_compare.h, the
+    # same comparator the status endpoint and the pre-launch auto-update use.
     status = (repo / "src/confighttp_playnite.cpp").read_text()
-    helpers = status[status.index("    auto normalize_ver ="):status.index("    std::string installed_ver, packaged_ver;")]
     policy = status[status.index("    bool update_available ="):status.index('    out["update_available"] =')]
+    if "version_compare::compare_semver(installed_ver, packaged_ver) < 0" not in policy:
+        raise SystemExit("status update policy no longer uses version_compare::compare_semver")
+    # The pre-launch auto-update must apply the same ordering, or the Web UI
+    # and the launch path disagree about whether the connector is outdated.
+    launch = (repo / "src/process.cpp").read_text()
+    if "version_compare::compare_semver(installed_ver, packaged_ver) < 0" not in launch:
+        raise SystemExit("pre-launch Playnite auto-update no longer uses version_compare::compare_semver")
     cpp = directory / "policy.cpp"
     cpp.write_text('''#include <algorithm>
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include "version_compare.h"
 struct Value { bool value; bool is_boolean() { return true; } template<class T> T get() { return value; } };
 struct Output { Value installed; Value &operator[](const char *) { return installed; } };
 bool update(bool legacy, bool installed, bool known, std::string installed_ver, std::string packaged_ver) {
   struct { bool legacy_plugin; } install_state{legacy};
   Output out{{installed}};
   bool have_installed = known, have_packaged = known;
-''' + helpers + policy + '''return update_available;
+''' + policy + '''return update_available;
 }
 int main() {
   if (!update(true, false, true, "0.4.14", "0.5.0")) return 1;
@@ -68,10 +76,18 @@ int main() {
   if (update(false, true, true, "0.5.0", "0.5.0")) return 5;
   if (update(false, false, true, "", "0.5.0")) return 6;
   if (update(false, true, false, "", "")) return 7;
+  // Components compare numerically, not as strings: 0.4.8 is older than 0.4.13.
+  if (!update(false, true, true, "0.4.8", "0.4.13")) return 8;
+  if (update(false, true, true, "0.4.13", "0.4.8")) return 9;
+  // A leading v and a missing patch component do not make equal versions differ.
+  if (update(false, true, true, "v0.5.0", "0.5.0")) return 10;
+  if (update(false, true, true, "0.5", "0.5.0")) return 11;
+  // A newer installed connector is never downgraded.
+  if (update(false, true, true, "0.6.0", "0.5.0")) return 12;
 }
 ''')
     executable = directory / ("policy.exe" if os.name == "nt" else "policy")
-    subprocess.run([compiler, "-std=c++20", str(cpp), "-o", str(executable)], check=True)
+    subprocess.run([compiler, "-std=c++20", "-I", str(repo / "src"), str(cpp), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True, timeout=5)
     print("PASS: legacy migration and compiled plugin version policy")
 
