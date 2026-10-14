@@ -237,7 +237,11 @@ jobs:
     with:
       use_self_hosted: ${{ github.event_name == 'workflow_dispatch' && inputs.use_self_hosted }}
       build_only: ${{ needs.release-candidate.outputs.should_release == 'true' }}
-      build_tests: ${{ needs.release-candidate.outputs.should_release == 'true' }}
+      # Always, not only for the release build as upstream does: a Windows-only test that breaks
+      # would otherwise first fail on the tag, after the pull request that broke it was merged
+      # (it happened with regression_playnite_plugin_upgrade). On a pull request the nightly sync
+      # can still fix it before anything is released.
+      build_tests: true
       release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}
       # Not 0.0.0: build_version.cmake refuses that outright, because a package built from it
       # sorts below every real release and installs over one as a downgrade. Passing it to a
