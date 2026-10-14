@@ -1,8 +1,9 @@
 ---
-# Fork addition. The main CI builds Windows only for pull requests and release tags, and a cache
-# saved on a PR or tag ref can't be restored by any other ref: without a build on master, every
-# PR and tag would start from a cold compiler cache. This builds master after each push only so
-# the ccache in ci-windows.yml has a copy every ref can restore.
+# Fork addition. The main CI builds Windows and Arch only for pull requests and release tags, and a
+# cache saved on a PR or tag ref can't be restored by any other ref: without a build on master,
+# every PR and tag would start from a cold compiler cache. This builds master after each push only
+# so the ccache in ci-windows.yml and ci-archlinux.yml (which saves on the default branch only) has
+# a copy every ref can restore.
 name: Windows build cache
 
 on:
@@ -36,3 +37,14 @@ jobs:
       require_truehdr_runtime: true
     secrets:
       truehdr_runtime_token: ${{ secrets.TRUEHDR_RUNTIME_TOKEN }}
+
+  warm-arch:
+    name: Arch Linux
+    uses: ./.github/workflows/ci-archlinux.yml
+    permissions:
+      contents: read
+    with:
+      release_commit: ${{ github.sha }}
+      release_version: ${{ format('2.0.0-dev.{0}', github.run_number) }}
+      # Tests too, as for Windows: pull requests build them.
+      build_tests: true

@@ -322,8 +322,12 @@ jobs:
         with:
           path: .linux-cache/ccache
           key: ${{ inputs.cache_namespace }}-ccache-${{ runner.arch }}-${{ steps.toolchain.outputs.abi }}-${{ hashFiles('packaging/linux/Arch/PKGBUILD', '.github/workflows/ci-archlinux.yml', 'scripts/prepare-linux-cuda.sh', 'scripts/seed-linux-package-source.sh', 'scripts/check-linux-partial-cache.sh', 'scripts/build-linux-component-tests.py') }}-${{ inputs.release_commit }}
+          # Fork addition, the last line: the toolchain fingerprint covers every installed package, and
+          # a rolling distro changes it almost daily, so an exact-ABI cache is rarely there. Any
+          # earlier cache still helps: CCACHE_COMPILERCHECK=content drops entries from another compiler.
           restore-keys: |
             ${{ inputs.cache_namespace }}-ccache-${{ runner.arch }}-${{ steps.toolchain.outputs.abi }}-${{ hashFiles('packaging/linux/Arch/PKGBUILD', '.github/workflows/ci-archlinux.yml', 'scripts/prepare-linux-cuda.sh', 'scripts/seed-linux-package-source.sh', 'scripts/check-linux-partial-cache.sh', 'scripts/build-linux-component-tests.py') }}-
+            ${{ inputs.cache_namespace }}-ccache-${{ runner.arch }}-
 
       - name: Build PKGBUILD
         id: build
