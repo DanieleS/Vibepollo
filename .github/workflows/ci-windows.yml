@@ -714,6 +714,15 @@ jobs:
           restore-keys: |
             ccache-windows-${{ matrix.toolchain }}-
 
+      # Fork addition: the web UI built from these exact sources, so a build that didn't touch
+      # them skips npm entirely (~3 min). Hashed before the build, while node_modules don't exist.
+      - name: Restore web UI build
+        id: web-ui-restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ${{ github.workspace }}\.web-ui-cache
+          key: web-ui-${{ hashFiles('src_assets/common/assets/web/**', 'src_assets/common/assets/web-legacy/**', 'cmake/targets/web.cmake') }}
+
       - name: Build Windows
         shell: msys2 {0}
         env:
@@ -724,6 +733,7 @@ jobs:
           COMMIT: ${{ inputs.release_commit }}
           REQUIRE_TRUEHDR_RUNTIME: ${{ inputs.require_truehdr_runtime }}
           DAILY_UNSIGNED: ${{ inputs.daily_unsigned }}
+          WEB_UI_PREBUILT: ${{ steps.web-ui-restore.outputs.cache-hit == 'true' && format('{0}\.web-ui-cache', github.workspace) || '' }}
         run: |
           echo "Using BUILD_VERSION=${BUILD_VERSION}"
 
@@ -772,6 +782,12 @@ jobs:
             echo "Using pinned TrueHDR runtime: ${SUNSHINE_TRUEHDR_RUNTIME_DIR}"
           fi
 
+          web_ui_arg=()
+          if [[ -n "${WEB_UI_PREBUILT:-}" ]]; then
+            web_ui_arg=(-DSUNSHINE_PREBUILT_WEB_DIR="$(cygpath -u "${WEB_UI_PREBUILT}")")
+            echo "Using the cached web UI build: ${WEB_UI_PREBUILT}"
+          fi
+
           mkdir -p build
           # Release tag builds omit test targets; ordinary reusable-workflow calls retain them.
           cmake \
@@ -806,7 +822,8 @@ jobs:
             "${vdd_prebuilt_arg[@]}" \
             "${vhf_gamepad_package_arg[@]}" \
             "${scry_prebuilt_arg[@]}" \
-            "${truehdr_runtime_arg[@]}"
+            "${truehdr_runtime_arg[@]}" \
+            "${web_ui_arg[@]}"
           echo "::add-matcher::.github/matchers/gcc.json"
           ccache -z
           cmake --build build --target all --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
@@ -821,6 +838,24 @@ jobs:
         with:
           path: ${{ github.workspace }}\.ccache
           key: ccache-windows-${{ matrix.toolchain }}-${{ github.sha }}
+
+      # Same rule as the compiler cache: from master and PRs, under the key hashed before the build.
+      - name: Stage web UI build for the cache
+        if: success() && steps.web-ui-restore.outputs.cache-hit != 'true' && github.ref_type != 'tag'
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE 'build\assets\web'
+          $target = Join-Path $env:GITHUB_WORKSPACE '.web-ui-cache'
+          Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue
+          Copy-Item -Recurse $source $target
+          Remove-Item -Force (Join-Path $target '.build-stamp') -ErrorAction SilentlyContinue
+
+      - name: Save web UI build
+        if: success() && steps.web-ui-restore.outputs.cache-hit != 'true' && github.ref_type != 'tag'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ${{ github.workspace }}\.web-ui-cache
+          key: ${{ steps.web-ui-restore.outputs.cache-primary-key }}
 
       - name: Test native AMF lifecycle behavior
         shell: msys2 {0}
