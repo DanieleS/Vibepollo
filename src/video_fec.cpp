@@ -176,15 +176,32 @@ namespace video_fec {
     if (last_report_ms_ < 0) {
       // The first summary starts the observation period: one clean second is not enough to drop parity.
       resume_since_ms_ = now_ms;
-    } else if (delta != 1 || now_ms - last_report_ms_ > feedback_timeout_ms) {
-      // A skipped summary or a silent stretch is unknown, not clean: start a new observation period.
+    } else if (now_ms - last_report_ms_ > feedback_timeout_ms && !idle_since_report()) {
+      // A silent stretch while video was flowing is unknown, not clean: start a new observation
+      // period. A skipped sequence number alone is not one. Summaries travel unreliably, so on a
+      // lossy link one gets lost now and then, and the client skips seconds it received nothing
+      // in; either way the second is unknown, but the history around it still holds. Dropping it
+      // would fall back to the host's percentage exactly when there is loss to protect against.
       resume_since_ms_ = now_ms;
       loss_window_ = {};
     }
     loss_window_.record(data, missing, now_ms);
+    last_estimate_ = loss_window_.estimate(now_ms);
     last_sequence_ = sequence;
     last_report_ms_ = now_ms;
     return true;
+  }
+
+  void controller_t::sent(std::int64_t now_ms) {
+    std::lock_guard lock {mutex_};
+    if (last_sent_ms_ >= 0 && now_ms - last_sent_ms_ >= idle_gap_ms) {
+      idle_resumed_ms_ = now_ms;
+    }
+    last_sent_ms_ = now_ms;
+  }
+
+  bool controller_t::idle_since_report() const {
+    return idle_resumed_ms_ >= 0 && idle_resumed_ms_ > last_report_ms_;
   }
 
   unsigned controller_t::percentage(std::size_t data_shards, std::size_t min_parity, std::int64_t now_ms) const {
@@ -194,12 +211,21 @@ namespace video_fec {
     double loss;
     {
       std::lock_guard lock {mutex_};
-      const bool fresh = last_report_ms_ >= 0 && now_ms >= last_report_ms_ &&
-                         now_ms - last_report_ms_ <= feedback_timeout_ms;
+      // After a pause in sending, the client has had nothing to report on: its feedback is
+      // due a timeout after the host started sending again, not a timeout after its last summary.
+      const bool idle = idle_since_report();
+      const auto expected_since = idle ? std::max(last_report_ms_, idle_resumed_ms_) : last_report_ms_;
+      const bool fresh = last_report_ms_ >= 0 && now_ms >= expected_since &&
+                         now_ms - expected_since <= feedback_timeout_ms;
       if (!fresh) {
         return fallback_;
       }
-      const auto estimate = loss_window_.estimate(now_ms);
+      auto estimate = loss_window_.estimate(now_ms);
+      if (!estimate && idle) {
+        // A long pause can age the whole window out. Nothing was learned meanwhile, so what was
+        // known before it still stands.
+        estimate = last_estimate_;
+      }
       // At the start of the session and after a gap, clean reports must cover a full window
       // before protection is released. Reported loss raises protection at once.
       if (!estimate || (*estimate == 0 && now_ms - resume_since_ms_ < loss_window_t::duration_ms)) {
