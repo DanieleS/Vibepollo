@@ -2,7 +2,7 @@
  * @file src/platform/windows/focus_monitor.cpp
  * @brief Watches what kind of text field has focus on the Windows desktop.
  *
- * A WinEvent hook on EVENT_OBJECT_FOCUS is the trigger: event driven, out of process and
+ * WinEvent hooks on EVENT_OBJECT_FOCUS and EVENT_SYSTEM_FOREGROUND are the trigger: event driven, out of process and
  * free of COM, so nothing is polled. Once focus settles, a classic edit control is
  * classified from its window style alone; anything else (browsers, Electron, WPF, UWP) goes
  * through UI Automation.
@@ -274,6 +274,19 @@ namespace focus_hints {
       }
       auto hook_guard = util::fail_guard([hook]() {
         UnhookWinEvent(hook);
+      });
+
+      // A window coming to the foreground does not always raise a focus event: a game taking
+      // over from the Start menu's search box raises none, and the keyboard would stay up over
+      // the game. The same note-and-classify handles it.
+      auto foreground_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, on_focus_event, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+      if (!foreground_hook) {
+        BOOST_LOG(warning) << "Focus hints: foreground hook failed, switching to a game may leave a keyboard up: "sv << GetLastError();
+      }
+      auto foreground_guard = util::fail_guard([foreground_hook]() {
+        if (foreground_hook) {
+          UnhookWinEvent(foreground_hook);
+        }
       });
 
       // The hook only sees the desktop this thread started on
