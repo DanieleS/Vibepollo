@@ -1578,6 +1578,52 @@ namespace platf::playnite {
     return true;
   }
 
+  // A connector copy holding any of the legacy files (the PowerShell module or an older DLL).
+  static bool has_legacy_connector_files(const std::filesystem::path &dir) {
+    std::error_code ec;
+    return std::filesystem::exists(dir / L"extension.yaml", ec) &&
+           (std::filesystem::exists(dir / L"SunshinePlaynite.psm1", ec) ||
+            std::filesystem::exists(dir / L"SunshinePlaynite.dll", ec) ||
+            std::filesystem::exists(dir / L"VibeshinePlaynite.dll", ec));
+  }
+
+  /**
+   * Legacy connector copies outside the extensions directory the installer writes to.
+   *
+   * Playnite loads extensions from its program directory as well as from the user's data
+   * directory. An older connector installed next to the program survives an upgrade of the one in
+   * RoamingAppData, and since the compiled connector has a different extension Id, Playnite then
+   * loads both: they fight over the same pipe, and the legacy one never forwards gameStopped to
+   * the host, so a stream only ended when the launch helper gave up waiting.
+   */
+  static std::vector<std::filesystem::path> stray_legacy_connector_dirs(const std::filesystem::path &target) {
+    std::vector<std::filesystem::path> candidates;
+    std::filesystem::path via_assoc;
+    if (resolve_extensions_dir_via_assoc(via_assoc)) {
+      candidates.push_back(via_assoc);
+    }
+    if (!config::playnite.install_dir.empty()) {
+      candidates.push_back(std::filesystem::path(platf::from_utf8(config::playnite.install_dir)) / L"Extensions" / L"SunshinePlaynite");
+    }
+    std::vector<std::filesystem::path> stray;
+    for (const auto &dir : candidates) {
+      std::error_code ec;
+      if (!target.empty() && std::filesystem::exists(target, ec) && std::filesystem::equivalent(dir, target, ec)) {
+        continue;
+      }
+      if (!has_legacy_connector_files(dir)) {
+        continue;
+      }
+      if (std::none_of(stray.begin(), stray.end(), [&](const auto &seen) {
+            std::error_code eq_ec;
+            return std::filesystem::equivalent(seen, dir, eq_ec);
+          })) {
+        stray.push_back(dir);
+      }
+    }
+    return stray;
+  }
+
   bool launch_game(const std::string &playnite_id) {
     auto inst = g_instance.load(std::memory_order_acquire);
     if (!inst) {
@@ -2363,6 +2409,16 @@ namespace platf::playnite {
         error_out = "Failed to deploy and verify plugin files in " + destDir.string();
       } else {
         BOOST_LOG(info) << "Playnite installer: deployed plugin to " << destDir.string();
+        // Playnite is stopped: a legacy copy elsewhere would otherwise load next to the new one.
+        for (const auto &stray : stray_legacy_connector_dirs(destDir)) {
+          ec.clear();
+          std::filesystem::remove_all(stray, ec);
+          if (ec) {
+            BOOST_LOG(warning) << "Playnite installer: could not remove legacy connector at " << stray.string() << ": " << ec.message();
+          } else {
+            BOOST_LOG(info) << "Playnite installer: removed legacy connector at " << stray.string();
+          }
+        }
       }
 
       launch_attempted = restart;
@@ -2555,9 +2611,11 @@ namespace platf::playnite {
         return false;
       }
       const std::filesystem::path d(dir);
-      return std::filesystem::exists(d / "extension.yaml") && !std::filesystem::exists(d / "VibepolloPlaynite.dll") &&
-             (std::filesystem::exists(d / "SunshinePlaynite.dll") || std::filesystem::exists(d / "VibeshinePlaynite.dll") ||
-              std::filesystem::exists(d / "SunshinePlaynite.psm1"));
+      if (!std::filesystem::exists(d / "VibepolloPlaynite.dll") && has_legacy_connector_files(d)) {
+        return true;
+      }
+      // A current connector here, but a legacy copy beside Playnite's program still loads too.
+      return !stray_legacy_connector_dirs(d).empty();
     } catch (...) {
       return false;
     }

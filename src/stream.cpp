@@ -1913,6 +1913,10 @@ namespace stream {
             if (game_session_requires_shutdown) {
               BOOST_LOG(info) << "Stopping game control session because the app terminated."sv;
               send_termination(session);
+              // Put the termination on the wire now: stopping the session starts its teardown on
+              // other threads, and a peer reset before the next service loses the queued packet.
+              // The client then sees a bare disconnect (-1) instead of the app having quit.
+              server->flush();
               session::stop(*session);
               has_game_session_pending_or_draining = true;
               ++pos;
