@@ -2503,12 +2503,16 @@ namespace proc {
         bool have_installed = platf::playnite::get_installed_plugin_version(installed_ver);
         bool have_packaged = platf::playnite::get_packaged_plugin_version(packaged_ver);
 
+        // The legacy PowerShell connector carries the same version number as the compiled one, and
+        // the host does not count it as installed: without this it is never replaced, library sync
+        // stays off, and the launch helper is left forcing focus for the whole timeout.
+        const bool legacy = platf::playnite::is_legacy_plugin_installed();
         if (have_installed && have_packaged) {
           // Comparing the raw strings is wrong once a component reaches two digits:
           // "0.4.8" sorts after "0.4.13" lexicographically, so the update never fires.
-          if (version_compare::compare_semver(installed_ver, packaged_ver) < 0) {
+          if (legacy || version_compare::compare_semver(installed_ver, packaged_ver) < 0) {
             BOOST_LOG(info) << "Playnite plugin update available (" << installed_ver
-                            << " -> " << packaged_ver << "), auto-updating before launch";
+                            << (legacy ? " legacy" : "") << " -> " << packaged_ver << "), auto-updating before launch";
             std::string install_error;
             if (platf::playnite::install_plugin(install_error, true)) {
               BOOST_LOG(info) << "Playnite plugin auto-update succeeded";
