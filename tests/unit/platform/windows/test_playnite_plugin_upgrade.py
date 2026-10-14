@@ -87,7 +87,9 @@ int main() {
 }
 ''')
     executable = directory / ("policy.exe" if os.name == "nt" else "policy")
-    subprocess.run([compiler, "-std=c++20", "-I", str(repo / "src"), str(cpp), "-o", str(executable)], check=True)
+    # -iquote, not -I: src/ has its own process.h, which with -I shadows the system <process.h>
+    # that MinGW's <pthread.h> includes. The repo root is there for the headers' "src/..." includes.
+    subprocess.run([compiler, "-std=c++20", "-iquote", str(repo / "src"), "-iquote", str(repo), str(cpp), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True, timeout=5)
     print("PASS: legacy migration and compiled plugin version policy")
 
