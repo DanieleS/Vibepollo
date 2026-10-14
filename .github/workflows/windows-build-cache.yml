@@ -12,8 +12,9 @@ on:
       - master
   workflow_dispatch:
 
+# Per ref: a push to master must not cancel a run started by hand on another branch.
 concurrency:
-  group: windows-build-cache
+  group: windows-build-cache-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
