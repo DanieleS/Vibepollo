@@ -24,6 +24,7 @@ extern "C" {
 #include "config.h"
 #include "globals.h"
 #include "input.h"
+#include "input_activity_policy.h"
 #include "logging.h"
 #include "mouse_input.h"
 #include "platform/common.h"
@@ -203,13 +204,15 @@ namespace input {
 
     input_t(
       safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event,
-      platf::feedback_queue_t feedback_queue
+      platf::feedback_queue_t feedback_queue,
+      safe::mail_raw_t::event_t<std::chrono::steady_clock::time_point> input_activity_event
     ):
         shortcutFlags {},
         gamepads(MAX_GAMEPADS),
         client_context {platf::allocate_client_input_context(platf_input)},
         touch_port_event {std::move(touch_port_event)},
         feedback_queue {std::move(feedback_queue)},
+        input_activity_event {std::move(input_activity_event)},
         input_queue_task_scheduled {false},
         mouse_left_button_timeout {},
         touch_port {{0, 0, 0, 0}, 0, 0, 1.0f, 1.0f, 0, 0},
@@ -228,6 +231,10 @@ namespace input {
 
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event;
     platf::feedback_queue_t feedback_queue;
+    // Tells this session's encoder that the user just acted, see video::input_boost.
+    safe::mail_raw_t::event_t<std::chrono::steady_clock::time_point> input_activity_event;
+    // Only touched by the single input worker.
+    activity::tracker_t activity_tracker;
     bool persist_gamepads = false;
 
     std::list<std::vector<uint8_t>> input_queue;
@@ -1828,6 +1835,13 @@ namespace input {
         break;
     }
 
+    // Signal the encoder only after the input reached the OS, so a frame captured
+    // before the input was applied is never mistaken for the response to it.
+    if (config::video.input_activity_boost &&
+        input->activity_tracker.evaluate(entry.data(), entry.size(), {config::input.keyboard, config::input.mouse, config::input.controller})) {
+      input->input_activity_event->raise(std::chrono::steady_clock::now());
+    }
+
     bool schedule_next = false;
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
@@ -1981,6 +1995,7 @@ namespace input {
       }
       input->accumulated_vscroll_delta = 0;
       input->accumulated_hscroll_delta = 0;
+      input->activity_tracker.reset();
       BOOST_LOG(debug) << "Released disconnected client's keyboard, mouse, controllers, touch and pen input";
     });
   }
@@ -2016,7 +2031,8 @@ namespace input {
   std::shared_ptr<input_t> alloc(safe::mail_t mail, bool persist_gamepads) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
-      mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
+      mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback),
+      mail->event<std::chrono::steady_clock::time_point>(mail::input_activity)
     );
     input->persist_gamepads = persist_gamepads;
 

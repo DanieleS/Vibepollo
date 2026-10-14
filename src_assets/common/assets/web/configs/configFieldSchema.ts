@@ -73,6 +73,8 @@ const NUMBER_FIELD_OVERRIDES: Record<string, Partial<ConfigFieldDefinition>> = {
   ping_timeout: { min: 0, step: 100, placeholder: '10000' },
   max_bitrate: { min: 0, placeholder: '0' },
   minimum_fps_target: { min: 0, max: 1000, placeholder: '0' },
+  input_activity_boost_fps: { min: 0, max: 1000, step: 1, precision: 0, placeholder: '0' },
+  input_activity_boost_window_ms: { min: 0, max: 5000, step: 1, precision: 0, placeholder: '150' },
   rtx_hdr_contrast: { min: -100, max: 100, step: 1, placeholder: '0' },
   rtx_hdr_saturation: { min: -100, max: 100, step: 1, placeholder: '0' },
   rtx_hdr_sdr_brightness: { min: 0, max: 100, step: 1, placeholder: '0' },

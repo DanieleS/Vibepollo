@@ -143,6 +143,7 @@ struct input_t {
   std::vector<gamepad_t> gamepads {16};
   std::unique_ptr<platf::client_input_t> client_context;
   int accumulated_vscroll_delta = 0, accumulated_hscroll_delta = 0;
+  struct { void reset() {} } activity_tracker;
   worker_t::task_id_t mouse_left_button_timeout = nullptr;
   bool mouse_left_button_delay = true;
   std::mutex input_queue_lock;
