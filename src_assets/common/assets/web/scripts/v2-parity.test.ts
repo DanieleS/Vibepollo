@@ -43,6 +43,26 @@ test('AMD speed default agrees across backend, settings UI and legacy fallbacks'
   }
 });
 
+test('NVENC P4, spatial AQ and frame budget guard defaults agree across backend and both UIs', () => {
+  for (const path of [
+    '../configs/extendedSettings.ts',
+    '../config.html',
+    '../../web-legacy/config.html',
+    '../../web-legacy/stores/config.ts',
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), 'utf8');
+    assert.match(source, /nvenc_preset:\s*4,/, path);
+    assert.match(source, /nvenc_spatial_aq:\s*'enabled'/, path);
+    assert.match(source, /nvenc_frame_budget_guard:\s*'enabled'/, path);
+  }
+  assert.equal(settingsDefaults.nvenc_preset, 4);
+  assert.ok(settingsFields.has('nvenc_frame_budget_guard'));
+  const backend = readFileSync(new URL('../../../../../src/nvenc/nvenc_config.h', import.meta.url), 'utf8');
+  assert.match(backend, /int quality_preset = 4;/);
+  assert.match(backend, /bool adaptive_quantization = true;/);
+  assert.match(backend, /bool frame_budget_guard = true;/);
+});
+
 test('capture options follow the host platform', () => {
   assert.deepEqual(
     captureOptionsForPlatform('linux').map((option) => option.value),

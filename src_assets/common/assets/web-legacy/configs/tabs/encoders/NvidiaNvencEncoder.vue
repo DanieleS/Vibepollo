@@ -24,6 +24,12 @@ const platform = computed(() => config.platform || '');
 
     <ConfigFieldRenderer setting-key="nvenc_preset" v-model="config.nvenc_preset" class="mb-4" />
 
+    <ConfigFieldRenderer
+      setting-key="nvenc_frame_budget_guard"
+      v-model="config.nvenc_frame_budget_guard"
+      class="mb-4"
+    />
+
     <ConfigFieldRenderer setting-key="nvenc_twopass" v-model="config.nvenc_twopass" class="mb-4" />
 
     <ConfigFieldRenderer

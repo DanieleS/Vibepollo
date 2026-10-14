@@ -3747,13 +3747,21 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
             Higher numbers improve compression (quality at given bitrate) at the cost of increased encoding latency.
             Recommended to change only when limited by network or decoder, otherwise similar effect can be accomplished
             by increasing bitrate.
+            The default P4 is estimated to fit 1080p and 1440p at 120 fps (4:2:0) by the
+            [frame budget guard](#nvenc_frame_budget_guard), which lowers it automatically for heavier sessions.
+            The estimate is not a measurement of your GPU.
+            @note{Until P4 with [spatial AQ](#nvenc_spatial_aq) became the default, the default was P1 with spatial
+            AQ off. The web UI does not save values equal to the default, so a host where P1 or spatial AQ off
+            was picked in the web UI has no setting for them and now uses P4 with spatial AQ, for every client.
+            To go back, set @code{}nvenc_preset = 1@endcode and @code{}nvenc_spatial_aq = disabled@endcode
+            in sunshine.conf.}
             @note{This option only applies when using NVENC [encoder](#encoder).}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            1
+            4
             @endcode</td>
     </tr>
     <tr>
@@ -3765,7 +3773,7 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     <tr>
         <td rowspan="7">Choices</td>
         <td>1</td>
-        <td>P1 (fastest, default)</td>
+        <td>P1 (fastest)</td>
     </tr>
     <tr>
         <td>2</td>
@@ -3777,7 +3785,7 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     </tr>
     <tr>
         <td>4</td>
-        <td>P4 (balanced quality)</td>
+        <td>P4 (balanced quality, default)</td>
     </tr>
     <tr>
         <td>5</td>
@@ -3790,6 +3798,45 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     <tr>
         <td>7</td>
         <td>P7 (slowest)</td>
+    </tr>
+</table>
+
+### nvenc_frame_budget_guard
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Lower the [performance preset](#nvenc_preset) for a session when its estimated encode time would not fit
+            in 65% of the frame interval, so encoding keeps up with the stream. For example, 4K at 120 fps lowers
+            the default P4 to P1 on a GPU with a single NVENC engine, and 4K at 90 fps lowers it to P2.
+            Extra NVENC engines only count where HEVC or AV1 [split-frame encoding](#nvenc_split_encode) engages:
+            always when it is forced, otherwise only for P1-P4 at 2112 (HEVC) or 2048 (AV1) lines and above, the
+            cases where NVIDIA documents that the driver splits frames on its own. 4:4:4 sessions count twice the
+            samples of 4:2:0. If even P1 is estimated not to fit, spatial AQ is turned off as well, so such a
+            session is never slower than with the previous default of P1 without spatial AQ.
+            The estimates are calibrated on recent high-end GPUs with a conservative margin and do not model
+            spatial AQ, two-pass or 10-bit separately; they are not measured on your GPU. When the guard steps in,
+            a warning is logged and the encoder line of the log carries the configured preset, e.g.
+            @code{}frame-budget:P4@endcode, and @code{}frame-budget:aq-off@endcode when it turned spatial AQ off.
+            The encoder line also shows the estimate against the budget and any split-frame engines counted, e.g.
+            @code{}frame-budget=4.74/5.42ms,split-engines=2@endcode.
+            Disable this to always use the configured settings.
+            @note{This option only applies when using NVENC [encoder](#encoder). The Linux
+            @code{}nvenc_legacy@endcode (FFmpeg) encoder ignores it.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            nvenc_frame_budget_guard = disabled
+            @endcode</td>
     </tr>
 </table>
 
@@ -3839,8 +3886,8 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Assign higher QP values to flat regions of the video.
-            Recommended to enable when streaming at lower bitrates.
+            Assign higher QP values to flat regions of the video, which improves perceived quality at the bitrates
+            used for streaming over Wi-Fi. Enabled by default, as NVIDIA recommends for game streaming.
             @note{This option only applies when using NVENC [encoder](#encoder).}
             @warning{Enabling this option may reduce performance.}
         </td>
@@ -3848,7 +3895,7 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            enabled
             @endcode</td>
     </tr>
     <tr>
