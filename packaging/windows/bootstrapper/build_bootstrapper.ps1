@@ -265,12 +265,28 @@ if ([string]::IsNullOrWhiteSpace($assemblyVersion)) {
 if ([string]::IsNullOrWhiteSpace($informationalVersion)) {
     $informationalVersion = $assemblyVersion
 }
+# Fork addition: the product is Scirocco to the user, Vibepollo in the sources (merges stay clean).
+# The compiled copy of the source gets the brand in its string literals only, where the name is
+# text: identifiers, the registry DisplayName the installer detects ("Vibepollo"), file names
+# (VibepolloSetup.exe, Vibepollo.msi), driver names and URLs keep theirs.
+$brandName = if ([string]::IsNullOrWhiteSpace($env:SUNSHINE_BRAND_NAME)) { "Scirocco" } else { $env:SUNSHINE_BRAND_NAME }
+$brandWord = [regex]'(?<![\w.\-/\\])Vibepollo(?![\w\-/\\]|\.\w|\s+(?:[Vv]irtual|Display|Plug-?in|Playnite|USB)\b)'
+$csToken = [regex]'//[^\r\n]*|/\*[\s\S]*?\*/|''(?:[^''\\\r\n]|\\.)''|@"(?:[^"]|"")*"|\$?"(?:[^"\\\r\n]|\\.)*"'
+$brandedSource = $csToken.Replace([IO.File]::ReadAllText($sourceFile), {
+    param($m)
+    $t = $m.Value
+    if (-not $t.Contains('"') -or $t.StartsWith('//') -or $t.StartsWith('/*') -or $t.StartsWith("'") -or $t -eq '"Vibepollo"') { return $t }
+    return $brandWord.Replace($t, $brandName)
+})
+$sourceFile = Join-Path $artifactDir "VibeshineInstaller.branded.cs"
+[IO.File]::WriteAllText($sourceFile, $brandedSource, (New-Object Text.UTF8Encoding($true)))
+
 if ($UninstallOnly) {
     $assemblyInfoPath = Join-Path $artifactDir "VibepolloUninstall.AssemblyInfo.cs"
-    $assemblyTitle = "Vibepollo Uninstaller"
+    $assemblyTitle = "$brandName Uninstaller"
 } else {
     $assemblyInfoPath = Join-Path $artifactDir "VibepolloInstaller.AssemblyInfo.cs"
-    $assemblyTitle = "Vibepollo Installer"
+    $assemblyTitle = "$brandName Installer"
 }
 $assemblyInfoContent = @(
     "using System.Reflection;",

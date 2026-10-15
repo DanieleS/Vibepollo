@@ -1658,6 +1658,13 @@ namespace confighttp {
       return;
     }
 
+    // Fork addition: the v2 interface is the default. The classic one stays at /?classic (its
+    // own links to "/" lead to v2 from now on).
+    if (path == "/" && request->parse_query_string().count("classic") == 0) {
+      send_redirect(std::move(response), std::move(request), "/v2/");
+      return;
+    }
+
     // Missing files should remain 404s. Extension-free paths are client-side
     // navigation routes and receive the single application shell.
     if (fs::path {path}.has_extension()) {

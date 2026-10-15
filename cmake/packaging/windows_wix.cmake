@@ -5,7 +5,8 @@
 set(CPACK_GENERATOR "WIX")
 
 # Product identity and visuals
-set(CPACK_WIX_PRODUCT_ICON "${CMAKE_SOURCE_DIR}/src_assets/common/assets/web/public/images/apollo.ico")
+# Fork: the application icon (tools/brand), not the tray one under web/images.
+set(CPACK_WIX_PRODUCT_ICON "${CMAKE_SOURCE_DIR}/apollo.ico")
 set(CPACK_WIX_PROGRAM_MENU_FOLDER "Vibepollo")
 
 # Stable Upgrade GUID to enable in-place upgrades
@@ -46,6 +47,7 @@ set(CPACK_WIX_LIGHT_EXTRA_FLAGS
 set(CPACK_WIX_CANDLE_EXTRA_FLAGS
   "-dBinDir=${CMAKE_BINARY_DIR}"
   "-dVibepolloAppId=${WINDOWS_APP_USER_MODEL_ID}"
+  "-dProductDisplayName=${SUNSHINE_BRAND_NAME}"
   # Human-readable version for ARP DisplayVersion; ProductVersion itself is
   # ordinal-encoded (see below) and no longer matches the semver.
   "-dVibeshineSemVer=${PROJECT_VERSION_FULL}"

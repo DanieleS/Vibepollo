@@ -56,11 +56,11 @@
   <Fragment>
     <DirectoryRef Id="TARGETDIR">
       <Directory Id="ProgramMenuFolder">
-        <Directory Id="VIBEPOLLO_PROGRAM_MENU_FOLDER" Name="Vibepollo">
+        <Directory Id="VIBEPOLLO_PROGRAM_MENU_FOLDER" Name="$(var.ProductDisplayName)">
           <Component Id="StartMenuShortcut" Guid="{A3B4C5D6-E7F8-4A5B-9C2D-3E4F5A6B7C8D}">
             <Shortcut Id="VibepolloStartMenuShortcut"
-                      Name="Vibepollo"
-                      Description="Launch Vibepollo Web UI"
+                      Name="$(var.ProductDisplayName)"
+                      Description="Launch $(var.ProductDisplayName) Web UI"
                       Target="[INSTALL_ROOT]sunshine.exe"
                       Icon="ProductIcon.ico"
                       Arguments="--shortcut"
@@ -110,7 +110,7 @@
         <ServiceInstall
             Id="ApolloServiceInstall"
             Name="ApolloService"
-            DisplayName="Apollo Service"
+            DisplayName="$(var.ProductDisplayName) Service"
             Type="ownProcess"
             Start="auto"
             ErrorControl="normal"
@@ -302,7 +302,7 @@
       <Component Id="ArpCustomUninstallEntry" Guid="*" Win64="yes">
         <CreateFolder />
         <RegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Vibepollo">
-          <RegistryValue Name="DisplayName" Type="string" Value="Vibepollo" KeyPath="yes" />
+          <RegistryValue Name="DisplayName" Type="string" Value="$(var.ProductDisplayName)" KeyPath="yes" />
           <!-- Human-readable semver; ProductVersion is ordinal-encoded (e.g.
                1.18.0-beta.2 -> 1.18.32.0) and would confuse users here. The
                bootstrapper's ParseVersion maps this string back into the
@@ -322,14 +322,14 @@
         <CreateFolder />
         <Firewall:FirewallException xmlns:Firewall="http://schemas.microsoft.com/wix/FirewallExtension"
                                     Id="FE_VibepolloExe"
-                                    Name="Vibepollo"
+                                    Name="$(var.ProductDisplayName)"
                                     Program="[INSTALL_ROOT]sunshine.exe"
                                     IgnoreFailure="yes"
                                     Profile="all"
                                     Scope="any" />
         <Firewall:FirewallException xmlns:Firewall="http://schemas.microsoft.com/wix/FirewallExtension"
                                     Id="FE_VibepolloSvcExe"
-                                    Name="Vibepollo Service"
+                                    Name="$(var.ProductDisplayName) Service"
                                     Program="[INSTALL_ROOT]tools\sunshinesvc.exe"
                                     IgnoreFailure="yes"
                                     Profile="all"

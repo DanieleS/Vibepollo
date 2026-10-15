@@ -34,6 +34,13 @@ endforeach()
 list(REMOVE_DUPLICATES SUNSHINE_WEB_SOURCES)
 
 find_program(SUNSHINE_NPM_EXECUTABLE NAMES npm.cmd npm)
+find_program(SUNSHINE_NODE_EXECUTABLE NAMES node)
+
+# Fork addition: the built web UIs get the product name users see (SUNSHINE_BRAND_NAME), see
+# web/scripts/brand.mjs. Idempotent, so a prebuilt copy goes through it too.
+set(SUNSHINE_WEB_BRAND_COMMAND
+    "${SUNSHINE_NODE_EXECUTABLE}" "${SUNSHINE_WEB_SOURCE_DIR}/scripts/brand.mjs"
+    "${SUNSHINE_WEB_ROOT_OUTPUT_DIR}" "${SUNSHINE_BRAND_NAME}")
 
 # Fork addition: a web UI already built from these exact sources (the Windows CI caches it, keyed
 # on the web sources, lockfiles and this file) is copied instead of rebuilt, skipping both npm ci
@@ -44,6 +51,7 @@ if(SUNSHINE_PREBUILT_WEB_DIR)
     add_custom_command(
         OUTPUT "${SUNSHINE_WEB_STAMP}"
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${SUNSHINE_PREBUILT_WEB_DIR}" "${SUNSHINE_WEB_ROOT_OUTPUT_DIR}"
+        COMMAND ${SUNSHINE_WEB_BRAND_COMMAND}
         COMMAND "${CMAKE_COMMAND}" -E touch "${SUNSHINE_WEB_STAMP}"
         BYPRODUCTS
             "${SUNSHINE_LEGACY_WEB_OUTPUT_DIR}/index.html"
@@ -68,6 +76,7 @@ elseif(SUNSHINE_NPM_EXECUTABLE)
         COMMAND "${CMAKE_COMMAND}" -E env
                 "SUNSHINE_WEB_OUTPUT_DIR=${SUNSHINE_WEB_OUTPUT_DIR}"
                 "${SUNSHINE_NPM_EXECUTABLE}" run build
+        COMMAND ${SUNSHINE_WEB_BRAND_COMMAND}
         COMMAND "${CMAKE_COMMAND}" -E touch "${SUNSHINE_WEB_STAMP}"
         WORKING_DIRECTORY "${SUNSHINE_WEB_SOURCE_DIR}"
         BYPRODUCTS

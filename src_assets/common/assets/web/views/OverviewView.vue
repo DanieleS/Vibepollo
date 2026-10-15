@@ -529,13 +529,13 @@ onBeforeUnmount(() => {
         >
         <nav :aria-label="t('ui.overview.support')">
           <a
-            href="https://github.com/DanieleS/Vibepollo/issues/new/choose"
+            href="https://github.com/DanieleS/scirocco/issues/new/choose"
             target="_blank"
             rel="noopener noreferrer"
             >{{ t('ui.overview.actions.reportBug') }}<UiIcon name="external-link" :size="14"
           /></a>
           <a
-            href="https://github.com/DanieleS/Vibepollo/releases/latest"
+            href="https://github.com/DanieleS/scirocco/releases/latest"
             target="_blank"
             rel="noopener noreferrer"
             >{{ t('ui.overview.actions.checkUpdates') }}<UiIcon name="external-link" :size="14"
