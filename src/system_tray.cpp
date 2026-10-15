@@ -12,7 +12,8 @@
     #include <Windows.h>
     #include <accctrl.h>
     #include <aclapi.h>
-    #define TRAY_ICON WEB_DIR "images/apollo.ico"
+    // Fork: its own tray icon (the head in a disc, tools/brand); apollo.ico is the app icon.
+    #define TRAY_ICON WEB_DIR "images/scirocco-tray.ico"
     #define TRAY_ICON_PLAYING WEB_DIR "images/apollo-playing.ico"
     #define TRAY_ICON_PAUSING WEB_DIR "images/apollo-pausing.ico"
     #define TRAY_ICON_LOCKED WEB_DIR "images/apollo-locked.ico"

@@ -1714,7 +1714,7 @@ test('legacy updater orders embedded daily versions and shares dismissal across 
   await page.reload();
   await expect(page.locator('.update-notice')).toContainText(`Vibepollo ${later.metadata.tag} is available`);
   await expect(page.locator('.update-notice').getByRole('link', { name: 'Read release notes' })).toHaveAttribute('href', later.release.html_url);
-  await page.locator('.sidebar__legacy[href="/"]').click();
+  await page.locator('.sidebar__legacy[href="/?classic"]').click();
   await expect(notice).toContainText(later.metadata.version);
 });
 
