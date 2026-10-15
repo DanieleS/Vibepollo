@@ -157,7 +157,7 @@
                     strong
                     size="small"
                     class="w-full justify-center sm:w-auto"
-                    href="https://github.com/DanieleS/Vibepollo/issues/new?template=bug_report.yml"
+                    href="https://github.com/DanieleS/scirocco/issues/new?template=bug_report.yml"
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -577,9 +577,9 @@ const availableVersion = computed(() => {
 });
 const availableReleaseUrl = computed(() => {
   const url = availableUpdate.value?.url;
-  return url?.startsWith('https://github.com/DanieleS/Vibepollo/releases/')
+  return url?.startsWith('https://github.com/DanieleS/scirocco/releases/')
     ? url
-    : 'https://github.com/DanieleS/Vibepollo/releases';
+    : 'https://github.com/DanieleS/scirocco/releases';
 });
 const notifyPreReleases = ref(true);
 const installedUpdateVersion = ref('');
