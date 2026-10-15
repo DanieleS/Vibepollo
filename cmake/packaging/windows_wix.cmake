@@ -5,7 +5,8 @@
 set(CPACK_GENERATOR "WIX")
 
 # Product identity and visuals
-set(CPACK_WIX_PRODUCT_ICON "${CMAKE_SOURCE_DIR}/src_assets/common/assets/web/public/images/apollo.ico")
+# Fork: the application icon (tools/brand), not the tray one under web/images.
+set(CPACK_WIX_PRODUCT_ICON "${CMAKE_SOURCE_DIR}/apollo.ico")
 set(CPACK_WIX_PROGRAM_MENU_FOLDER "Vibepollo")
 
 # Stable Upgrade GUID to enable in-place upgrades
