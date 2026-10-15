@@ -28,6 +28,11 @@ endif()
 # Cache variables can be provided via -DSUNSHINE_REPO_OWNER=... or -DSUNSHINE_REPO_NAME=...
 set(SUNSHINE_REPO_OWNER "DanieleS" CACHE STRING "GitHub repo owner for update checks")
 set(SUNSHINE_REPO_NAME "scirocco" CACHE STRING "GitHub repo name for update checks")
+# The product name users see (web UI, installer, Start menu, tray, file properties). The sources
+# keep upstream's "Vibepollo", so merges stay clean; the build puts this name in its place. One
+# word: the resource compiler takes it as a bare token. Internals (Vibepollo.msi, the setup exe,
+# registry keys, the install dir) keep their names, which the 2.2.0 updater and installer expect.
+set(SUNSHINE_BRAND_NAME "Scirocco" CACHE STRING "Product name shown to users")
 
 # Allow environment variables to override the cache values (useful in CI)
 if(DEFINED ENV{SUNSHINE_REPO_OWNER})
@@ -298,7 +303,7 @@ message("RC_VERSION_BUILD: ${RC_VERSION_BUILD}")
 message("RC_VERSION_REVISION: ${RC_VERSION_REVISION}")
 
 list(APPEND SUNSHINE_DEFINITIONS PROJECT_FQDN="${PROJECT_FQDN}")
-list(APPEND SUNSHINE_DEFINITIONS PROJECT_NAME="${PROJECT_NAME}")
+list(APPEND SUNSHINE_DEFINITIONS PROJECT_NAME="${SUNSHINE_BRAND_NAME}")
 # The version, commit, branch and date change on every build. They go only to the sources that
 # use them (cmake/targets/common.cmake): on every source they changed every compile command, and
 # a compiler cache could never reuse anything of the sunshine target.

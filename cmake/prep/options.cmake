@@ -95,7 +95,3 @@ elseif(UNIX)  # Linux
         message(FATAL_ERROR "The SteamOS bundle requires Gamescope capture")
     endif()
 endif()
-
-# Fork addition: the product name users see (web UI, installer, tray, file properties). The sources
-# keep upstream's "Vibepollo", so merges stay clean; the build puts this name in its place.
-set(SUNSHINE_BRAND_NAME "Scirocco" CACHE STRING "Product name shown to users")

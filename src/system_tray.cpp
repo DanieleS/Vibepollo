@@ -138,7 +138,7 @@ namespace system_tray {
     .menu =
       (struct tray_menu[]) {
         // todo - use boost/locale to translate menu strings
-        {.text = "Open Vibepollo", .cb = tray_open_ui_cb},
+        {.text = "Open " PROJECT_NAME, .cb = tray_open_ui_cb},
         {.text = "-"},
         // { .text = "-" },
         // { .text = "Donate",

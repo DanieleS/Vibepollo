@@ -46,6 +46,7 @@ set(CPACK_WIX_LIGHT_EXTRA_FLAGS
 set(CPACK_WIX_CANDLE_EXTRA_FLAGS
   "-dBinDir=${CMAKE_BINARY_DIR}"
   "-dVibepolloAppId=${WINDOWS_APP_USER_MODEL_ID}"
+  "-dProductDisplayName=${SUNSHINE_BRAND_NAME}"
   # Human-readable version for ARP DisplayVersion; ProductVersion itself is
   # ordinal-encoded (see below) and no longer matches the semver.
   "-dVibeshineSemVer=${PROJECT_VERSION_FULL}"
