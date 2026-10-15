@@ -1637,7 +1637,7 @@
     "successstory": "Read SuccessStory achievements",
     "gameactivity": "Read GameActivity play history",
     "extensions_title": "Compatible extensions",
-    "extensions_desc": "Vibepollo reads the data these Playnite extensions keep and shows it to clients such as Ratatoskr. Install them in Playnite to light up the features; either can be turned off in the Playnite policies.",
+    "extensions_desc": "Vibepollo reads the data these Playnite extensions keep and shows it to clients such as Zefiro. Install them in Playnite to light up the features; either can be turned off in the Playnite policies.",
     "successstory_desc": "Achievements for clients",
     "gameactivity_desc": "Play history and statistics",
     "extension_found": "Data found",
