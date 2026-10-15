@@ -448,6 +448,12 @@ esac
         )
         self.assertIn('if [[ "${BUILD_VERSION}" == *-* ]]', arch_text)
         self.assertIn('sub_version=".r${COMMIT}"', arch_text)
+        # A prerelease tag's own build is the release: no commit suffix, or
+        # sign-release rejects the package's pkgver.
+        self.assertIn(
+            'if [[ "${GITHUB_REF_TYPE}" != tag || "${GITHUB_REF_NAME}" != "${BUILD_VERSION}" ]]',
+            arch_text,
+        )
         self.assertIn("makedepends = nodejs", arch_text)
         self.assertIn("makedepends = npm", arch_text)
         self.assertIn("makedepends = ninja", arch_text)

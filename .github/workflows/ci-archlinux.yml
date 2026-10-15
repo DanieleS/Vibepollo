@@ -241,8 +241,12 @@ jobs:
           sub_version=""
           # Branch candidates share the upcoming prerelease version but retain
           # a commit suffix until the exact commit receives its release tag.
+          # The build of that tag is the release itself: sign-release expects
+          # its pkgver without the suffix.
           if [[ "${BUILD_VERSION}" == *-* ]]; then
-            sub_version=".r${COMMIT}"
+            if [[ "${GITHUB_REF_TYPE}" != tag || "${GITHUB_REF_NAME}" != "${BUILD_VERSION}" ]]; then
+              sub_version=".r${COMMIT}"
+            fi
           fi
 
           # Configure PKGBUILD file (as root)
