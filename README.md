@@ -1,3 +1,18 @@
+# Scirocco
+
+Scirocco is a personal fork of Nonary's [Vibepollo](https://github.com/Nonary/Vibepollo), the
+Windows streaming host for [Zefiro](https://github.com/DanieleS/zefiro), a Moonlight client for
+Android phones, tablets, handhelds and Google TV. It adds a Playnite connector (library metadata,
+play statistics from GameActivity, achievements from SuccessStory, served to paired clients) and
+scry telemetry, and keeps merging Vibepollo every night.
+
+Only the name users see is Scirocco: the sources keep Vibepollo's, so merges stay clean, and the
+build writes `SUNSHINE_BRAND_NAME` into the web UI, the installer, the Start menu and the tray.
+Releases: <https://github.com/DanieleS/scirocco/releases>, numbered from 3.0.0 (2.x were the same
+fork as "Vibepollo"). What follows is Vibepollo's own README.
+
+---
+
 # Vibepollo
 
 ## What is Vibepollo?
