@@ -261,7 +261,7 @@ const filteredDevices = computed(() => {
 
 const PERMISSION_VIEW = 0x02000000;
 const PERMISSION_LAUNCH = 0x04000000;
-const PERMISSION_ALL = 0x071f1f00;
+const PERMISSION_ALL = 0x075f1f00;
 
 function permissionMask(device: PairedDevice): number {
   const parsed = Number(device.perm ?? 0);

@@ -11,6 +11,8 @@ target_link_options(vibepollo_dualsense_haptics PRIVATE -municode)
 target_link_libraries(vibepollo_dualsense_haptics PRIVATE setupapi)
 target_link_libraries(vibepollo_dualsense_audio PRIVATE minhook::minhook ole32 propsys uuid shell32)
 add_dependencies(sunshine vibepollo_dualsense_haptics vibepollo_dualsense_audio)
+# Fork addition (Scirocco): unlocking a locked session from a stream start.
+include("${CMAKE_SOURCE_DIR}/tools/unlock_provider/unlock_provider.cmake")
 if(DEFINED _MINHOOK_DLL)
     add_custom_command(TARGET vibepollo_dualsense_audio POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_MINHOOK_DLL}" "$<TARGET_FILE_DIR:vibepollo_dualsense_audio>")

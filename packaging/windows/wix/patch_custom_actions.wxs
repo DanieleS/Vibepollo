@@ -111,6 +111,11 @@
       <Custom Action="SetRestoreNvPrefsUndo" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
       <Custom Action="RestoreNvPrefsUndo" After="SetRestoreNvPrefsUndo">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
 
+      <!-- Unregister the unlock credential provider and wipe its LSA secrets on a real uninstall.
+           An upgrade keeps the feature on: the provider path doesn't change. -->
+      <Custom Action="SetUnlockCleanup" After="RestoreNvPrefsUndo">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="UnlockCleanup" After="SetUnlockCleanup">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+
       <!-- Remove Virtual Display Driver only when explicitly requested by uninstall properties. -->
       <Custom Action="SetUnregisterVulkanHdrLayer" After="RestoreNvPrefsUndo">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
       <Custom Action="UnregisterVulkanHdrLayer" After="SetUnregisterVulkanHdrLayer">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
