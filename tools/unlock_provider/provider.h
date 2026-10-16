@@ -14,8 +14,10 @@ public:
   UnlockProvider();
 
   // IUnknown
-  IFACEMETHODIMP_(ULONG) AddRef() override;
-  IFACEMETHODIMP_(ULONG) Release() override;
+  IFACEMETHODIMP_(ULONG)
+  AddRef() override;
+  IFACEMETHODIMP_(ULONG)
+  Release() override;
   IFACEMETHODIMP QueryInterface(REFIID riid, void **ppv) override;
 
   // ICredentialProvider
@@ -32,7 +34,7 @@ private:
   virtual ~UnlockProvider();
 
   // The pipe handler: read the stored account, arm the credential, wake LogonUI.
-  UnlockOutcome OnUnlock();
+  UnlockOutcome OnUnlock(const std::string &request_id);
 
   LONG _cRef;
   UnlockCredential *_cred;

@@ -256,6 +256,22 @@ target_include_directories(sunshine_test_nanors_headers SYSTEM INTERFACE
 
 enable_testing()
 
+# Unlock security regressions use only the ownership policy and Windows' own APIs.
+sunshine_add_test_target(NAME test_fast_session_unlock_lifecycle CATEGORY fast
+    TEST_SOURCES "${CMAKE_CURRENT_LIST_DIR}/unit/platform/windows/test_session_unlock_lifecycle.cpp")
+if(WIN32)
+    sunshine_add_test_target(NAME test_component_session_unlock_windows CATEGORY component
+        TEST_SOURCES "${CMAKE_CURRENT_LIST_DIR}/unit/platform/windows/test_session_unlock_windows.cpp"
+        PRODUCT_SOURCES
+            "${SUNSHINE_TEST_REPOSITORY_ROOT}/tools/unlock_provider/credential.cpp"
+            "${SUNSHINE_TEST_REPOSITORY_ROOT}/tools/unlock_provider/cred_packing.cpp"
+        DEFINITIONS UNICODE _UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00 NOMINMAX
+        LINK_LIBRARIES advapi32 secur32 ole32 uuid)
+    if(TARGET test_component_session_unlock_windows)
+        set_tests_properties(test_component_session_unlock_windows PROPERTIES TIMEOUT 30)
+    endif()
+endif()
+
 # Exercise the Windows API-independent desktop/input ownership contract on the
 # native test host without requiring a physical Windows desktop.
 find_program(SUNSHINE_TEST_PYTHON_EXECUTABLE NAMES python3)

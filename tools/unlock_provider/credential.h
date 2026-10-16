@@ -6,14 +6,17 @@
 #include "common.h"
 
 #include <credentialprovider.h>
+#include <string>
 
 class UnlockCredential: public ICredentialProviderCredential2 {
 public:
   UnlockCredential();
 
   // IUnknown
-  IFACEMETHODIMP_(ULONG) AddRef() override;
-  IFACEMETHODIMP_(ULONG) Release() override;
+  IFACEMETHODIMP_(ULONG)
+  AddRef() override;
+  IFACEMETHODIMP_(ULONG)
+  Release() override;
   IFACEMETHODIMP QueryInterface(REFIID riid, void **ppv) override;
 
   // ICredentialProviderCredential
@@ -42,16 +45,22 @@ public:
   // provider then has LogonUI submit it. False if an unlock is already armed. A watchdog disarms
   // it if LogonUI never consumes it, so a request that goes nowhere neither wedges the tile at
   // busy nor leaves the password in memory.
-  bool Arm(PCWSTR account, PCWSTR password);
+  bool Arm(PCWSTR account, PCWSTR password, const std::string &request_id);
+
   bool IsArmed() const {
     return _armed;
   }
+
   // Force-clear: on UnAdvise, a scenario change, or the watchdog.
   void Disarm();
+  // True only when no serialization can still unlock Windows.
+  bool Cancel(const std::string &request_id);
+  bool WasRejected();
 
   void SetScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus) {
     _cpus = cpus;
   }
+
   // The enrolled account's SID, so the credential binds to the locked user's tile.
   void SetUserSid(PCWSTR sid);
 
@@ -68,6 +77,9 @@ private:
   CREDENTIAL_PROVIDER_USAGE_SCENARIO _cpus;
   CRITICAL_SECTION _lock;
   volatile bool _armed;
+  bool _rejected = false;
+  std::string _requestId;
+  bool _submissionPending = false;  // remains true after successful submission until this provider dies
   LONG _armGen;  // bumped on each Arm/Disarm, so a stale watchdog does nothing
   PWSTR _account;
   PWSTR _password;

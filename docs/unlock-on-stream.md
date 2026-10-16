@@ -42,7 +42,7 @@ Limits, inherited from how Windows works:
 
 ```
 client ──launch/resume──▶ nvhttp ──before_stream()──▶ session_unlock (host, SYSTEM)
-                                                          │  pipe, SYSTEM only: {"v":1,"op":"unlock"}
+                                                          │  pipe, SYSTEM only: {"v":2,"op":"unlock","id":"GUID"}
                                                           ▼
                                     VibepolloUnlock.dll in LogonUI (SYSTEM) ──▶ Windows unlocks
 stream.cpp, last RTSP session ended ──stream_ended()──▶ session_unlock ──▶ lock the session again
@@ -67,7 +67,10 @@ ends run as SYSTEM:
 - It only takes part in `CPUS_UNLOCK_WORKSTATION`.
 - It stays inert (no pipe, no tile) when no SID is stored.
 - Its pipe has a SYSTEM-only DACL plus a check that the caller's token is SYSTEM, and no HMAC
-  handshake.
+  handshake. The host connects with identification-only SQOS and verifies the server's SYSTEM
+  token, console session and full System32/LogonUI.exe image path before sending any request.
+  Connect waits and overlapped read/write operations have deadlines; timed-out I/O is cancelled
+  and drained before its buffers are freed.
 - On a request it reads the account and password from LSA itself, arms the hidden credential and
   calls `CredentialsChanged`. The password never crosses the pipe.
 
@@ -98,18 +101,35 @@ and unregister it on `disable()`.
 
 - `before_stream` holds one mutex, so two simultaneous launches make one request.
 - It does nothing unless the feature is on and the console session is locked. Lock state comes
-  from `WTSQuerySessionInformationW(WTSSessionInfoEx)`; there is already a helper,
-  `is_user_session_locked()`, in `src/platform/windows/utils.cpp`.
-- After the pipe answers `ok`, poll the lock state for about 10 s. Unlocked means success:
-  remember "unlocked by us". Still locked means the password was rejected.
+  from `WTSQuerySessionInformationW(WTSSessionInfoEx)` for the original target session; query
+  failure is represented as unknown.
+- Each unlock carries a fresh GUID. After the pipe answers `ok` (or a reply is lost after a
+  write), poll the target session's lock state for about 10 s. Unlocked means success:
+  remember "unlocked by us". A timeout is **not** a rejected password.
+- On timeout, ask the provider to `cancel` that GUID. Cancellation is acknowledged only if that
+  exact request has not been serialized. Cancellation and serialization hold the same credential
+  lock. A submitted credential stays pending until Windows reports failure or WTS shows an unlock;
+  even a successful Windows report cannot acknowledge cancellation before the WTS transition.
+- Continue monitoring ambiguous requests after stream teardown and pipe disappearance. Unknown
+  request IDs (including in a replacement provider) cannot confirm cancellation. A late unlock
+  after teardown is relocked immediately; a failed Windows result records `rejected`.
+  If Windows never resolves a submission, the host conservatively keeps monitoring it and does
+  not send another credential. It may treat a later manual unlock of that session as the pending
+  unlock, rather than silently abandon the relock obligation.
 - **Assumption to verify on the PC:** LogonUI may load the providers only once the lock-screen
   curtain is dismissed. If the pipe isn't there, wake the curtain with harmless input on the input
   desktop (a 1 px mouse move and a Ctrl tap; never Enter), then retry for a few seconds.
 - **Relock:** run `rundll32.exe user32.dll,LockWorkStation` in the user's session, with the user's
-  token (`retrieve_users_token(false)` in `misc.cpp`) on `winsta0\default`. Skip it if the session
-  is already locked.
-- **Orphan unlock:** start a timer at unlock time. If `stream_started()` hasn't been called within
-  about 90 s, relock.
+  token for the **original target session** (`WTSQueryUserToken`) on `winsta0\default`.
+  Record `relocked` and retire ownership only after WTS confirms the locked state. Retry up to
+  three times, three seconds apart; on failure retain ownership and record a `failed` event.
+  A later stream-end event can retry. A failed WTS query is unknown, never evidence of success.
+- **Orphan unlock:** give an unlock attempt about 90 s for a stream to start, then relock when
+  an unlock is observed. Preserve an already-active stream when another request arrives.
+- The monitor stops and joins before host state is destroyed during shutdown. Its ownership is
+  in memory; host termination/restart does not provide a persistent relock guarantee.
+- Protocol v2 requires the host and DLL to be updated together. An already-loaded v1 DLL must be
+  unloaded (for example by signing out/rebooting) before v2 can unlock; mismatches fail closed.
 - **State file:** `platf::appdata()/unlock_state.json` holds only non-secret data: `relock`
   (default true), the enrolled account's display name and the last 10 events.
   Each event is `{at, client, outcome, detail}`, where `outcome` is one of `unlocked`, `relocked`,
@@ -239,3 +259,15 @@ Steps:
 
 The live test then needs no change: its client gets the permission and the Remote Monitor stream
 shows real content.
+
+### Security regression checks
+
+- `test_fast_session_unlock_lifecycle` runs on any platform: late unlock after teardown, orphan
+  deadline, existing streams, confirmed cancellation, retained ownership and manual locking.
+- `test_component_session_unlock_windows` exercises real Windows APIs without authenticating an
+  account: credential cancellation vs serialization (including concurrent calls), request-ID
+  matching, successful/failed Windows results, rejection of a fake pipe server, identification-only
+  tokens, bounded stalled reads/writes and safe reuse after I/O cancellation.
+- On the PC, also delay LogonUI beyond 10 seconds, end the stream before the unlock arrives, and
+  force a relock launch failure. Confirm a late unlock is tracked and `relocked` appears only
+  after Windows actually locks. Test enable/disable and normal stream teardown as above.

@@ -35,6 +35,7 @@
   #endif
   #include <windows.h>
 
+// Windows types must precede the LSA declarations.
   #include <ntsecapi.h>
   #include <objbase.h>  // StringFromGUID2
   #include <sddl.h>  // ConvertSidToStringSidW
@@ -43,9 +44,10 @@
 // local includes
   #include "session_unlock.h"
   #include "session_unlock_contract.h"
+  #include "session_unlock_lifecycle.h"
+  #include "session_unlock_pipe.h"
   #include "src/logging.h"
   #include "src/platform/common.h"
-  #include "src/platform/windows/misc.h"
   #include "src/platform/windows/utils.h"
 
 namespace platf::session_unlock {
@@ -59,9 +61,6 @@ namespace platf::session_unlock {
     // How long we let the session turn unlocked after the provider accepts the handoff.
     constexpr auto kUnlockPollTimeout = std::chrono::seconds(10);
     constexpr auto kUnlockPollStep = std::chrono::milliseconds(250);
-
-    // An unlock with no stream behind it (a failed launch, a terminate) relocks after this.
-    constexpr auto kOrphanTimeout = std::chrono::seconds(90);
 
     // The credential providers list, where Windows looks up our CLSID on the lock screen.
     const wchar_t *kCredentialProvidersKey =
@@ -171,8 +170,7 @@ namespace platf::session_unlock {
       if (RegCreateKeyExW(root, subkey.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
         return false;
       }
-      LONG r = RegSetValueExW(key, name, 0, REG_SZ, (const BYTE *) value.c_str(),
-        (DWORD) ((value.size() + 1) * sizeof(wchar_t)));
+      LONG r = RegSetValueExW(key, name, 0, REG_SZ, (const BYTE *) value.c_str(), (DWORD) ((value.size() + 1) * sizeof(wchar_t)));
       RegCloseKey(key);
       return r == ERROR_SUCCESS;
     }
@@ -336,55 +334,6 @@ namespace platf::session_unlock {
       return on;
     }
 
-    // ---- the pipe client ------------------------------------------------------------------------
-
-    // Connect to the provider's pipe and ask it to unlock. Returns the provider's response code, or
-    // "unavailable" if the pipe isn't there (not registered, Hello-only, or LogonUI hasn't loaded
-    // the provider yet).
-    std::string send_unlock_request() {
-      HANDLE pipe = INVALID_HANDLE_VALUE;
-      for (int attempt = 0; attempt < 2; ++attempt) {
-        pipe = CreateFileW(VIBEPOLLO_UNLOCK_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-          OPEN_EXISTING, 0, nullptr);
-        if (pipe != INVALID_HANDLE_VALUE) {
-          break;
-        }
-        if (GetLastError() == ERROR_PIPE_BUSY && WaitNamedPipeW(VIBEPOLLO_UNLOCK_PIPE_NAME, 3000)) {
-          continue;
-        }
-        break;
-      }
-      if (pipe == INVALID_HANDLE_VALUE) {
-        return "unavailable";
-      }
-
-      DWORD mode = PIPE_READMODE_MESSAGE;
-      SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
-
-      std::string request = std::string("{\"v\":") + std::to_string(VIBEPOLLO_UNLOCK_PROTOCOL_VERSION) + ",\"op\":\"unlock\"}";
-      DWORD written = 0;
-      std::string reply;
-      if (WriteFile(pipe, request.data(), (DWORD) request.size(), &written, nullptr)) {
-        char buf[512] = {};
-        DWORD read = 0;
-        if (ReadFile(pipe, buf, sizeof(buf), &read, nullptr) && read > 0) {
-          reply.assign(buf, read);
-        }
-      }
-      CloseHandle(pipe);
-
-      if (reply.find("\"ok\":true") != std::string::npos) {
-        return "ok";
-      }
-      if (reply.find("not-enrolled") != std::string::npos) {
-        return "not-enrolled";
-      }
-      if (reply.empty()) {
-        return "unavailable";
-      }
-      return "failed";
-    }
-
     // LogonUI may only load its providers once the lock-screen curtain is dismissed. Nudge it with
     // harmless input on the input desktop — a 1px mouse move and a Ctrl tap, never Enter — so the
     // provider's pipe comes up. Best-effort: flagged to verify on the PC.
@@ -415,16 +364,17 @@ namespace platf::session_unlock {
 
     // Relock the console session, in the user's own session, the way Win+L would. Mirrors the doc:
     // rundll32.exe user32.dll,LockWorkStation with the user's token on winsta0\default.
-    void lock_session() {
-      HANDLE user_token = retrieve_users_token(false);
-      if (!user_token) {
+    bool lock_session(DWORD session_id) {
+      HANDLE user_token = nullptr;
+      if (!WTSQueryUserToken(session_id, &user_token)) {
         BOOST_LOG(warning) << "session_unlock: no user token; can't relock the session";
-        return;
+        return false;
       }
 
       wchar_t system_dir[MAX_PATH] = {};
       GetSystemDirectoryW(system_dir, MAX_PATH);
-      std::wstring cmd = std::wstring(system_dir) + L"\\rundll32.exe user32.dll,LockWorkStation";
+      std::wstring executable = std::wstring(system_dir) + L"\\rundll32.exe";
+      std::wstring cmd = L"\"" + executable + L"\" user32.dll,LockWorkStation";
 
       std::wstring desktop = L"winsta0\\default";
       STARTUPINFOW si = {};
@@ -435,24 +385,29 @@ namespace platf::session_unlock {
       mutable_cmd.push_back(L'\0');
 
       void *env = nullptr;
-      if (CreateProcessAsUserW(user_token, nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE,
-            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, env, nullptr, &si, &pi)) {
+      bool launched = CreateProcessAsUserW(user_token, executable.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, env, nullptr, &si, &pi) == TRUE;
+      if (launched) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
       } else {
         BOOST_LOG(warning) << "session_unlock: LockWorkStation launch failed (" << GetLastError() << ')';
       }
       CloseHandle(user_token);
+      return launched;
     }
 
     // ---- module state ---------------------------------------------------------------------------
 
     std::mutex g_mutex;  // serialises before_stream and guards the lifecycle flags below
-    bool g_unlocked_by_us = false;  // this host unlocked the current session and hasn't relocked it
-    bool g_stream_active = false;  // a stream session is live, so the orphan timer must not relock
-    std::uint64_t g_unlock_generation = 0;  // bumped on each unlock, so a stale orphan timer bows out
+    lifecycle_t g_lifecycle;
+    DWORD g_session_id = 0xFFFFFFFF;
+    bool g_monitor_running = false;
+    std::string g_pending_client;
+    std::string g_request_id;
 
     std::mutex g_state_mutex;  // guards the on-disk state file
+    // Destroyed before the state and mutexes above: stop/join the monitor on host shutdown.
+    std::jthread g_monitor;
 
     std::filesystem::path state_path() {
       return platf::appdata() / "unlock_state.json";
@@ -495,8 +450,7 @@ namespace platf::session_unlock {
       std::lock_guard lock(g_state_mutex);
       json state = load_state();
       json ev = {
-        {"at", (std::int64_t) std::chrono::duration_cast<std::chrono::seconds>(
-                 std::chrono::system_clock::now().time_since_epoch()).count()},
+        {"at", (std::int64_t) std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count()},
         {"client", client},
         {"outcome", outcome},
         {"detail", detail},
@@ -518,106 +472,169 @@ namespace platf::session_unlock {
       return provider_registered() && !read_lsa_secret(VIBEPOLLO_UNLOCK_SID_KEY).empty();
     }
 
-    // Wait, up to kUnlockPollTimeout, for the session to turn unlocked. True if it did.
-    bool wait_for_unlock() {
-      auto deadline = std::chrono::steady_clock::now() + kUnlockPollTimeout;
-      while (std::chrono::steady_clock::now() < deadline) {
-        if (!is_user_session_locked()) {
-          return true;
+    enum class lock_state {
+      unknown,
+      locked,
+      unlocked
+    };
+
+    // Never treat a failed WTS query as evidence that an unlock or relock succeeded.
+    lock_state session_state(DWORD session_id) {
+      LPWSTR buffer = nullptr;
+      DWORD size = 0;
+      lock_state state = lock_state::unknown;
+      if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session_id, WTSSessionInfoEx, &buffer, &size) && size >= sizeof(WTSINFOEXW)) {
+        auto *info = reinterpret_cast<WTSINFOEXW *>(buffer);
+        if (info->Level == 1) {
+          if (info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK) {
+            state = lock_state::locked;
+          } else if (info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_UNLOCK) {
+            state = lock_state::unlocked;
+          }
         }
-        std::this_thread::sleep_for(kUnlockPollStep);
       }
-      return !is_user_session_locked();
+      if (buffer) {
+        WTSFreeMemory(buffer);
+      }
+      return state;
     }
 
-    // Arm the orphan timer: if no stream has started within kOrphanTimeout, relock what we unlocked.
-    void arm_orphan_timer(std::uint64_t generation) {
-      std::thread([generation]() {
-        std::this_thread::sleep_for(kOrphanTimeout);
-        std::lock_guard lock(g_mutex);
-        if (g_unlock_generation != generation || g_stream_active || !g_unlocked_by_us) {
-          return;  // a newer unlock, or a stream is live, or we already relocked
+    void observed_unlock() {
+      g_lifecycle.unlocked();
+      record_event(g_pending_client, "unlocked", "");
+    }
+
+    // One monitor owns both ambiguous submissions and confirmed relocking. I/O is bounded;
+    // ownership is retained on a relock failure, so a later lifecycle event can retry it.
+    void start_monitor() {
+      if (g_monitor_running || !g_lifecycle.monitoring()) {
+        return;
+      }
+      g_monitor_running = true;
+      g_monitor = std::jthread([](std::stop_token stop) {
+        unsigned attempts = 0;
+        auto next_attempt = std::chrono::steady_clock::now();
+        auto next_cancel = next_attempt;
+        bool relock_requested = false;
+        while (!stop.stop_requested()) {
+          std::this_thread::sleep_for(kUnlockPollStep);
+          std::lock_guard lock(g_mutex);
+          auto now = std::chrono::steady_clock::now();
+          auto state = session_state(g_session_id);
+          if (state == lock_state::unlocked && g_lifecycle.pending) {
+            observed_unlock();
+          }
+          if (g_lifecycle.pending && now >= next_cancel) {
+            auto result = pipe_transport::request("cancel", g_session_id, g_request_id);
+            if (result.code == "cancelled" || result.code == "rejected") {
+              g_lifecycle.cancelled();
+              record_event(g_pending_client, result.code == "rejected" ? "rejected" : "failed", result.code == "rejected" ? "Windows rejected the credential" : "unlock cancelled after timeout");
+            }
+            // "pending", a missing pipe, or a lost response cannot prove cancellation.
+            next_cancel = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+          }
+          // Re-read after cancellation: Windows may have unlocked while the pipe was in flight.
+          state = session_state(g_session_id);
+          if (state == lock_state::unlocked && g_lifecycle.pending) {
+            observed_unlock();
+          }
+          if (state == lock_state::locked && g_lifecycle.owned) {
+            g_lifecycle.locked();
+            if (relock_requested) {
+              record_event("", "relocked", "confirmed by Windows");
+            }
+          }
+          if (g_lifecycle.needs_relock(now)) {
+            if (!relock_enabled()) {
+              g_lifecycle.owned = false;
+            } else if (now >= next_attempt) {
+              if (attempts == 3) {
+                record_event("", "failed", "Windows did not confirm relock after 3 attempts");
+                BOOST_LOG(error) << "session_unlock: relock failed; session may still be unlocked";
+                g_monitor_running = false;
+                return;
+              }
+              ++attempts;
+              relock_requested = true;
+              if (state != lock_state::unknown) {
+                lock_session(g_session_id);
+              }
+              next_attempt = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            }
+          }
+          if (!g_lifecycle.monitoring()) {
+            g_monitor_running = false;
+            return;
+          }
         }
-        g_unlocked_by_us = false;
-        if (relock_enabled() && !is_user_session_locked()) {
-          BOOST_LOG(info) << "session_unlock: no stream within "
-                          << std::chrono::duration_cast<std::chrono::seconds>(kOrphanTimeout).count()
-                          << "s of an unlock; relocking";
-          lock_session();
-          record_event("", "relocked", "orphan");
-        }
-      }).detach();
+      });
     }
   }  // namespace
 
   void before_stream(const std::string &client_name) {
     std::lock_guard lock(g_mutex);
-
     if (!feature_enabled()) {
       return;
     }
-    // Nothing to do if the session is already unlocked (and nothing is relocked later).
-    if (!is_user_session_locked()) {
+    // Never send another credential while the previous submission may still take effect.
+    if (g_lifecycle.pending) {
+      start_monitor();
+      return;
+    }
+    DWORD session_id = WTSGetActiveConsoleSessionId();
+    if (session_id == 0xFFFFFFFF || session_state(session_id) != lock_state::locked) {
       return;
     }
     if (hello_only_enabled()) {
-      BOOST_LOG(info) << "session_unlock: Hello-only sign-in is on; the stream starts on the lock screen";
       record_event(client_name, "hello_only", "");
       return;
     }
-
-    BOOST_LOG(info) << "session_unlock: unlocking the session for '" << client_name << '\'';
-    std::string result = send_unlock_request();
-    if (result == "unavailable") {
-      // LogonUI may not have loaded the providers yet: nudge the curtain and retry briefly.
+    // Do not move an outstanding relock obligation to a different user's session.
+    if (g_lifecycle.owned && g_session_id != session_id) {
+      return;
+    }
+    g_session_id = session_id;
+    g_pending_client = client_name;
+    GUID request_id;
+    wchar_t request_id_string[40] = {};
+    if (FAILED(CoCreateGuid(&request_id)) || !StringFromGUID2(request_id, request_id_string, 40)) {
+      record_event(client_name, "failed", "could not generate request ID");
+      return;
+    }
+    g_request_id = wide_to_utf8(request_id_string);
+    auto result = pipe_transport::request("unlock", session_id, g_request_id);
+    if (result.code == "unavailable" && !result.may_unlock) {
       wake_lock_screen();
       std::this_thread::sleep_for(std::chrono::milliseconds(750));
-      result = send_unlock_request();
+      result = pipe_transport::request("unlock", session_id, g_request_id);
     }
-
-    if (result == "ok") {
-      if (wait_for_unlock()) {
-        g_unlocked_by_us = true;
-        g_stream_active = false;
-        arm_orphan_timer(++g_unlock_generation);
-        BOOST_LOG(info) << "session_unlock: session unlocked for '" << client_name << '\'';
-        record_event(client_name, "unlocked", "");
-      } else {
-        BOOST_LOG(warning) << "session_unlock: the provider accepted the unlock but the session stayed locked (wrong password?)";
-        record_event(client_name, "rejected", "");
+    if (result.may_unlock) {
+      g_lifecycle.requested(std::chrono::steady_clock::now());
+      auto deadline = std::chrono::steady_clock::now() + kUnlockPollTimeout;
+      while (std::chrono::steady_clock::now() < deadline) {
+        if (session_state(session_id) == lock_state::unlocked) {
+          observed_unlock();
+          break;
+        }
+        std::this_thread::sleep_for(kUnlockPollStep);
       }
-    } else if (result == "not-enrolled") {
-      record_event(client_name, "unavailable", "not-enrolled");
-    } else if (result == "unavailable") {
-      record_event(client_name, "unavailable", "");
+      // A timeout is ambiguous, not a rejected password. Cancel or keep watching even after
+      // stream teardown, until Windows unlocks or the provider proves it cannot still do so.
+      start_monitor();
     } else {
-      record_event(client_name, "failed", "");
+      record_event(client_name, result.code == "not-enrolled" || result.code == "unavailable" ? "unavailable" : "failed", result.code);
     }
   }
 
   void stream_started() {
     std::lock_guard lock(g_mutex);
-    g_stream_active = true;  // a real stream is up: the orphan timer must not relock
+    g_lifecycle.started();
   }
 
   void stream_ended() {
     std::lock_guard lock(g_mutex);
-    g_stream_active = false;
-    if (!g_unlocked_by_us) {
-      return;  // we didn't unlock it, so we don't relock it
-    }
-    ++g_unlock_generation;  // retire any pending orphan timer
-    g_unlocked_by_us = false;
-
-    if (!relock_enabled()) {
-      return;
-    }
-    if (is_user_session_locked()) {
-      return;  // the user relocked it themselves (Win+L); leave it
-    }
-    BOOST_LOG(info) << "session_unlock: last stream ended; relocking the session";
-    lock_session();
-    record_event("", "relocked", "");
+    g_lifecycle.ended();
+    start_monitor();
   }
 
   nlohmann::json status() {

@@ -41,10 +41,17 @@
 #define VIBEPOLLO_UNLOCK_SID_KEY L"L$VibepolloUnlockSid"
 
 // The wire protocol, one request and one response, both UTF-8 JSON:
-//   host → provider:  {"v":1,"op":"unlock"}
+//   host → provider:  {"v":2,"op":"unlock","id":"{request GUID}"}
 //   provider → host:  {"ok":true}  or  {"ok":false,"code":"<code>"}
 // with code one of denied (the caller isn't SYSTEM), bad-version, bad-request, not-enrolled (no
 // account stored) and busy (an unlock is already armed, or LogonUI can't be told to submit).
 // "ok" means the credential was armed and LogonUI asked to submit it, not that the password was
 // right: the host learns that from the session turning unlocked.
-#define VIBEPOLLO_UNLOCK_PROTOCOL_VERSION 1
+// Every request includes a fresh GUID id. Cancel must name the same accepted request;
+// a new provider instance must never confirm cancellation of an unknown id.
+// v2 adds op "cancel": "cancelled" proves that the credential was disarmed before
+// serialization; "rejected" confirms a failed Windows result. "pending" means Windows may
+// still unlock. Lost replies are ambiguous too.
+// The host must retain responsibility for a pending unlock until it observes the WTS transition
+// or receives a confirmed cancellation. A successful submission must never acknowledge cancel.
+#define VIBEPOLLO_UNLOCK_PROTOCOL_VERSION 2

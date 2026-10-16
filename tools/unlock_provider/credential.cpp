@@ -73,6 +73,24 @@ void UnlockCredential::Disarm() {
   LeaveCriticalSection(&_lock);
 }
 
+bool UnlockCredential::Cancel(const std::string &request_id) {
+  EnterCriticalSection(&_lock);
+  bool cancelled = _requestId == request_id && !_submissionPending;
+  if (cancelled) {
+    ++_armGen;
+    ClearLocked();
+  }
+  LeaveCriticalSection(&_lock);
+  return cancelled;
+}
+
+bool UnlockCredential::WasRejected() {
+  EnterCriticalSection(&_lock);
+  bool rejected = _rejected;
+  LeaveCriticalSection(&_lock);
+  return rejected;
+}
+
 void UnlockCredential::SetUserSid(PCWSTR sid) {
   EnterCriticalSection(&_lock);
   FreeString(_userSid);
@@ -101,9 +119,9 @@ void UnlockCredential::Watchdog(LONG gen) {
   LeaveCriticalSection(&_lock);
 }
 
-bool UnlockCredential::Arm(PCWSTR account, PCWSTR password) {
+bool UnlockCredential::Arm(PCWSTR account, PCWSTR password, const std::string &request_id) {
   EnterCriticalSection(&_lock);
-  if (_armed) {
+  if (_armed || _submissionPending) {
     LeaveCriticalSection(&_lock);
     return false;
   }
@@ -115,6 +133,8 @@ bool UnlockCredential::Arm(PCWSTR account, PCWSTR password) {
     LeaveCriticalSection(&_lock);
     return false;
   }
+  _rejected = false;
+  _requestId = request_id;
   _armed = true;
   LONG gen = ++_armGen;
   LeaveCriticalSection(&_lock);
@@ -133,11 +153,13 @@ bool UnlockCredential::Arm(PCWSTR account, PCWSTR password) {
 }
 
 // IUnknown
-IFACEMETHODIMP_(ULONG) UnlockCredential::AddRef() {
+IFACEMETHODIMP_(ULONG)
+UnlockCredential::AddRef() {
   return InterlockedIncrement(&_cRef);
 }
 
-IFACEMETHODIMP_(ULONG) UnlockCredential::Release() {
+IFACEMETHODIMP_(ULONG)
+UnlockCredential::Release() {
   LONG n = InterlockedDecrement(&_cRef);
   if (n == 0) {
     delete this;
@@ -250,7 +272,7 @@ IFACEMETHODIMP UnlockCredential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIAL
   if (SUCCEEDED(hr)) {
     hr = ProtectIfNecessaryAndCopyPassword(_password, _cpus, &protectedPassword);
   }
-  LeaveCriticalSection(&_lock);
+  // Keep cancellation excluded until serialization is committed or fails.
 
   KERB_INTERACTIVE_UNLOCK_LOGON kiul;
   if (SUCCEEDED(hr)) {
@@ -273,6 +295,7 @@ IFACEMETHODIMP UnlockCredential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIAL
     pcpcs->clsidCredentialProvider = CLSID_VibepolloUnlock;
     pcpcs->rgbSerialization = rgb;
     pcpcs->cbSerialization = cb;
+    _submissionPending = true;
     *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
   } else {
     // Nothing to submit: say so, so LogonUI doesn't act on an uninitialised response. S_OK keeps
@@ -289,18 +312,27 @@ IFACEMETHODIMP UnlockCredential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIAL
   FreeString(user);
   FreeSecret(protectedPassword);
   // Spent, win or lose: one request never submits twice.
-  ClearCredentials();
+  ClearLocked();
+  LeaveCriticalSection(&_lock);
   return hr;
 }
 
-IFACEMETHODIMP UnlockCredential::ReportResult(NTSTATUS, NTSTATUS, PWSTR *ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON *pcpsiOptionalStatusIcon) {
+IFACEMETHODIMP UnlockCredential::ReportResult(NTSTATUS status, NTSTATUS, PWSTR *ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON *pcpsiOptionalStatusIcon) {
   if (ppwszOptionalStatusText) {
     *ppwszOptionalStatusText = nullptr;
   }
   if (pcpsiOptionalStatusIcon) {
     *pcpsiOptionalStatusIcon = CPSI_NONE;
   }
-  ClearCredentials();
+  EnterCriticalSection(&_lock);
+  // A successful report may precede the host observing the WTS transition. Never acknowledge
+  // cancellation in that window. A failed report proves the submitted credential is spent.
+  if (status < 0) {
+    _submissionPending = false;
+    _rejected = true;
+  }
+  ClearLocked();
+  LeaveCriticalSection(&_lock);
   return S_OK;
 }
 

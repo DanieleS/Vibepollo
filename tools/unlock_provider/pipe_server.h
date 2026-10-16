@@ -6,6 +6,7 @@
 #include "common.h"
 
 #include <functional>
+#include <string>
 
 // What the provider makes of a well-formed request from SYSTEM. Transport-level outcomes
 // (denied, bad-request, bad-version) are decided by the server itself.
@@ -13,12 +14,15 @@ enum class UnlockOutcome {
   ok,
   busy,
   not_enrolled,
+  cancelled,
+  pending,
+  rejected,
 };
 
 class PipeServer {
 public:
   // Runs on the pipe thread: reads the stored account, arms the credential, wakes LogonUI.
-  using Handler = std::function<UnlockOutcome()>;
+  using Handler = std::function<UnlockOutcome(bool cancel, const std::string &request_id)>;
 
   PipeServer() = default;
   ~PipeServer();

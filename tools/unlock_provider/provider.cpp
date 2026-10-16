@@ -32,11 +32,13 @@ UnlockProvider::~UnlockProvider() {
 }
 
 // IUnknown
-IFACEMETHODIMP_(ULONG) UnlockProvider::AddRef() {
+IFACEMETHODIMP_(ULONG)
+UnlockProvider::AddRef() {
   return InterlockedIncrement(&_cRef);
 }
 
-IFACEMETHODIMP_(ULONG) UnlockProvider::Release() {
+IFACEMETHODIMP_(ULONG)
+UnlockProvider::Release() {
   LONG n = InterlockedDecrement(&_cRef);
   if (n == 0) {
     delete this;
@@ -81,8 +83,14 @@ IFACEMETHODIMP UnlockProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENAR
     return S_OK;
   }
   _cred->SetUserSid(sid.c_str());
-  _pipe.Start([this]() {
-    return OnUnlock();
+  _pipe.Start([this](bool cancel, const std::string &request_id) {
+    if (cancel) {
+      if (!_cred->Cancel(request_id)) {
+        return UnlockOutcome::pending;
+      }
+      return _cred->WasRejected() ? UnlockOutcome::rejected : UnlockOutcome::cancelled;
+    }
+    return OnUnlock(request_id);
   });
   return S_OK;
 }
@@ -176,7 +184,7 @@ IFACEMETHODIMP UnlockProvider::GetCredentialAt(DWORD dwIndex, ICredentialProvide
   return _cred->QueryInterface(__uuidof(ICredentialProviderCredential), (void **) ppcpc);
 }
 
-UnlockOutcome UnlockProvider::OnUnlock() {
+UnlockOutcome UnlockProvider::OnUnlock(const std::string &request_id) {
   if (!_cred) {
     return UnlockOutcome::busy;
   }
@@ -198,7 +206,7 @@ UnlockOutcome UnlockProvider::OnUnlock() {
   std::wstring password = ReadLsaSecret(VIBEPOLLO_UNLOCK_PASSWORD_KEY);
   UnlockOutcome outcome = UnlockOutcome::not_enrolled;
   if (!account.empty() && !password.empty()) {
-    outcome = _cred->Arm(account.c_str(), password.c_str()) ? UnlockOutcome::ok : UnlockOutcome::busy;
+    outcome = _cred->Arm(account.c_str(), password.c_str(), request_id) ? UnlockOutcome::ok : UnlockOutcome::busy;
   }
   WipeString(password);
 

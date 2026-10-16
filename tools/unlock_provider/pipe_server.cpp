@@ -33,8 +33,7 @@ namespace {
     }
 
     auto sd = (PSECURITY_DESCRIPTOR) LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
-    if (!sd || !InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION) ||
-        !SetSecurityDescriptorDacl(sd, TRUE, acl, FALSE)) {
+    if (!sd || !InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION) || !SetSecurityDescriptorDacl(sd, TRUE, acl, FALSE)) {
       if (sd) {
         LocalFree(sd);
       }
@@ -124,6 +123,33 @@ namespace {
     }
     std::string expected = std::string(value) + "\"";
     return json.compare(q + 1, expected.size(), expected) == 0;
+  }
+
+  bool JsonRequestId(const std::string &json, std::string &id) {
+    size_t key = json.find("\"id\"");
+    if (key == std::string::npos) {
+      return false;
+    }
+    size_t colon = json.find(':', key + 4);
+    size_t quote = colon == std::string::npos ? colon : json.find('"', colon + 1);
+    if (quote == std::string::npos || json.size() < quote + 40 || json[quote + 39] != '"') {
+      return false;
+    }
+    id = json.substr(quote + 1, 38);
+    if (id.front() != '{' || id.back() != '}') {
+      return false;
+    }
+    for (size_t i = 1; i < 37; ++i) {
+      if (i == 9 || i == 14 || i == 19 || i == 24) {
+        if (id[i] != '-') {
+          return false;
+        }
+      } else if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f') ||
+                   (id[i] >= 'A' && id[i] <= 'F'))) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // Reads one message, honouring Stop and giving the client a few seconds. False on stop or error.
@@ -295,7 +321,9 @@ void PipeServer::ServeOne(HANDLE pipe, HANDLE ioEvent) {
   }
 
   int v = 0;
-  if (!JsonInt(request, "v", v) || !JsonHasString(request, "op", "unlock")) {
+  std::string request_id;
+  bool cancel = JsonHasString(request, "op", "cancel");
+  if (!JsonInt(request, "v", v) || !JsonRequestId(request, request_id) || (!cancel && !JsonHasString(request, "op", "unlock"))) {
     WriteMsg(pipe, _stopEvent, ioEvent, "{\"ok\":false,\"code\":\"bad-request\"}");
     return;
   }
@@ -304,12 +332,19 @@ void PipeServer::ServeOne(HANDLE pipe, HANDLE ioEvent) {
     return;
   }
 
-  UnlockOutcome outcome = _handler ? _handler() : UnlockOutcome::busy;
+  UnlockOutcome outcome = _handler ? _handler(cancel, request_id) : UnlockOutcome::busy;
   const char *reply = "{\"ok\":false,\"code\":\"busy\"}";
   if (outcome == UnlockOutcome::ok) {
     reply = "{\"ok\":true}";
   } else if (outcome == UnlockOutcome::not_enrolled) {
     reply = "{\"ok\":false,\"code\":\"not-enrolled\"}";
+  }
+  if (outcome == UnlockOutcome::cancelled) {
+    reply = "{\"ok\":false,\"code\":\"cancelled\"}";
+  } else if (outcome == UnlockOutcome::rejected) {
+    reply = "{\"ok\":false,\"code\":\"rejected\"}";
+  } else if (outcome == UnlockOutcome::pending) {
+    reply = "{\"ok\":false,\"code\":\"pending\"}";
   }
   WriteMsg(pipe, _stopEvent, ioEvent, reply);
 }
