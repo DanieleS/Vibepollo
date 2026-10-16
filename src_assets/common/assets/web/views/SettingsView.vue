@@ -20,6 +20,7 @@ import DisplayRecoverySettings from '@/components/settings/DisplayRecoverySettin
 import GlobalPrepCommands from '@/components/settings/GlobalPrepCommands.vue';
 import ServerCommands from '@/components/settings/ServerCommands.vue';
 import SettingsIntegrationPath from '@/components/settings/SettingsIntegrationPath.vue';
+import UnlockSettings from '@/components/settings/UnlockSettings.vue';
 import {
   SettingRow,
   ConfirmDialog,
@@ -1374,6 +1375,15 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload));
               >
                 {{ t('ui.settings.windows_display.dummy_plug_description') }}
               </InlineAlert>
+              <template v-if="group.id === 'network_security' && isWindowsHost && !isSearching">
+                <div class="settings-section__heading">
+                  <h4>{{ t('ui.settings.unlock.title') }}</h4>
+                  <p>{{ t('ui.settings.unlock.description') }}</p>
+                </div>
+                <div class="settings-group vs-settings-group">
+                  <UnlockSettings />
+                </div>
+              </template>
               <div
                 v-if="
                   activeCategory === 'everyday' &&

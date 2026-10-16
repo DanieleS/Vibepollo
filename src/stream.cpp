@@ -78,6 +78,7 @@ extern "C" {
   #include "platform/windows/ipc/misc_utils.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/present_timing.h"
+  #include "platform/windows/session_unlock.h"
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/virtual_display_cleanup.h"
 #elif defined(__linux__)
@@ -3786,6 +3787,12 @@ namespace stream {
       [[maybe_unused]] const bool last_frame_limiter_session =
         !session.secondary_game_client && !session.config.monitor.input_only && --frame_limiter_sessions == 0;
       const bool last_rtsp_session = --running_sessions == 0;
+#ifdef _WIN32
+      if (last_rtsp_session) {
+        // Relock the session if this host unlocked it for the stream.
+        platf::session_unlock::stream_ended();
+      }
+#endif
       host_stats::rtsp_session_ended();
       bool finalized_shared_runtime = false;
 #ifdef _WIN32
@@ -3958,6 +3965,10 @@ namespace stream {
       host_stats::rtsp_session_started();
       if (first_rtsp_session || first_frame_limiter_session) {
         if (first_rtsp_session) {
+#ifdef _WIN32
+          // A real stream is up: stand down the orphan relock timer armed at unlock.
+          platf::session_unlock::stream_started();
+#endif
           if (!webrtc_stream::has_active_or_pending_sessions()) {
             webrtc_stream::set_rtsp_capture_config(session.config.monitor, session.config.audio);
           }

@@ -830,6 +830,33 @@ jobs:
           echo "::remove-matcher owner=gcc::"
           ccache -s
 
+      # The unlock credential provider is loaded by LogonUI from System32's search path, where the
+      # mingw toolchain's runtime DLLs don't exist. A dependency on one of them would make LogonUI
+      # fail to load it, so fail the build if it imports anything outside Windows' own libraries.
+      - name: Check VibepolloUnlock.dll imports
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          dll=build/tools/VibepolloUnlock.dll
+          if [[ ! -f "$dll" ]]; then
+            echo "::error::$dll was not built"
+            exit 1
+          fi
+          # Allowed: the Windows libraries the provider links, plus the system UCRT forwarders.
+          allowed='^(KERNEL32|ADVAPI32|OLE32|SECUR32|API-MS-WIN-CRT-.*)\.DLL$'
+          bad=0
+          while read -r name; do
+            upper=$(echo "$name" | tr '[:lower:]' '[:upper:]')
+            if [[ ! "$upper" =~ $allowed ]]; then
+              echo "::error::VibepolloUnlock.dll imports a non-system DLL: $name"
+              bad=1
+            fi
+          done < <(objdump -p "$dll" | sed -n 's/^\s*DLL Name:\s*//p')
+          if [[ "$bad" -ne 0 ]]; then
+            exit 1
+          fi
+          echo "VibepolloUnlock.dll imports only system libraries."
+
       # Saved from master (shared with every PR and tag) and from PRs (reused by their reruns and
       # fix commits). Tag caches are not saved: no other ref could restore them.
       - name: Save compiler cache

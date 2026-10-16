@@ -2212,6 +2212,7 @@
     "clipboard_read": "Read clipboard",
     "server_cmd": "Run server commands",
     "telemetry_read": "Receive game telemetry",
+    "unlock": "Unlock this PC",
     "input_controller": "Controller input",
     "input_touch": "Touch input",
     "input_pen": "Pen input",

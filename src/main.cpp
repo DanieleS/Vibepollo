@@ -54,6 +54,7 @@
   #include "src/platform/windows/rtss_integration.h"
   #include "src/platform/windows/startup_encoder_probe_policy.h"
   #include "src/platform/windows/scry_integration.h"
+  #include "src/platform/windows/session_unlock.h"
   #include "src/platform/windows/virtual_display.h"
   #include "src/platform/windows/virtual_display_cleanup.h"
 #elif defined(__linux__)
@@ -224,6 +225,10 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
 #ifdef _WIN32
   {"restore-nvprefs-undo"sv, [](const char *name, int argc, char **argv) {
      return args::restore_nvprefs_undo();
+   }},
+  {"unlock-cleanup"sv, [](const char *name, int argc, char **argv) {
+     // Run by the uninstaller: unregister the unlock credential provider and wipe its secrets.
+     return platf::session_unlock::cleanup_command();
    }},
 #endif
 };

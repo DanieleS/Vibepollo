@@ -269,6 +269,9 @@ set(PLATFORM_TARGET_FILES
         ${SUNSHINE_WINDOWS_VDISPLAY_SOURCES}
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utils.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/session_unlock.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/session_unlock_contract.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/session_unlock.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/sudovda/sudovda-ioctl.h"
         "${CMAKE_SOURCE_DIR}/third-party/sudovda/sudovda.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/frame_limiter.h"
@@ -346,6 +349,9 @@ list(PREPEND PLATFORM_LIBRARIES
         synchronization.lib
         Windowscodecs
         userenv
+        user32
+        secur32
+        wtsapi32
         ws2_32
         wsock32
 )

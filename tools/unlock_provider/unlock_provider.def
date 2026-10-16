@@ -1,0 +1,4 @@
+LIBRARY VibepolloUnlock
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE

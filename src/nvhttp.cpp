@@ -80,6 +80,7 @@
   #include "platform/windows/display_helper_request_helpers.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/scry_integration.h"
+  #include "platform/windows/session_unlock.h"
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/virtual_display_cleanup.h"
 #elif defined(__linux__)
@@ -4432,6 +4433,14 @@ namespace nvhttp {
         return;
       }
 
+#ifdef _WIN32
+      // Unlock a locked session before anything launches, if this client may. Ahead of the Remote
+      // Monitor branch, so the live test is covered too. The stream goes ahead either way.
+      if (has_client_perm(verified_client, PERM::unlock) && has_client_perm(verified_client, PERM::_allow_view)) {
+        platf::session_unlock::before_stream(verified_client->name);
+      }
+#endif
+
       auto appid_str = get_arg(args, "appid", "0");
       auto appuuid_str = get_arg(args, "appuuid", "");
       // Synthetic controls are host actions, never configured applications.
@@ -5407,6 +5416,13 @@ namespace nvhttp {
 
       return;
     }
+
+#ifdef _WIN32
+    // As in launch(): unlock a locked session on resume for a client that may.
+    if (has_client_perm(verified_client, PERM::unlock)) {
+      platf::session_unlock::before_stream(verified_client->name);
+    }
+#endif
 
     // proc_t::terminate() leaves the app id at -1 and nothing resets it to 0, so any
     // non-positive id means nothing is running. Comparing against 0 alone would let a
